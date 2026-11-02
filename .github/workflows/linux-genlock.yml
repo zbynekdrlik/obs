@@ -177,6 +177,10 @@ jobs:
   linux-genlock-build:
     name: Full Linux genlock bundle (OBS + DistroAV, #460)
     needs: [linux-distroav-compile-check]
+    # obs#1 (camera-box, 2026-11-02): imag is out of the fleet but used in summer; setup-imag.sh,
+    # deploy-genlock-fleet.sh and manifest-autosource still read obs-genlock-linux-x86_64. Build it
+    # on dispatch only, not on every push.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
