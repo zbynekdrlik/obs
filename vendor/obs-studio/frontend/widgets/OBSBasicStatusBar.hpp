@@ -1,0 +1,186 @@
+#pragma once
+
+#include "GenlockRecentEvents.hpp"
+#include "StatusBarWidget.hpp"
+
+#include <obs.hpp>
+
+#include <QElapsedTimer>
+#include <QPointer>
+#include <QStatusBar>
+
+#include <cstdint>
+#include <deque>
+#include <map>
+#include <string>
+#include <utility>
+
+class QTimer;
+class QLabel;
+class GenlockJxsWidget;
+class QNetworkAccessManager;
+class QNetworkReply;
+
+class OBSBasicStatusBar : public QStatusBar {
+	Q_OBJECT
+
+private:
+	StatusBarWidget *statusWidget = nullptr;
+
+	OBSWeakOutputAutoRelease streamOutput;
+	std::vector<OBSSignal> streamSigs;
+	OBSWeakOutputAutoRelease recordOutput;
+	bool active = false;
+	bool overloadedNotify = true;
+	bool streamPauseIconToggle = false;
+	bool disconnected = false;
+	bool firstCongestionUpdate = false;
+
+	std::vector<float> congestionArray;
+
+	int retries = 0;
+	int totalStreamSeconds = 0;
+	int totalRecordSeconds = 0;
+
+	int reconnectTimeout = 0;
+
+	int delaySecTotal = 0;
+	int delaySecStarting = 0;
+	int delaySecStopping = 0;
+
+	int startSkippedFrameCount = 0;
+	int startTotalFrameCount = 0;
+	int lastSkippedFrameCount = 0;
+
+	int seconds = 0;
+	uint64_t lastBytesSent = 0;
+	uint64_t lastBytesSentTime = 0;
+
+	QPixmap excellentPixmap;
+	QPixmap goodPixmap;
+	QPixmap mediocrePixmap;
+	QPixmap badPixmap;
+	QPixmap disconnectedPixmap;
+	QPixmap inactivePixmap;
+
+	QPixmap recordingActivePixmap;
+	QPixmap recordingPausePixmap;
+	QPixmap recordingPauseInactivePixmap;
+	QPixmap recordingInactivePixmap;
+	QPixmap streamingActivePixmap;
+	QPixmap streamingInactivePixmap;
+
+	float lastCongestion = 0.0f;
+
+	QPointer<QTimer> refreshTimer;
+	QPointer<QTimer> messageTimer;
+
+	/* camera-box #1298: the in-OBS GENLOCK lock indicator. A permanent statusbar label
+	 * driven by an always-on 1 Hz timer (NOT the stream-only refreshTimer) plus an async
+	 * dantesync clock poll. genlockClock is a monotonic reference started in the ctor; the
+	 * recent-event window and the clock-staleness check are both measured against it. */
+	QLabel *genlockLabel = nullptr;
+	QPointer<QTimer> genlockTimer;
+	/* camera-box issue 1387: the JPEG XS indicator beside the LOCK label (its own TU + 1 Hz timer). */
+	GenlockJxsWidget *jxsWidget = nullptr;
+	QNetworkAccessManager *genlockClockNam = nullptr;
+	QElapsedTimer genlockClock;
+	/* cached dantesync clock facet (written by the async reply, read by UpdateGenlock) */
+	bool genlockClockLocked = false;
+	bool genlockClockNtpFailed = false;
+	/* #1299 Part 4: the slew the disciplined clock reports it applies (f_ptp servo + f_phase integral,
+	 * ppm) — report-only qpc_expected_ppm telemetry (#1357: it no longer feeds the qpc_drift verdict,
+	 * the wall STEP does). Cached by the async :8898 reply, read by UpdateGenlockLabel. */
+	double genlockClockFptpPpm = 0.0;
+	double genlockClockFphasePpm = 0.0;
+	qint64 genlockClockLastOkMs = -1; /* monotonic ms of the last successful :8898 poll; -1 = never */
+	/* issue 1302: the recent_event state -- each input's phase-event baseline + the last tick that saw
+	 * a NEW event (relock / late-hold / backward-step of a connected, non-idle input) */
+	GenlockRecentEvents genlockRecentEvents;
+	/* #1299 Part 4 + #1357: a ring of (monotonic ms, SIGNED cumulative drift ms) samples over
+	 * GENLOCK_QPC_WINDOW_S. The qpc_drift verdict keys on the largest single-sample wall STEP in it; the
+	 * windowed RATE it also yields is report-only telemetry (never the unbounded cumulative offset). */
+	std::deque<std::pair<qint64, int64_t>> genlockQpcHistory;
+	/* camera-box issue 1372: monotonic ms of each wall step booked (re-based out of genlockQpcHistory)
+	 * within GENLOCK_QPC_WINDOW_S -- a second one in the window is a step storm and stays DEGRADED. */
+	std::deque<qint64> genlockQpcBookedSteps;
+	/* camera-box issue 1372 part D: (monotonic ms, wall-minus-media offset us) samples the widget takes
+	 * itself each tick, over GENLOCK_MEDIA_CLOCK_WINDOW_S. The media-clock term keys on their RATE (wall
+	 * steps left out): since part A the media clock follows the disciplined wall on every box. */
+	std::deque<std::pair<qint64, int64_t>> genlockMediaClockHistory;
+	/* #1341 + issue 1302: per-input received-frame rings + each input's class (UNCLASSIFIED / LIVE /
+	 * IDLE), ticked by genlock_idle_classify_tick (GenlockRecentEvents.cpp). Only a LIVE input is
+	 * graded; an input no longer connected is forgotten each tick so the state stays bounded. */
+	GenlockIdleClassifier genlockIdle;
+	/* genlock-lock: log-on-change de-dup */
+	int genlockLastLoggedState = -1;
+	int genlockLastLoggedReason = -1;
+	/* camera-box #1299: the machine-readable genlock-lock-json: line is emitted on every
+	 * state/reason change AND every GENLOCK_JSON_HEARTBEAT_TICKS ticks, so bundle-state's
+	 * #1222 bounded TAIL always holds a fresh one despite the change-only de-dup above. Its
+	 * own change-tracking is SEPARATE from genlockLastLogged* (which the key=value block
+	 * updates before the json block runs). */
+	int genlockJsonHeartbeatTicks = 0;
+	int genlockJsonLastState = -1;
+	int genlockJsonLastReason = -1;
+	/* camera-box issue 1372 part D: the media-clock sub-kind (drift / undisciplined) is part of the
+	 * change key while the reason is media_clock, so a switch between the two logs at once. */
+	int genlockLastLoggedMedia = -1;
+	int genlockJsonLastMedia = -1;
+
+	/* camera-box issue 1372 part D: one tick of the media-clock (audio clock) term. */
+	struct GenlockMediaClockTick {
+		int verdict = 0;      /* genlock_media_clock_t */
+		int64_t drift_us = 0; /* the non-step rate scaled to the window (us per window) */
+		int ready = 0;        /* the window spans >= 90 % */
+		int discipline = 0;   /* genlock_media_discipline_t */
+	};
+	GenlockMediaClockTick ReduceGenlockMediaClock(qint64 now_ms, bool clock_present);
+	/* camera-box issue 1372: book a fleet date step out of genlockQpcHistory (before the push). */
+	void BookGenlockWallStep(qint64 now_ms, int64_t qpc_signed_ms);
+
+	void UpdateGenlockLabel();
+	void PollGenlockClock();
+
+	obs_output_t *GetOutput();
+
+	void Activate();
+	void Deactivate();
+
+	void UpdateDelayMsg();
+	void UpdateBandwidth();
+	void UpdateStreamTime();
+	void UpdateRecordTime();
+	void UpdateRecordTimeLabel();
+	void UpdateDroppedFrames();
+
+	static void OBSOutputReconnect(void *data, calldata_t *params);
+	static void OBSOutputReconnectSuccess(void *data, calldata_t *params);
+
+public slots:
+	void UpdateCPUUsage();
+
+	void clearMessage();
+	void showMessage(const QString &message, int timeout = 0);
+
+private slots:
+	void Reconnect(int seconds);
+	void ReconnectSuccess();
+	void UpdateStatusBar();
+	void UpdateCurrentFPS();
+	void UpdateIcons();
+
+public:
+	OBSBasicStatusBar(QWidget *parent);
+
+	void StreamDelayStarting(int sec);
+	void StreamDelayStopping(int sec);
+	void StreamStarted(obs_output_t *output);
+	void StreamStopped();
+	void RecordingStarted(obs_output_t *output);
+	void RecordingStopped();
+	void RecordingPaused();
+	void RecordingUnpaused();
+
+	void ReconnectClear();
+};

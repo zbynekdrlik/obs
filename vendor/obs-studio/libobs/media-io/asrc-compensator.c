@@ -1,0 +1,760 @@
+/******************************************************************************
+    camera-box #803 -- see asrc-compensator.h for the full design writeup and
+    the pointer to the Rust reference implementation this is a line-by-line
+    mirror of (src/asrc_bench.rs's RealtimeAsrcCompensator).
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 2 of the License, or
+    (at your option) any later version.
+******************************************************************************/
+
+#include <math.h>
+#include "asrc-compensator.h"
+
+static inline double asrc_clamp(double v, double lo, double hi)
+{
+	return v < lo ? lo : (v > hi ? hi : v);
+}
+
+/* camera-box #1084: discard the whole regression point buffer and its cumulative anchors, and drop
+ * the lock. Called on any LEVEL SHIFT -- a #960 starved-window rejection or a non-positive
+ * master_block_s (a backward/duplicate wall read, e.g. an NTP step) -- because a step in the
+ * cumulative would corrupt the slope for a full ASRC_REGRESSION_SPAN_S as it slides through the
+ * buffer; re-converging from scratch is bounded (~a minute) and level shifts are rare on this
+ * source. Deliberately does NOT reset estimated_ppm/applied_ppm directly -- so applied is HELD on
+ * the flushing call itself (no slew step runs that call). But because the flush DROPS the lock,
+ * every subsequent call sees !reg_locked -> target 0 -> applied SLEWS back to 0 (at
+ * ASRC_MAX_SLEW_PPM_PER_S) over the ~ASRC_REGRESSION_LOCK_SPAN_S re-lock window, then re-converges
+ * once the buffer re-fills. Decay-to-zero-then-reconverge is default-safe (a level shift invalidates
+ * the old correction) and bounded (one spurious 1 s starved window ~= a few ms of A/V step). Mirror
+ * of the Rust RealtimeAsrcCompensator::regression_flush(). reg_x/reg_y need no clearing -- reg_count
+ * == 0 means no live points are ever read. */
+static void asrc_regression_flush(struct asrc_compensator *c)
+{
+	c->reg_head = 0;
+	c->reg_count = 0;
+	c->cum_master_s = 0.0;
+	c->cum_ymm_s = 0.0;
+	c->reg_locked = false;
+	/* camera-box #1335: a level shift invalidates the captured setpoint AND the integral it built
+	 * up; drop both so a relock re-captures the setpoint and re-integrates from 0 (default-safe). */
+	c->level_integral_ppm = 0.0;
+	c->level_captured = false;
+	/* camera-box #1335 follow-up 2: a flush is an UNINTENDED discontinuity that re-captures the
+	 * setpoint from the post-relock depth, so any in-progress fast level-restore is abandoned (the
+	 * buffer self-heals). step_count/last_step_ms are running telemetry -- never reset here. */
+	c->level_restore = false;
+	/* camera-box #1335 follow-up 4: a flush abandons any in-progress restore, so the sustained-error
+	 * window counter resets too. */
+	c->level_err_windows = 0;
+	/* camera-box #1335 follow-up 5: a flush re-captures the setpoint from the post-relock depth, so
+	 * the smoothed level error re-seeds from the first post-relock window. */
+	c->level_err_ema_ms = 0.0;
+	c->level_err_ema_seeded = false;
+	/* camera-box issue 1372: a flush re-captures the setpoint, so a step still owed is abandoned with
+	 * the capture it was booked against. */
+	c->step_recover_ms = 0.0;
+}
+
+/* camera-box issue 1372 (ROZHODNUTE 5841039244): BOOK a re-based step the buffer level confirms.
+ * r_s is the step's single-window residual (negative = source samples lost), buffered_ms the live
+ * level. Confirmed = the buffer moved the SAME way as the samples and by at least half of it (the
+ * #1335 follow-up-2 corroboration, now signed). The booked amount is the MEASURED sample step: the
+ * regression residual counts the lost samples exactly, while the per-callback level only confirms the
+ * direction (it reads up to ~10 ms off within a block -- the bench's step callback read 35 ms for a
+ * 43 ms loss, and booking the smaller one left the rest to the slow level loop). The total owed is
+ * capped at +/-ASRC_STEP_RECOVER_MAX_MS, and the setpoint moves with the lost buffer by exactly the
+ * booked amount. A wall-clock-only jump leaves the level alone: nothing is booked. Mirror of
+ * src/asrc_bench.rs RealtimeAsrcCompensator::step_recover_book. */
+static void asrc_step_recover_book(struct asrc_compensator *c, double r_s, double buffered_ms)
+{
+	if (!c->level_captured)
+		return;
+	const double loss_ms = -r_s * 1000.0;
+	const double deficit_ms = c->level_target_ms - buffered_ms;
+	if (deficit_ms * loss_ms <= 0.0 || fabs(deficit_ms) < 0.5 * fabs(loss_ms))
+		return;
+	const double owed_ms =
+		asrc_clamp(c->step_recover_ms + loss_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);
+	c->level_target_ms -= owed_ms - c->step_recover_ms;
+	c->step_recover_ms = owed_ms;
+}
+
+/* camera-box issue 1372: PAY the owed step back at ASRC_STEP_RECOVER_PPM (1 ms per second of master
+ * time), on top of the servo's own applied_ppm -- its clamp and slew limit are untouched. The buffer
+ * grows (loss) or shrinks (dup) by the paid amount, so the setpoint and the open window's level sum
+ * move with it and the level loop never reads the recovery as an error. Nothing is paid while held;
+ * an owed amount without a captured setpoint is dropped (it was booked against that capture). Mirror
+ * of src/asrc_bench.rs RealtimeAsrcCompensator::step_recover_pay. */
+static void asrc_step_recover_pay(struct asrc_compensator *c, double master_block_s)
+{
+	if (!c->level_captured) {
+		c->step_recover_ms = 0.0;
+		return;
+	}
+	if (c->step_recover_hold || c->step_recover_ms == 0.0)
+		return;
+	const double budget_ms = ASRC_STEP_RECOVER_PPM / 1000000.0 * master_block_s * 1000.0;
+	const double paid_ms = asrc_clamp(c->step_recover_ms, -budget_ms, budget_ms);
+	c->step_recover_ms -= paid_ms;
+	c->step_recover_ppm = -paid_ms / (master_block_s * 1000.0) * 1000000.0;
+	c->level_target_ms += paid_ms;
+	c->window_level_sum_ms += paid_ms * (double)c->window_level_count;
+}
+
+void asrc_compensator_init(struct asrc_compensator *c)
+{
+	c->estimated_ppm = 0.0;
+	c->applied_ppm = 0.0;
+	c->cumulative_correction_ms = 0.0;
+	c->time_since_log_s = 0.0;
+	c->outer_bias_ppm = 0.0; /* camera-box #806 */
+	c->starved_block_count = 0; /* camera-box #960 */
+	c->window_raw_s = 0.0; /* camera-box #962 */
+	c->window_master_s = 0.0; /* camera-box #962 */
+	c->window_block_count = 0; /* camera-box #962 */
+	c->level_target_ms = 0.0; /* camera-box #1335 */
+	c->level_last_ms = 0.0; /* camera-box #1335 */
+	c->step_count = 0; /* camera-box #1335 follow-up 2 */
+	c->last_step_ms = 0.0; /* camera-box #1335 follow-up 2 */
+	c->level_restore = false; /* camera-box #1335 follow-up 2 */
+	c->level_err_windows = 0; /* camera-box #1335 follow-up 4 */
+	c->level_err_ema_ms = 0.0; /* camera-box #1335 follow-up 5 */
+	c->level_err_ema_seeded = false; /* camera-box #1335 follow-up 5 */
+	c->window_level_sum_ms = 0.0; /* camera-box #1367 */
+	c->window_level_count = 0; /* camera-box #1367 */
+	c->level_avg_ms = 0.0; /* camera-box #1367 */
+	c->step_recover_ms = 0.0; /* camera-box issue 1372 */
+	c->step_recover_ppm = 0.0; /* camera-box issue 1372 */
+	c->step_recover_hold = false; /* camera-box issue 1372 */
+	c->timecode = false; /* camera-box issue 1367 */
+	c->place_jump_count = 0; /* camera-box issue 1367 */
+	c->last_place_jump_ms = 0.0; /* camera-box issue 1367 */
+	c->basis = ASRC_BASIS_ARRIVAL; /* camera-box issue 1425 */
+	c->place_cand_early = false; /* camera-box issue 1425 */
+	c->place_cand_ema_ms = 0.0; /* camera-box issue 1425 */
+	c->place_cand_open = false; /* camera-box issue 1425 */
+	c->place_cand_ms = 0.0; /* camera-box issue 1425 */
+	c->place_cand_packets = 0; /* camera-box issue 1425 */
+	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
+}
+
+double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
+				    double buffered_ms, double *applied_ppm_out)
+{
+	/* camera-box issue 1372: the recovery rate is per call; only the owed-step block below sets it. */
+	c->step_recover_ppm = 0.0;
+	if (master_block_s <= 0.0) {
+		/* A non-positive block duration carries no timing information (e.g. a duplicate or
+		 * backward wall-clock read -- an NTP step) and, because the regression accumulates a
+		 * CUMULATIVE master time, it is also a level shift that would corrupt the slope. Flush the
+		 * buffer and pass through unchanged; applied_ppm is HELD. Mirror of the Rust guard. */
+		asrc_regression_flush(c);
+		if (applied_ppm_out)
+			*applied_ppm_out = c->applied_ppm;
+		return raw_advance_s;
+	}
+
+	/* camera-box #962: accumulate this block's DURATION-WEIGHTED contribution into the current
+	 * measurement window -- summing first (rather than ratio-ing this one block alone) is what
+	 * cancels arrival-timing jitter: a genuinely bursty-but-otherwise-healthy source (e.g.
+	 * mbc's 128-sample Dante VSC blocks) delivers real samples at an uneven wall-clock cadence,
+	 * but the SUM of delivered-sample-duration over the SUM of elapsed wall time still
+	 * converges to the source's true clock ratio, regardless of how unevenly the underlying
+	 * blocks were chunked. This WINDOWED measurement is the unchanged DATA SOURCE the camera-box
+	 * #1084 regression consumes. Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::compensate
+	 * -- keep numerically identical. */
+	c->window_raw_s += raw_advance_s;
+	c->window_master_s += master_block_s;
+	c->window_block_count++;
+	/* camera-box #1367: fold EVERY callback's level into the window, so the level loop reads the
+	 * window MEAN rather than one reading on the mixer-tick sawtooth. Mirror of the Rust Some path. */
+	c->window_level_sum_ms += buffered_ms;
+	c->window_level_count++;
+
+	/* camera-box #962: true only for a call that just closed a REJECTED window -- gates the
+	 * target/slew block below OFF (HOLDING applied_ppm at exactly its pre-rejection value, even
+	 * mid-transition toward an already-decided target) while still letting the corrected-advance
+	 * computation and the UNCONDITIONAL telemetry accumulation below run every call, exactly like
+	 * the pre-#962 per-block guard did (a sustained starve must never go silent in the ~60s log
+	 * cadence -- see the telemetry comment further down). */
+	bool window_rejected_this_call = false;
+
+	if (c->window_master_s >= ASRC_WINDOW_S) {
+		/* This window closes -- compute ONE windowed ppm value from the duration-weighted
+		 * sums (not this block's own instantaneous ratio); a valid window becomes ONE regression
+		 * point below, exactly the shape the pre-#1084 code fed to the EMA. */
+		const double window_ppm = (c->window_raw_s / c->window_master_s - 1.0) * 1000000.0;
+		const double window_raw_s = c->window_raw_s;
+		const double window_master_s = c->window_master_s;
+		const uint32_t window_block_count = c->window_block_count;
+		c->window_raw_s = 0.0;
+		c->window_master_s = 0.0;
+		c->window_block_count = 0;
+		/* camera-box #1367: the window's MEAN level (every callback's buffered_ms), reset with the
+		 * other window sums. Always >= 1 reading here (the closing call itself adds); the guard
+		 * mirrors the Rust rate-only entry, which never reads it. */
+		const double window_level_ms =
+			c->window_level_count > 0 ? c->window_level_sum_ms / (double)c->window_level_count : 0.0;
+		c->window_level_sum_ms = 0.0;
+		c->window_level_count = 0;
+
+		/* camera-box #960 (applied to the WINDOW value, not a single block's instantaneous
+		 * ratio -- camera-box #962): a window whose aggregate ppm magnitude clears the sanity
+		 * ceiling carries no real timing information (the source was genuinely starved/bursting
+		 * for MOST of this window) -- REJECT the whole window: no regression point. camera-box
+		 * #1084: a starved window is a LEVEL SHIFT (the source delivered a wrong sample count),
+		 * so also FLUSH the regression buffer -- keeping the pre-starvation points would corrupt
+		 * the slope for a full span. applied_ppm is HELD (window_rejected_this_call gates the slew
+		 * below). Attribute every block that fed this window to starved_block_count, preserving
+		 * the pre-#962 telemetry meaning ("how many audio blocks were part of an unusable
+		 * measurement") at window granularity. */
+		if (fabs(window_ppm) > ASRC_MAX_SANE_INSTANTANEOUS_PPM) {
+			c->starved_block_count += window_block_count;
+			asrc_regression_flush(c);
+			window_rejected_this_call = true;
+		} else {
+			/* camera-box #1335 follow-up 2: STEP DETECTION -> RE-BASE. The prospective new
+			 * cumulative point (advance the anchors by this closed window), and the single-window
+			 * RESIDUAL vs the locked fit's RATE (how far THIS window's own advance increment deviates
+			 * from the slope's expected increment). It is a per-window quantity -- the cumulative
+			 * noise cancels (pt_ymm - cum_ymm_s == this window's increment) -- so ordinary +-1-3 ms
+			 * window jitter stays under ASRC_STEP_RESIDUAL_MS, while a real sample-loss/dup or
+			 * wall-clock step (tens of ms in ONE window) exceeds it. On a step, RE-BASE (shift
+			 * cum_ymm_s onto the pre-step fit line, do NOT insert the step point, keep the lock +
+			 * slope + applied) instead of inserting it (which would bias the 600 s slope; the live
+			 * 17.9. 18:52 est +16 -> -83 -> -152 swing). The Rust None (rate-only bench) path skips
+			 * this; the C path ALWAYS has buffered_ms, so here it is unconditional (mirror of the
+			 * Rust Some path). */
+			const double pt_master = c->cum_master_s + window_master_s;
+			const double pt_ymm = c->cum_ymm_s + (window_raw_s - window_master_s);
+			const double r_s =
+				(window_raw_s - window_master_s) - (c->estimated_ppm / 1000000.0) * window_master_s;
+			bool rebased = false;
+			if (c->reg_locked && fabs(r_s * 1000.0) > ASRC_STEP_RESIDUAL_MS) {
+				/* RE-BASE: cum_ymm_s -= r leaves the anchor on the pre-step fit line
+				 * (cum_ymm_before + slope*window_master), so future points align; keep the lock,
+				 * slope, and applied (no 60 s decay). */
+				c->cum_master_s = pt_master;
+				c->cum_ymm_s = pt_ymm - r_s;
+				c->step_count++;
+				c->last_step_ms = r_s * 1000.0;
+				c->level_last_ms = buffered_ms;
+				/* camera-box #1367: telemetry only here; the restore corroboration below stays on
+				 * the live reading of this same call. */
+				c->level_avg_ms = window_level_ms;
+				/* camera-box issue 1372 (ROZHODNUTE 5841039244): a step the buffer level CONFIRMS
+				 * (a real sample loss/dup, not a wall-clock-only jump) is BOOKED and paid back at
+				 * ASRC_STEP_RECOVER_PPM -- the live 44 ms loss in ~44 s -- instead of arming the
+				 * proportional restore (3-4 min). camera-box issue 1367: in timecode mode the re-base only
+				 * keeps the rate regression clean; the placement error books the jump
+				 * (asrc_compensator_observe_placement), never this residual. */
+				if (!c->timecode)
+					asrc_step_recover_book(c, r_s, buffered_ms);
+				rebased = true;
+			}
+
+			if (!rebased) {
+				/* camera-box #1084: push one regression point -- (cumulative accepted-window
+				 * master time, cumulative raw-minus-master) -- into the fixed-capacity ring, slide
+				 * it to the last ASRC_REGRESSION_SPAN_S, and re-fit the rate slope. The Rust authority
+				 * (src/asrc_bench.rs) uses a Vec that evict-before-appends + age-evicts in this
+				 * identical oldest->newest order. The evict-before-append capacity guard is defensive;
+				 * age eviction already bounds a >=1 s-window buffer well below ASRC_REGRESSION_CAP, so
+				 * neither the guard nor a ring wrap ever fires in practice. */
+				c->cum_master_s = pt_master;
+				c->cum_ymm_s = pt_ymm;
+				/* Defensive capacity guard (mirror of the Rust): evict the oldest point BEFORE
+				 * appending if the ring is already full, so the newest point never overwrites a live
+				 * slot. Age eviction (below) keeps a >=1 s-window buffer at ~601 points, well under
+				 * ASRC_REGRESSION_CAP, so this never fires in practice. */
+				if (c->reg_count == ASRC_REGRESSION_CAP) {
+					c->reg_head = (c->reg_head + 1) % ASRC_REGRESSION_CAP;
+					c->reg_count--;
+				}
+				const uint32_t tail = (c->reg_head + c->reg_count) % ASRC_REGRESSION_CAP;
+				c->reg_x[tail] = c->cum_master_s;
+				c->reg_y[tail] = c->cum_ymm_s;
+				c->reg_count++;
+				const double cutoff = c->cum_master_s - ASRC_REGRESSION_SPAN_S;
+				while (c->reg_count > 1 && c->reg_x[c->reg_head] < cutoff) {
+					c->reg_head = (c->reg_head + 1) % ASRC_REGRESSION_CAP;
+					c->reg_count--;
+				}
+				const uint32_t n = c->reg_count;
+				if (n >= ASRC_REGRESSION_MIN_POINTS) {
+					/* Re-anchor to the oldest point (bounded magnitudes -> no catastrophic
+					 * cancellation over a long run) and recompute the five ordinary-least-squares
+					 * sums in FULL, in a fixed oldest->newest iteration order -- deterministic and
+					 * bit-identically matching the Rust Vec (no incremental subtract-on-evict, whose
+					 * FP rounding would drift the two apart). slope = (n*Sxy - Sx*Sy) / (n*Sxx -
+					 * Sx*Sx); the rate offset in ppm is slope * 1e6. */
+					const double x0 = c->reg_x[c->reg_head];
+					const double y0 = c->reg_y[c->reg_head];
+					double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+					for (uint32_t i = 0; i < n; i++) {
+						const uint32_t idx = (c->reg_head + i) % ASRC_REGRESSION_CAP;
+						const double x = c->reg_x[idx] - x0;
+						const double y = c->reg_y[idx] - y0;
+						sx += x;
+						sy += y;
+						sxx += x * x;
+						sxy += x * y;
+					}
+					const double nf = (double)n;
+					const double denom = nf * sxx - sx * sx;
+					if (fabs(denom) > 1e-9) {
+						const double slope = (nf * sxy - sx * sy) / denom;
+						c->estimated_ppm = slope * 1000000.0;
+					}
+					const uint32_t newest = (c->reg_head + n - 1) % ASRC_REGRESSION_CAP;
+					if (c->reg_x[newest] - c->reg_x[c->reg_head] >= ASRC_REGRESSION_LOCK_SPAN_S)
+						c->reg_locked = true;
+				}
+
+				/* camera-box #1335: buffer-LEVEL holding integral, updated ONCE per closed ACCEPTED
+				 * window (a rejected window took the branch above; a re-based window took the branch
+				 * above; an unlocked servo skips the update). buffered_ms is the source's current
+				 * mix-buffer depth (obs-source.c reads it from audio_input_buf[0].size). Mirror of
+				 * src/asrc_bench.rs compensate_with_level. camera-box #1367: level= keeps the one
+				 * raw reading (telemetry); every level-loop decision below (capture, EMA, I,
+				 * sustained arm) reads the window MEAN. The per-call restore burst/exit further
+				 * down stays on the live buffered_ms. */
+				c->level_last_ms = buffered_ms;
+				c->level_avg_ms = window_level_ms;
+				if (c->reg_locked) {
+					if (!c->level_captured) {
+						/* camera-box issue 1425 (E2 slice 3): setpoint = the window-mean depth at
+						 * this lock, re-captured after every flush/relock. It already carries the
+						 * placement offset of the buffered samples, and nothing walks it afterwards:
+						 * the #1355 absolute target did, a runtime latency change once synced.
+						 * camera-box issue 1367: in timecode mode the level is the placement error, whose
+						 * setpoint is 0 (the packet lands where its stamp says), never the lock-time depth. */
+						if (c->timecode)
+							c->level_target_ms = 0.0;
+						else
+							c->level_target_ms = window_level_ms;
+						c->level_captured = true;
+					}
+					/* camera-box #1335 follow-up 5: SMOOTH the per-window level error with an EMA (tau
+					 * ASRC_LEVEL_EMA_TAU_S) BEFORE the P term reads it, so the 66x stronger Kp=2.0 gain does not
+					 * amplify the +/-10 ms mixer-tick phase noise (the 18.9. live test: the raw-error term could
+					 * not hold the level, the mean wandered +/-10-15 ms). Seed with the first error after capture;
+					 * later windows blend with alpha = window_master_s / (tau + window_master_s). A deliberate
+					 * setpoint shift moves BOTH the target and the buffer by the same delta, so the error is
+					 * unchanged and this EMA is left untouched there (see asrc_compensator_shift_level_target).
+					 * Mirror of src/asrc_bench.rs compensate_with_level. */
+					{
+						const double level_err = window_level_ms - c->level_target_ms;
+						if (!c->level_err_ema_seeded) {
+							c->level_err_ema_ms = level_err;
+							c->level_err_ema_seeded = true;
+						} else {
+							const double alpha = window_master_s / (ASRC_LEVEL_EMA_TAU_S + window_master_s);
+							c->level_err_ema_ms += alpha * (level_err - c->level_err_ema_ms);
+						}
+					}
+					/* Anti-windup: integrate only while the composite rate target is not clamped at
+					 * the hard +/-ASRC_MAX_PPM bound AND the fast level-restore burst is not active
+					 * (camera-box #1335 follow-up 2: freeze the integral during a restore so the two
+					 * level correctors don't wind against each other). err_ms = target - buffered; a
+					 * DEFICIT (buffer below setpoint) drives the integral MORE NEGATIVE =>
+					 * more-negative applied => STRETCH => raises the buffer (sign confirmed by the
+					 * #1335 live -5 ppm outer-bias test, 17.9.). window_master_s is this closed
+					 * window's master duration (~1 s). */
+					const double rate_target = c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm;
+					const bool saturated = rate_target <= -ASRC_MAX_PPM || rate_target >= ASRC_MAX_PPM;
+					if (!saturated && !c->level_restore) {
+						const double err_ms = c->level_target_ms - window_level_ms;
+						c->level_integral_ppm =
+							asrc_clamp(c->level_integral_ppm -
+									   ASRC_LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s,
+								   -ASRC_LEVEL_INTEGRAL_MAX_PPM, ASRC_LEVEL_INTEGRAL_MAX_PPM);
+					}
+					/* camera-box #1335 follow-up 4: arm the FAST bounded level restore on a SUSTAINED level
+					 * error, whatever caused it (a StartStream input-sample loss, a mic/Dante re-plug, a mixer
+					 * hiccup) -- the case the step arm (follow-up 2) and the shift arm (follow-up 3) both miss
+					 * because it arrives with NO same-window residual step (the 18.9. 12:00 StartStream: level
+					 * 100 -> 68 ms, steps=1 last_step_ms=-14.3 detected before the level drained, restore never
+					 * armed, run A/V +15 ms). Count consecutive accepted windows >= the band; a below-band window
+					 * resets; reaching the threshold arms and resets. The integral above is frozen while restoring
+					 * so the two level correctors never wind against each other; the step arm and the shift arm
+					 * stay as the immediate paths. */
+					if (c->level_captured && !c->level_restore) {
+						if (fabs(window_level_ms - c->level_target_ms) >= ASRC_LEVEL_RESTORE_ARM_ERR_MS) {
+							if (++c->level_err_windows >= ASRC_LEVEL_RESTORE_ARM_WINDOWS) {
+								c->level_restore = true;
+								c->level_err_windows = 0;
+							}
+						} else {
+							c->level_err_windows = 0;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	/* camera-box #962: a REJECTED window HOLDS applied_ppm at EXACTLY its pre-rejection value --
+	 * no target recompute, no slew step -- even if it was still mid-transition toward an
+	 * already-decided, legitimate target from an earlier accepted window (a garbage window must
+	 * not be allowed to continue advancing that transition either). Mirrors the pre-#962
+	 * per-block early-return exactly, now at window granularity, while still letting the shared
+	 * corrected-advance/telemetry tail below run unconditionally. */
+	if (!window_rejected_this_call) {
+		/* Default-safe: no lock yet -> target zero compensation, never guess from a
+		 * still-converging (short-baseline) slope (camera-box #806: the outer-loop bias is folded
+		 * in HERE, so it is just as inert as the inner estimate before lock -- never applied on its
+		 * own). Once locked, add the outer-loop bias to the slope estimate and clamp the SUM to the
+		 * hard ppm bound before ever using it as a target. Mirror of src/asrc_bench.rs
+		 * RealtimeAsrcCompensator::compensate. */
+		/* camera-box #1335: the buffer-LEVEL integral is folded in alongside the outer bias, then
+		 * the SUM is clamped to the hard ppm bound (level_integral_ppm is 0 until the first lock).
+		 * camera-box #1335 follow-up 2: the LEVEL P term + the fast bounded restore burst are folded
+		 * in too, both driven by the LIVE buffered_ms. SIGN matches the proven #1335 integral:
+		 * (buffered - target) < 0 (deficit) => negative => stretch => raises the buffer. (The main
+		 * design wrote these with the opposite argument order; see the issue-1335-follow-up-2
+		 * anchors-confirmed comment for the derivation.) */
+		double target_ppm;
+		if (!c->reg_locked) {
+			target_ppm = 0.0;
+		} else {
+			double t = c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm;
+			if (c->level_captured) {
+				const double err = buffered_ms - c->level_target_ms;
+				/* camera-box #1335 follow-up 5: P term is now the NORMAL LAW of the level loop --
+				 * Kp=2.0 on the SMOOTHED error (level_err_ema_ms) clamped +/-ASRC_LEVEL_KP_MAX_PPM,
+				 * loop time constant ~500 s. The raw err below still drives the restore burst/exit. */
+				t += asrc_clamp(ASRC_LEVEL_KP_PPM_PER_MS * c->level_err_ema_ms, -ASRC_LEVEL_KP_MAX_PPM,
+					ASRC_LEVEL_KP_MAX_PPM);
+				/* Fast bounded restore: a big proportional stretch/compress that refills a
+				 * sample-loss step, then exits once the buffer is back within 5 ms. */
+				if (c->level_restore) {
+					if (fabs(err) < 5.0) {
+						c->level_restore = false;
+						/* camera-box #1335 follow-up 4: the restore just brought the level within band; reset the
+						 * sustained-error counter alongside clearing level_restore. */
+						c->level_err_windows = 0;
+					} else {
+						t += asrc_clamp(ASRC_LEVEL_RESTORE_K_PPM_PER_MS * err,
+								-ASRC_LEVEL_RESTORE_MAX_PPM, ASRC_LEVEL_RESTORE_MAX_PPM);
+					}
+				}
+			}
+			target_ppm = asrc_clamp(t, -ASRC_MAX_PPM, ASRC_MAX_PPM);
+		}
+
+		/* Slew-limit the APPLIED correction toward the target -- caps how fast the
+		 * resample-ratio nudge may change, independent of how fast the estimate itself moves. */
+		const double max_step = ASRC_MAX_SLEW_PPM_PER_S * master_block_s;
+		const double delta = asrc_clamp(target_ppm - c->applied_ppm, -max_step, max_step);
+		c->applied_ppm += delta;
+
+		/* camera-box issue 1372: pay a confirmed step back (see asrc_step_recover_pay). */
+		asrc_step_recover_pay(c, master_block_s);
+	}
+
+	/* camera-box issue 1372: a confirmed step's recovery rides on the same resampler, so the advance
+	 * the source actually produces carries it too (0 on every call without an owed step). */
+	const double corrected_advance_s = raw_advance_s / (1.0 + (c->applied_ppm + c->step_recover_ppm) / 1000000.0);
+
+	/* Telemetry accumulator: cumulative |raw - corrected| advance, in ms, since the last log
+	 * line (issue #803: "kumulatívneho rezídua"). camera-box #960: kept UNCONDITIONAL (runs on
+	 * every call regardless of window-open/window-closed/starved-window state above) so the
+	 * ~60s log cadence never goes silent during a sustained starve -- exactly the moment the
+	 * new starved_blocks=N telemetry is most needed. camera-box #962: uses whatever applied_ppm
+	 * is in effect (HELD bit-exact on a rejected window -- see window_rejected_this_call above),
+	 * so it still reports the real correction being applied to this real audio. */
+	c->cumulative_correction_ms += fabs(raw_advance_s - corrected_advance_s) * 1000.0;
+	c->time_since_log_s += master_block_s;
+
+	if (applied_ppm_out)
+		*applied_ppm_out = c->applied_ppm;
+	return corrected_advance_s;
+}
+
+bool asrc_compensator_should_log(struct asrc_compensator *c, double *cumulative_correction_ms_out,
+				  uint32_t *starved_block_count_out)
+{
+	if (c->time_since_log_s < ASRC_LOG_INTERVAL_S)
+		return false;
+
+	if (cumulative_correction_ms_out)
+		*cumulative_correction_ms_out = c->cumulative_correction_ms;
+	if (starved_block_count_out)
+		*starved_block_count_out = c->starved_block_count;
+
+	c->time_since_log_s = 0.0;
+	c->cumulative_correction_ms = 0.0;
+	c->starved_block_count = 0; /* camera-box #960 */
+	return true;
+}
+
+void asrc_compensator_set_outer_bias_ppm(struct asrc_compensator *c, double bias_ppm)
+{
+	c->outer_bias_ppm = asrc_clamp(bias_ppm, -ASRC_OUTER_BIAS_MAX_PPM, ASRC_OUTER_BIAS_MAX_PPM);
+}
+
+double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator *c)
+{
+	return c->outer_bias_ppm;
+}
+
+/* camera-box #1335 follow-up: move the captured buffer-LEVEL setpoint by a deliberate audio
+ * sync-offset delta so the level integral holds the NEW depth instead of refilling toward the old
+ * one and cancelling the deliberate trim. No-op until the setpoint has been captured (first rate
+ * lock). Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::shift_level_target -- keep identical.
+ *
+ * camera-box #1335 follow-up 3: a shift whose |delta| >= ASRC_LEVEL_RESTORE_ARM_MS (5 ms) ALSO arms
+ * the fast bounded level restore, so the level reaches the new depth in minutes with the integral
+ * frozen (follow-up 2) instead of the ~1 h / hours-of-ringing the +/-3 ppm I term needs (the 18.9.
+ * 12 h series). A sub-band shift arms nothing -- the gentle I+P loop absorbs it. */
+void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms)
+{
+	/* camera-box issue 1367 (design 5845361166): in timecode mode the level loop reads the PLACEMENT
+	 * error, which already moves with every deliberate placement change (the intended landing time
+	 * carries the new offset or hold), so a setpoint shift would itself be the error. No-op. */
+	if (c->timecode)
+		return;
+	/* camera-box #1367: the level loop reads the per-window MEAN. The buffer moves by delta in the
+	 * same callback as this shift, so the readings already folded into the open window are moved by
+	 * delta too: the closing mean is then all in the new frame, and the smoothed error sees no blended
+	 * half-old/half-new transient. Done whether or not the setpoint is captured yet, so a shift inside
+	 * the capture window of an arrival source captures the new-frame mean too. Mirror of
+	 * src/asrc_bench.rs RealtimeAsrcCompensator::shift_level_target. */
+	c->window_level_sum_ms += delta_ms * (double)c->window_level_count;
+	if (c->level_captured) {
+		c->level_target_ms += delta_ms;
+		c->level_last_ms += delta_ms;
+		/* camera-box #1367: level_avg_ms (telemetry) follows like level_last_ms. */
+		c->level_avg_ms += delta_ms;
+		/* camera-box #1335 follow-up 5: the deliberate shift moves BOTH level_target_ms (+delta, this
+		 * line) AND the buffer level itself (+delta, via the sync-offset re-stamp -- the 18.9. live
+		 * test: level 80 -> 108 ms in the same second as a +12 ms shift), so the smoothed error
+		 * (buffered - target) is UNCHANGED and level_err_ema_ms needs NO adjustment -- leaving it
+		 * alone is exactly what "the smoothed error must not see a false transient" requires. (The
+		 * design's Architektura wrote `level_err_ema_ms -= delta_ms` here; a standalone-rustc probe
+		 * shows that INJECTS a -delta transient, spiking the P term to the +/-5 ppm/window slew cap on
+		 * the very next window and FAILING the design's own follow-up-5 test (c) `|Δapplied| <= 2 ppm`;
+		 * with no adjustment the swing is 0. Same class as the load-bearing follow-up-2 SIGN CORRECTION
+		 * -- flagged for the main's review on the ticket.) The follow-up-3 arm below is unchanged. */
+		/* camera-box #1335 follow-up 3: a deliberate setpoint shift of at least the restore's exit
+		 * band arms the FAST bounded level restore, so the level reaches the new depth in minutes
+		 * (integral frozen per follow-up 2) instead of the ~1 h / hours-of-ringing the +/-3 ppm I
+		 * term needs (the 18.9. 12 h series). Below the band the existing I+P loop settles it. */
+		if (fabs(delta_ms) >= ASRC_LEVEL_RESTORE_ARM_MS)
+			c->level_restore = true;
+	}
+}
+
+void asrc_compensator_set_step_recover_hold(struct asrc_compensator *c, bool hold)
+{
+	c->step_recover_hold = hold;
+}
+
+/* camera-box issue 1367 (design 5845361166): the TIMECODE mode. See the header and
+ * src/asrc_bench_timecode.rs (the Rust authority) for the full contract. */
+static void asrc_place_cand_drop(struct asrc_compensator *c)
+{
+	c->place_cand_open = false;
+	c->place_cand_ms = 0.0;
+	c->place_cand_packets = 0;
+}
+
+void asrc_compensator_set_timecode(struct asrc_compensator *c, bool timecode)
+{
+	asrc_compensator_set_basis(c, timecode ? ASRC_BASIS_TIMECODE : ASRC_BASIS_ARRIVAL);
+}
+
+/* camera-box issue 1425 (design 6206822792): the ONE input of the servo's mode. Mirror of
+ * RealtimeAsrcCompensator::set_basis. */
+void asrc_compensator_set_basis(struct asrc_compensator *c, int basis)
+{
+	if (basis != c->basis) {
+		c->basis = basis;
+		asrc_place_cand_drop(c);
+	}
+	const bool timecode = basis != ASRC_BASIS_ARRIVAL;
+	if (timecode == c->timecode)
+		return;
+	c->timecode = timecode;
+	c->window_raw_s = 0.0;
+	c->window_master_s = 0.0;
+	c->window_block_count = 0;
+	c->window_level_sum_ms = 0.0;
+	c->window_level_count = 0;
+	asrc_regression_flush(c);
+}
+
+/* camera-box issue 1367: set what is owed to owed_ms. The setpoint moves by the change of the owed
+ * amount (a booked loss lowers it to where the early audio sits, a payment walks it back) and the open
+ * window's readings move with it, so the window mean stays in one frame. Mirror of
+ * RealtimeAsrcCompensator::step_recover_set. */
+static void asrc_step_recover_set(struct asrc_compensator *c, double owed_ms)
+{
+	const double shift_ms = c->step_recover_ms - owed_ms;
+	c->level_target_ms += shift_ms;
+	c->window_level_sum_ms += shift_ms * (double)c->window_level_count;
+	c->step_recover_ms = owed_ms;
+}
+
+/* camera-box issue 1367: the booking band of one packet, ms: max(half the packet,
+ * ASRC_PLACE_JUMP_MIN_MS). Mirror of RealtimeAsrcCompensator::place_jump_band_ms. */
+static double asrc_place_jump_band_ms(double packet_ms)
+{
+	const double half_packet_ms = 0.5 * packet_ms;
+	return half_packet_ms > ASRC_PLACE_JUMP_MIN_MS ? half_packet_ms : ASRC_PLACE_JUMP_MIN_MS;
+}
+
+/* camera-box issue 1367: book the jump of place_err_ms against the servo's expectation (setpoint +
+ * smoothed error), with its own sign, capped at +/-ASRC_STEP_RECOVER_MAX_MS owed. Mirror of
+ * RealtimeAsrcCompensator::book_placement_jump. */
+/* camera-box issue 1367: book jump_ms with its own sign, capped at +/-ASRC_STEP_RECOVER_MAX_MS owed;
+ * false when the cap left nothing to book. Mirror of RealtimeAsrcCompensator::book_jump_ms. */
+static bool asrc_book_jump_ms(struct asrc_compensator *c, double jump_ms)
+{
+	const double owed_ms =
+		asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);
+	/* review round 1: at the owed cap a packet still beyond it books nothing and counts nothing */
+	if (owed_ms == c->step_recover_ms)
+		return false;
+	asrc_step_recover_set(c, owed_ms);
+	if (c->place_jump_count < UINT32_MAX)
+		c->place_jump_count++;
+	c->last_place_jump_ms = jump_ms;
+	return true;
+}
+
+static void asrc_book_placement_jump(struct asrc_compensator *c, double place_err_ms, double packet_ms)
+{
+	const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);
+	if (fabs(jump_ms) < asrc_place_jump_band_ms(packet_ms))
+		return;
+	(void)asrc_book_jump_ms(c, jump_ms);
+}
+
+/* camera-box issue 1425: the median of the newest ceil(n/2) candidate errors (capped at the ring), an
+ * even count averaged. A stable insertion sort (equal values keep their order). Mirror of
+ * PlacementJudge::last_half_median_ms. */
+static double asrc_place_cand_median_ms(const struct asrc_compensator *c)
+{
+	double v[ASRC_PLACE_CONFIRM_RING];
+	const uint32_t n = c->place_cand_packets;
+	uint32_t m = n / 2u + n % 2u;
+	if (m > ASRC_PLACE_CONFIRM_RING)
+		m = ASRC_PLACE_CONFIRM_RING;
+	for (uint32_t i = 0; i < m; i++)
+		v[i] = c->place_cand_err_ms[(n - 1u - i) % ASRC_PLACE_CONFIRM_RING];
+	for (uint32_t i = 1; i < m; i++) {
+		const double x = v[i];
+		uint32_t j = i;
+		while (j > 0 && v[j - 1] > x) {
+			v[j] = v[j - 1];
+			j--;
+		}
+		v[j] = x;
+	}
+	return m % 2u == 1u ? v[m / 2u] : 0.5 * (v[m / 2u - 1u] + v[m / 2u]);
+}
+
+/* camera-box issue 1425 (design 6206822792): the STAMP basis's CONFIRMED booking. A candidate opens
+ * when the error leaves the band around the reference (the setpoint + the smoothed error at the open)
+ * and is dropped without booking the moment the error comes back inside; beyond the band with the
+ * other sign it starts again with that sign. It confirms after ASRC_PLACE_CONFIRM_MS of source audio
+ * AND ASRC_PLACE_CONFIRM_PACKETS packets, and books the median of the last half of its window against
+ * the open reference, putting the smoothed error back to its value at the open (the 10 s EMA absorbed
+ * part of the jump during the window; booked this way the whole jump is paid at 1000 ppm). Mirror of
+ * RealtimeAsrcCompensator::confirm_placement_jump. */
+static void asrc_confirm_placement_jump(struct asrc_compensator *c, double place_err_ms, double packet_ms)
+{
+	const double band_ms = asrc_place_jump_band_ms(packet_ms);
+	const double reference_ema_ms = c->place_cand_open ? c->place_cand_ema_ms : c->level_err_ema_ms;
+	double jump_ms = place_err_ms - (c->level_target_ms + reference_ema_ms);
+	if (fabs(jump_ms) < band_ms) {
+		asrc_place_cand_drop(c);
+		return;
+	}
+	if (c->place_cand_open && (jump_ms < 0.0) != c->place_cand_early) {
+		/* beyond the band with the other sign: a new candidate against today's reference */
+		asrc_place_cand_drop(c);
+		jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);
+		if (fabs(jump_ms) < band_ms)
+			return;
+	}
+	if (!c->place_cand_open) {
+		c->place_cand_open = true;
+		c->place_cand_early = jump_ms < 0.0;
+		c->place_cand_ema_ms = c->level_err_ema_ms;
+	}
+	c->place_cand_err_ms[c->place_cand_packets % ASRC_PLACE_CONFIRM_RING] = place_err_ms;
+	if (c->place_cand_packets < UINT32_MAX)
+		c->place_cand_packets++;
+	c->place_cand_ms += packet_ms;
+	if (c->place_cand_ms < ASRC_PLACE_CONFIRM_MS || c->place_cand_packets < ASRC_PLACE_CONFIRM_PACKETS)
+		return;
+	const double ema_at_open_ms = c->place_cand_ema_ms;
+	const double booked_ms = asrc_place_cand_median_ms(c) - (c->level_target_ms + ema_at_open_ms);
+	asrc_place_cand_drop(c);
+	if (fabs(booked_ms) >= band_ms && asrc_book_jump_ms(c, booked_ms))
+		c->level_err_ema_ms = ema_at_open_ms;
+}
+
+/* camera-box issue 1425: the booking the basis asks for -- at once on the timecode basis (issue 1367,
+ * unchanged), CONFIRMED on the stamp basis. Mirror of RealtimeAsrcCompensator::judge_placement_jump. */
+static void asrc_judge_placement_jump(struct asrc_compensator *c, double place_err_ms, double packet_ms)
+{
+	if (c->basis == ASRC_BASIS_STAMP)
+		asrc_confirm_placement_jump(c, place_err_ms, packet_ms);
+	else
+		asrc_book_placement_jump(c, place_err_ms, packet_ms);
+}
+
+void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms,
+					bool placed)
+{
+	if (!c->timecode || !c->level_captured) {
+		asrc_place_cand_drop(c);
+		return;
+	}
+	if (!placed) {
+		asrc_judge_placement_jump(c, place_err_ms, packet_ms);
+		return;
+	}
+	/* camera-box issue 1381 (design 5882391108, piece 1): a placement puts the samples on their stamp,
+	 * so the smoothed history is stale by construction -- drop what is owed and start the level loop
+	 * afresh, then book this packet's own jump against the fresh setpoint and re-seed the smoothed
+	 * error to its error against the resulting setpoint. */
+	asrc_step_recover_set(c, 0.0);
+	c->level_err_ema_ms = 0.0;
+	c->level_restore = false;
+	c->level_err_windows = 0;
+	c->window_level_sum_ms = 0.0;
+	c->window_level_count = 0;
+	asrc_place_cand_drop(c);
+	asrc_judge_placement_jump(c, place_err_ms, packet_ms);
+	/* the EMA is already seeded here: observe_placement only acts on a captured setpoint, and the
+	 * capture seeds it in the same window (both are cleared together) */
+	c->level_err_ema_ms = place_err_ms - c->level_target_ms;
+}
+
+bool asrc_compensator_place_beyond_cap(struct asrc_compensator *c, double place_err_ms, double packet_ms)
+{
+	if (!c->timecode || !c->level_captured)
+		return false;
+	const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);
+	if (fabs(jump_ms) < asrc_place_jump_band_ms(packet_ms) ||
+	    fabs(c->step_recover_ms - jump_ms) <= ASRC_STEP_RECOVER_MAX_MS)
+		return false;
+	if (c->place_jump_count < UINT32_MAX)
+		c->place_jump_count++;
+	c->last_place_jump_ms = jump_ms;
+	return true;
+}
+
+double asrc_compensator_take_step_recover_ppm(struct asrc_compensator *c)
+{
+	const double ppm = c->step_recover_ppm;
+	c->step_recover_ppm = 0.0;
+	return ppm;
+}

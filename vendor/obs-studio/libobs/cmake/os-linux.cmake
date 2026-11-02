@@ -1,0 +1,126 @@
+find_package(LibUUID REQUIRED)
+find_package(X11 REQUIRED)
+find_package(X11_XCB REQUIRED)
+# camera-box #1152: RANDR is REQUIRED for the DRM-lease output (xcb_randr_create_lease).
+find_package(XCB REQUIRED XCB RANDR OPTIONAL_COMPONENTS XINPUT)
+# camera-box #1152: Libdrm for the in-OBS DRM-lease page-flip output (obs-drm-output.c).
+find_package(Libdrm REQUIRED)
+# camera-box #1152 M2: GBM allocates the Program scanout buffers (dma-buf import into GL).
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(Gbm REQUIRED IMPORTED_TARGET gbm)
+# camera-box issue 1346: the vk-direct DRM-output backend (NVIDIA Vulkan direct display) needs only the
+# Vulkan HEADERS -- libvulkan.so.1 is dlopen'd at run time, so there is no link-time Vulkan dependency and a
+# box without the loader just keeps the output dormant. Vulkan::Headers comes from CMake's FindVulkan.
+find_package(Vulkan REQUIRED)
+find_package(Gio)
+
+target_sources(
+  libobs
+  PRIVATE
+    obs-drm-output-audio-match.h
+    obs-drm-output-audio.c
+    obs-drm-output-audio.h
+    obs-drm-output-backend.c
+    obs-drm-output-internal.h
+    obs-drm-output-logcap.h
+    obs-drm-output-outputs.c
+    obs-drm-output-retry.c
+    obs-drm-output-retry.h
+    obs-drm-output-view.c
+    obs-drm-output-vk-internal.h
+    obs-drm-output-vk-remode.c
+    obs-drm-output-vk-setup.c
+    obs-drm-output-vk.c
+    obs-drm-output-vk.h
+    obs-drm-output.c
+    obs-drm-output.h
+    obs-nix-platform.c
+    obs-nix-platform.h
+    obs-nix-x11.c
+    obs-nix.c
+    util/pipe-posix.c
+    util/platform-nix.c
+    util/threading-posix.c
+    util/threading-posix.h
+)
+
+target_compile_definitions(
+  libobs
+  PRIVATE
+    OBS_INSTALL_PREFIX="${OBS_INSTALL_PREFIX}"
+    $<$<COMPILE_LANG_AND_ID:C,GNU>:ENABLE_DARRAY_TYPE_TEST>
+    $<$<COMPILE_LANG_AND_ID:CXX,GNU>:ENABLE_DARRAY_TYPE_TEST>
+)
+
+if(CMAKE_C_COMPILER_ID STREQUAL GNU)
+  # * Silence type-limits warning in line 292 of libobs/utils/utf8.c
+  if(CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3.0)
+    target_compile_options(libobs PRIVATE -Wno-error=type-limits)
+  endif()
+endif()
+
+set(CMAKE_M_LIBS "")
+include(CheckCSourceCompiles)
+set(LIBM_TEST_SOURCE "#include<math.h>\nfloat f; int main(){sqrt(f);return 0;}")
+check_c_source_compiles("${LIBM_TEST_SOURCE}" HAVE_MATH_IN_STD_LIB)
+
+set(UUID_TEST_SOURCE "#include<uuid/uuid.h>\nint main(){return 0;}")
+check_c_source_compiles("${UUID_TEST_SOURCE}" HAVE_UUID_HEADER)
+
+if(NOT HAVE_UUID_HEADER)
+  message(FATAL_ERROR "Required system header <uuid/uuid.h> not found.")
+endif()
+
+target_link_libraries(
+  libobs
+  PRIVATE
+    X11::X11
+    X11::XCB
+    XCB::XCB
+    XCB::RANDR # camera-box #1152: xcb_randr_create_lease for the DRM-lease output
+    Libdrm::Libdrm # camera-box #1152: drmModePageFlip page-flip onto the leased HDMI connector
+    PkgConfig::Gbm # camera-box #1152 M2: gbm_bo_create scanout buffers for the Program dma-buf path
+    Vulkan::Headers # camera-box issue 1346: vk-direct backend (headers only; libvulkan.so.1 is dlopen'd)
+    LibUUID::LibUUID
+    ${CMAKE_DL_LIBS}
+    $<$<NOT:$<BOOL:${HAVE_MATH_IN_STD_LIB}>>:m>
+    $<$<TARGET_EXISTS:XCB::XINPUT>:XCB::XINPUT>
+)
+
+if(ENABLE_PULSEAUDIO)
+  find_package(PulseAudio REQUIRED)
+
+  target_sources(
+    libobs
+    PRIVATE
+      audio-monitoring/pulse/pulseaudio-enum-devices.c
+      audio-monitoring/pulse/pulseaudio-monitoring-available.c
+      audio-monitoring/pulse/pulseaudio-output.c
+      audio-monitoring/pulse/pulseaudio-wrapper.c
+      audio-monitoring/pulse/pulseaudio-wrapper.h
+  )
+
+  target_link_libraries(libobs PRIVATE PulseAudio::PulseAudio)
+  target_enable_feature(libobs "PulseAudio audio monitoring (Linux)")
+else()
+  target_sources(libobs PRIVATE audio-monitoring/null/null-audio-monitoring.c)
+  target_disable_feature(libobs "PulseAudio audio monitoring (Linux)")
+endif()
+
+if(TARGET gio::gio)
+  target_sources(libobs PRIVATE util/platform-nix-dbus.c util/platform-nix-portal.c)
+  target_link_libraries(libobs PRIVATE gio::gio)
+endif()
+
+if(ENABLE_WAYLAND)
+  find_package(Wayland REQUIRED Client)
+  find_package(Xkbcommon REQUIRED)
+
+  target_sources(libobs PRIVATE obs-nix-wayland.c)
+  target_link_libraries(libobs PRIVATE Wayland::Client xkbcommon::xkbcommon)
+  target_enable_feature(libobs "Wayland compositor support (Linux)")
+else()
+  target_disable_feature(libobs "Wayland compositor support (Linux)")
+endif()
+
+set_target_properties(libobs PROPERTIES OUTPUT_NAME obs)

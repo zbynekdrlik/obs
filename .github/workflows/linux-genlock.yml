@@ -1,0 +1,590 @@
+name: Linux genlock build (vendored OBS + DistroAV, imag-nb parity)
+
+# camera-box #460: builds the vendored, genlock-patched OBS 32.2.0 + DistroAV for LINUX
+# (imag-nb, Ubuntu 24.04/noble) — the user mandates the CUSTOM genlock stack on imag-nb; the
+# stock DistroAV bootstrap there was only ever a placeholder. Research (2026-07-03, issue #460)
+# found the patch surface is ALREADY Linux-ready — every genlock/DistroAV patch that touches
+# platform-specific code already carries a working non-Windows fallback branch (clock_gettime /
+# dlsym / gethostname / std::chrono) — so this workflow is pure CI-workflow authoring, ZERO
+# source porting.
+#
+# SCOPE: this workflow only BUILDS + uploads the Linux genlock artifacts and proves they build
+# green. Deploying the built artifact to imag-nb (replacing its stock DistroAV bootstrap,
+# /opt/obs-genlock) is #458's remaining scope, NOT this workflow's.
+#
+# Mirrors windows-genlock.yml's overall shape. The dozens of pwsh "assert genlock patch present"
+# guard steps in the Windows workflows exist ONLY because PowerShell can't run `cargo test` — the
+# SAME vendored-source assertions already run as real Rust tests on every push via ci.yml's `test`
+# job (tests/genlock_preload.rs, distroav_genlock_lockdown.rs, obs_titlebar_newlevel.rs,
+# burn_payload_parity.rs, distroav_timecode_patch.rs, distroav_source_config_lock.rs,
+# obs_updater_disabled.rs, av_sync_dock_qr_patch_guard.rs — see tests/*.rs), so this Linux
+# workflow does NOT duplicate them as text-token guards. What THIS workflow proves that ci.yml
+# cannot: that the vendored C/C++ — including every non-Windows fallback branch the genlock
+# patches carry — actually COMPILES with gcc/g++ on Linux. ENABLE_BROWSER stays OFF for both jobs
+# (imag-nb needs no browser source; this also means the workflow never downloads/builds CEF, the
+# dominant time cost on the Windows builds — no obs-deps prebuilt bundle is needed on Linux
+# either, apt supplies everything per vendor/obs-studio/.github/scripts/build-ubuntu).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths:
+      - 'vendor/obs-studio/**'
+      - 'vendor/distroav/**'
+      # issue 1439: the strih variant builds the vendored obs-vban (the VBAN receive source).
+      - 'vendor/obs-vban/**'
+      # issue 1470: the strih variant builds the camera-box A/V-sync dock and proves its layout seed
+      # against the real Qt.
+      - 'vendor/av-sync-dock/**'
+      - 'scripts/obs_dock_state.py'
+      - 'tests/qt/**'
+      - 'tests/python/fixtures/obs_dock_state_1470/**'
+      - 'scripts/genlock-manifest.sh'
+      # issue 1387 + 1487: the strih variant links the JPEG XS C ABIs (jxs/recv-ffi + jxs/send-ffi
+      # over jxs/link, rig/core and the vendored SVT-JPEG-XS) into DistroAV's JPEG XS source and
+      # program output.
+      - 'jxs/**'
+      - 'rig/**'
+      - 'vendor/svt-jpeg-xs/**'
+      # a dependency change can move the static library's native-library list or break the link.
+      - 'Cargo.toml'
+      - '.github/workflows/linux-genlock.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-genlock-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The tested apt list for this exact vendored OBS version, verbatim from
+  # vendor/obs-studio/.github/scripts/build-ubuntu (the setup_ubuntu function) — PLUS
+  # ninja-build/ccache/pkg-config, which upstream's own CI installs separately via its
+  # `.Aptfile` prerequisite step (before setup_ubuntu ever runs) rather than inside
+  # setup_ubuntu itself. cmake/curl/git/jq (the .Aptfile's other prerequisites) are already
+  # present on the GitHub-hosted ubuntu-24.04 runner image.
+  OBS_APT_PACKAGES: >-
+    ninja-build ccache pkg-config
+    build-essential libglib2.0-dev
+    extra-cmake-modules lsb-release dh-cmake
+    libcurl4-openssl-dev
+    libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev
+    libswresample-dev libswscale-dev
+    libjansson-dev
+    libx11-xcb-dev
+    libgles2-mesa-dev
+    libwayland-dev
+    libpipewire-0.3-dev
+    libpulse-dev
+    libx264-dev
+    libmbedtls-dev
+    libgl1-mesa-dev
+    uthash-dev
+    libsimde-dev
+    libluajit-5.1-dev python3-dev
+    libx11-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev
+    libxcb-composite0-dev libxinerama-dev libxcb1-dev libxcb-xfixes0-dev
+    swig libcmocka-dev libxss-dev libglvnd-dev
+    libxkbcommon-dev libatk1.0-dev libatk-bridge2.0-dev libxcomposite-dev libxdamage-dev
+    libasound2-dev libfdk-aac-dev libfontconfig-dev libfreetype6-dev libjack-jackd2-dev
+    libsndio-dev libspeexdsp-dev libudev-dev libv4l-dev libva-dev libvlc-dev
+    libpci-dev libdrm-dev libgbm-dev libvulkan-dev
+    nlohmann-json3-dev libwebsocketpp-dev libasio-dev libqrcodegencpp-dev
+    libffmpeg-nvenc-dev librist-dev libsrt-openssl-dev
+    qt6-base-dev libqt6svg6-dev qt6-base-private-dev
+    libvpl-dev libvpl2
+
+jobs:
+  # THE FIRST job (per #460): proves the vendored C/C++ — every non-Windows fallback branch the
+  # genlock patches carry — actually compiles on Linux. Narrowed on PURPOSE so it is genuinely
+  # fast: DistroAV only needs libobs + obs-frontend-api (obs-frontend-api itself needs only
+  # libobs, no Qt — frontend/api/CMakeLists.txt) — ENABLE_FRONTEND=OFF skips the large Qt GUI
+  # app compile (frontend/CMakeLists.txt still builds obs-frontend-api FIRST, unconditionally,
+  # before its own ENABLE_FRONTEND check) and ENABLE_PLUGINS=OFF skips every bundled OBS plugin
+  # (obs-ffmpeg, obs-outputs, obs-websocket, decklink, …) DistroAV does not link against.
+  # ENABLE_BROWSER=OFF is OBS's own upstream default already and is redundant once
+  # ENABLE_PLUGINS=OFF short-circuits plugins/CMakeLists.txt (obs-browser lives there), but is
+  # passed explicitly for documentation.
+  linux-distroav-compile-check:
+    name: Vendored OBS/DistroAV C++ compile gate (Linux, #460)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }}
+
+      - name: Configure OBS (ubuntu-ci preset, narrowed for the compile-check lane)
+        working-directory: vendor/obs-studio
+        run: >
+          cmake --preset ubuntu-ci
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
+          -DENABLE_BROWSER=OFF
+          -DENABLE_FRONTEND=OFF
+          -DENABLE_PLUGINS=OFF
+
+      - name: Build OBS (libobs + obs-frontend-api only, narrowed)
+        working-directory: vendor/obs-studio
+        run: cmake --build build_ubuntu --parallel
+
+      - name: Install OBS SDK prefix (+ Development component, the #392 trick)
+        working-directory: vendor/obs-studio
+        run: |
+          cmake --install build_ubuntu --prefix "$GITHUB_WORKSPACE/obs-sdk"
+          # #392 trick (mirrors windows-genlock.yml): the default install omits the
+          # EXCLUDE_FROM_ALL "Development" component (libobsConfig.cmake /
+          # obs-frontend-apiConfig.cmake + headers) that DistroAV's config-mode
+          # find_package(libobs)/find_package(obs-frontend-api) need to resolve — install it
+          # explicitly. Platform-agnostic: cmake/common/helpers_common.cmake.
+          cmake --install build_ubuntu --prefix "$GITHUB_WORKSPACE/obs-sdk" --component Development
+
+      - name: Configure DistroAV against the genlocked OBS SDK
+        working-directory: vendor/distroav
+        run: >
+          cmake --preset ubuntu-ci-x86_64
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+
+      # THE compile check: this compiles the vendored ndi-source.cpp / ndi-output.cpp /
+      # ndi-burn-filter.cpp / plugin-main.cpp with gcc/g++ on Linux — including every
+      # non-Windows fallback branch (dlsym/clock_gettime/gethostname) the genlock patches
+      # carry, which MSVC on the Windows builds never exercises.
+      - name: Compile-check DistroAV (build the plugin)
+        working-directory: vendor/distroav
+        run: cmake --build --preset ubuntu-ci-x86_64
+
+      - name: Stage the compiled distroav.so (fast hot-swap artifact)
+        run: |
+          set -euo pipefail
+          dll=$(find vendor/distroav -name 'distroav.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$dll" ]; then echo "distroav.so not found after the plugin build"; exit 1; fi
+          mkdir -p distroav-stage
+          cp "$dll" distroav-stage/
+          git rev-parse HEAD > distroav-stage/DISTROAV_BUILD_SHA.txt
+          echo "staged distroav.so from: $dll ($(stat -c%s "$dll") bytes)"
+
+      - name: Upload distroav.so (fast hot-swap)
+        uses: actions/upload-artifact@v4
+        with:
+          name: distroav-linux-fast-so
+          path: distroav-stage/
+          if-no-files-found: error
+
+      - name: Compile gate passed
+        run: echo "#460 vendored OBS/DistroAV C++ compiled clean on Linux — pre-merge gate green."
+
+  # The FULL production Linux artifact (per #460): a real, complete OBS (full Qt frontend + the
+  # default bundled plugins) + the genlock-patched DistroAV — genuinely deployable to imag-nb by
+  # #458, not just a compile-check stub. Gated behind the fast compile-check above so a trivial
+  # C++ error fails in ~minutes rather than after this full build.
+  linux-genlock-build:
+    name: Full Linux genlock bundle (OBS + DistroAV, #460)
+    needs: [linux-distroav-compile-check]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }}
+
+      # Same override flags as windows-genlock.yml's full build (browser off — imag-nb needs no
+      # browser source; this also skips the CEF download entirely, the dominant cost on the
+      # Windows build). Everything else stays at the ubuntu-ci preset default.
+      - name: Configure OBS (ubuntu-ci preset + genlock build flags)
+        working-directory: vendor/obs-studio
+        run: >
+          cmake --preset ubuntu-ci
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
+          -DENABLE_WHATSNEW=OFF
+          -DENABLE_AJA=OFF
+          -DENABLE_VLC=ON
+          -DENABLE_TEST_INPUT=OFF
+          -DENABLE_BROWSER=OFF
+
+      - name: Build OBS
+        working-directory: vendor/obs-studio
+        run: cmake --build build_ubuntu --parallel
+
+      - name: Install OBS SDK prefix (+ Development component, the #392 trick)
+        working-directory: vendor/obs-studio
+        run: |
+          cmake --install build_ubuntu --prefix "$GITHUB_WORKSPACE/obs-sdk"
+          cmake --install build_ubuntu --prefix "$GITHUB_WORKSPACE/obs-sdk" --component Development
+
+      - name: Configure DistroAV against the genlocked OBS SDK
+        working-directory: vendor/distroav
+        run: >
+          cmake --preset ubuntu-ci-x86_64
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+
+      - name: Build DistroAV
+        working-directory: vendor/distroav
+        run: cmake --build --preset ubuntu-ci-x86_64
+
+      # cmake/linux/defaults.cmake: OBS_OUTPUT_DIR = build_ubuntu/rundir, and every install
+      # helper copies into "${OBS_OUTPUT_DIR}/$<CONFIG>/..." at build time (same nested-by-config
+      # layout as Windows) — so the real rundir is build_ubuntu/rundir/RelWithDebInfo. DistroAV is
+      # built as a STANDALONE project (not an in-tree OBS plugin subdirectory), so its distroav.so
+      # never lands in OBS's own rundir automatically — stage it in manually, same as
+      # windows-genlock.yml does for distroav.dll.
+      - name: Stage artifact (OBS rundir + distroav.so + data + build SHA)
+        run: |
+          set -euo pipefail
+          rundir="vendor/obs-studio/build_ubuntu/rundir/RelWithDebInfo"
+          if [ ! -d "$rundir" ]; then echo "OBS rundir not found: $rundir"; exit 1; fi
+          mkdir -p stage
+          cp -a "$rundir"/. stage/
+
+          distroav_so=$(find vendor/distroav -name 'distroav.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$distroav_so" ]; then echo "distroav.so not found after the DistroAV build"; exit 1; fi
+
+          # The binary obs-plugins dir (lib/<arch>/obs-plugins, holding the .so files) already
+          # exists in the staged rundir because OBS's own default-enabled plugins (obs-x264,
+          # obs-outputs, ...) were staged there — discover it rather than hardcode the multiarch
+          # triplet (CMAKE_INSTALL_LIBDIR = lib/CMAKE_SYSTEM_PROCESSOR-linux-gnu).
+          plugin_lib_dir=$(find stage -type d -path '*/obs-plugins' -not -path '*/share/*' | head -1)
+          if [ -z "$plugin_lib_dir" ]; then
+            echo "ERROR: no lib/obs-plugins dir found in the staged rundir — OBS_PLUGIN_DESTINATION layout changed?"
+            exit 1
+          fi
+          cp "$distroav_so" "$plugin_lib_dir/"
+          # issue 1425: the vendored vlc-video plugin (stamps on the OBS media clock) is built by the OBS build
+          # (-DENABLE_VLC=ON, libvlc-dev headers); it loads libvlc from the installed VLC at runtime.
+          if [ ! -f "$plugin_lib_dir/vlc-video.so" ]; then echo "ERROR: vlc-video.so not built (issue 1425)"; exit 1; fi
+
+          # Data resources: OBS_DATA_DESTINATION = share/obs (cmake/linux/defaults.cmake), so a
+          # plugin's data lands at share/obs/obs-plugins/<name>/ — mirror the source data/ dir
+          # there directly (same as windows-genlock.yml copying vendor/distroav/data/* into
+          # stage/data/obs-plugins/distroav/).
+          data_root=$(find stage -type d -path '*/share/obs/obs-plugins' | head -1)
+          if [ -z "$data_root" ]; then data_root="stage/share/obs/obs-plugins"; fi
+          if [ -d "vendor/distroav/data" ]; then
+            mkdir -p "$data_root/distroav"
+            cp -a vendor/distroav/data/. "$data_root/distroav/"
+          fi
+
+          git rev-parse HEAD > stage/GENLOCK_BUILD_SHA.txt
+          echo "staged distroav.so from: $distroav_so -> $plugin_lib_dir/"
+          echo "staged OBS rundir from: $rundir"
+
+      # issue 1317: record the apt packages the built bundle links against (Qt6 / ffmpeg / libOpenGL
+      # runtime) so setup-strih.sh installs them on a fresh box. Written INTO stage/ BEFORE the
+      # manifest step so genlock-manifest.sh --check accounts for it (an unlisted stage file fails the
+      # self-consistency check). The runner that built the binary is the only authority on what it
+      # links. Informative parity here (a re-provisioned imag-nb hits the same runtime gap).
+      - name: Record runtime packages (#1317)
+        run: scripts/genlock-runtime-packages.sh --stage stage --out stage/RUNTIME_PACKAGES.txt
+
+      # #120: the per-component SHA manifest generator — reused UNCHANGED (cross-platform bash,
+      # already unit-proven on the Linux `test` job via tests/genlock_manifest.rs).
+      - name: Generate per-component SHA manifest (#120)
+        run: scripts/genlock-manifest.sh --stage stage --out stage/BUNDLE_MANIFEST.json
+
+      - name: Assert bundle manifest self-consistent (#120)
+        run: scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-genlock-linux-x86_64
+          path: stage/
+          if-no-files-found: error
+
+
+  # issue 1317: the strih-snv FULL build variant. The strih role needs the same full plugin set as
+  # the imag-parity full build above (obs-websocket, obs-ffmpeg + NVENC, obs-x264, obs-outputs,
+  # obs-filters, image-source, text-freetype2, linux-capture/v4l2, DistroAV) -- all ON in the
+  # ubuntu-ci preset default (AJA/decklink/whatsnew off; VLC on since issue 1425), so this job copies the full build
+  # byte-for-byte and differs ONLY by artifact name + a build-flags marker. The one plugin the strih
+  # role additionally needs vs the imag artifact is obs-browser (the 4 browser sources: VDO.ninja
+  # interkom, Ableset, camera crew, 1pixel). obs-browser needs CEF, which the vendored ubuntu-ci
+  # preset does NOT auto-fetch on Linux (no cmake/linux/buildspec.cmake) -- so this variant fetches
+  # the pinned obs-deps CEF itself (see the CEF steps below), sha256-verifies it, and passes
+  # CEF_ROOT_DIR, with STRIH_ENABLE_BROWSER=ON (issue 1317). Flip that one env var to 'OFF' to drop
+  # the browser sources again. The imag-parity linux-genlock-build job above is left byte-identical
+  # (browser OFF -- imag needs no browser source).
+  linux-genlock-build-strih:
+    name: Full Linux genlock bundle -- strih variant (issue 1317)
+    needs: [linux-distroav-compile-check]
+    # issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-snv notebook runs Ubuntu 26.04 (resolute) --
+    # noble's ffmpeg/Qt sonames (libavcodec60 / Qt 6.4) do not exist there, so the strih bundle must
+    # be built on the 26.04 runner or it cannot load on the box. ONLY this job moves; the imag-parity
+    # full build (linux-genlock-build) and the DistroAV compile-check stay on ubuntu-24.04 (imag-nb
+    # noble). `runs-on` cannot read job env, so this literal is pinned EQUAL to STRIH_TARGET_RELEASE
+    # below by tests/linux_genlock_workflow_gate.rs.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      # issue 1317: obs-browser + CEF ARE wired below (the CEF fetch/verify/extract step). Flip to
+      # 'OFF' to drop the browser sources again -- that is the ONLY change needed (the fetch step and
+      # the CEF_ROOT_DIR arg are both gated on this value, and the STRIH_BUILD_FLAGS marker follows).
+      STRIH_ENABLE_BROWSER: 'ON'
+      # issue 1317: the Ubuntu release this strih bundle is built on -- the SINGLE SOURCE for the
+      # STRIH_BUILD_FLAGS `TARGET-RELEASE:` marker line (the Stage step reads $STRIH_TARGET_RELEASE).
+      # MUST stay equal to the `runs-on:` literal above (runs-on can't read job env, so a test pins
+      # them together); verify-strih.sh fails closed if the installed bundle's marker != the box's
+      # /etc/os-release VERSION_ID (a 24.04 bundle on a 26.04 box would crash OBS at load).
+      STRIH_TARGET_RELEASE: 'ubuntu-26.04'
+      # CEF pin -- MUST match vendor/obs-studio/CMakePresets.json configurePresets[dependencies]
+      # .vendor."obsproject.com/obs-studio".dependencies.cef (ubuntu-x86_64). tests/python/
+      # test_linux_genlock_strih_cef_1317.py::test_workflow_cef_hash_matches_vendored_pin guards drift.
+      CEF_VERSION: '6533'
+      CEF_ARCHIVE: 'cef_binary_6533_linux_x86_64_v6.tar.xz'
+      CEF_SHA256: '7963335519a19ccdc5233f7334c5ab023026e2f3e9a0cc417007c09d86608146'
+      CEF_BASE_URL: 'https://cdn-fastly.obsproject.com/downloads'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }} nasm libclang-dev  # issue 1387: nasm for SVT-JPEG-XS, libclang for the v4l2 sys crate's bindgen (the jxs-recv-ffi build below)
+
+      # issue 1387 slice 2: DistroAV's JPEG XS source links the jxs-recv-ffi static library (a C ABI
+      # over the JPEG XS crate's receive loop, the code jxs-recv-probe runs). rustc names the native
+      # libraries a static library needs only when it builds one; the step hands that list to
+      # DistroAV's CMake, so a new Rust dependency can never leave the plugin with an undefined symbol.
+      - name: Install the Rust toolchain (issue 1387)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the jxs-recv-ffi static library (issue 1387)
+        # rustc prints the native-libs note in colour on the runner (run 40909341652), which the
+        # `^note:` sed below cannot match; plain text only.
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set -euo pipefail
+          if ! cargo rustc --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs 2> jxs-ffi-build.log; then
+            cat jxs-ffi-build.log
+            exit 1
+          fi
+          cat jxs-ffi-build.log
+          libs="$(sed -n 's/^note: native-static-libs: //p' jxs-ffi-build.log | tail -1)"
+          if [ -z "$libs" ]; then echo "ERROR: rustc printed no native-static-libs line (issue 1387)"; exit 1; fi
+          if [ ! -f target/release/libjxs_recv_ffi.a ]; then echo "ERROR: target/release/libjxs_recv_ffi.a not built (issue 1387)"; exit 1; fi
+          # issue 1387 slice 3: the ONE archive must carry the sender's C ABI too (jxs-recv-ffi pulls
+          # jxs-send-ffi in), or the JPEG XS program output cannot link.
+          # (nm exits non-zero on the archive's lib.rmeta member, which has no symbols: its stderr is
+          # kept and shown when a symbol is missing)
+          nm -g --defined-only target/release/libjxs_recv_ffi.a 2> jxs-ffi-nm.err > jxs-ffi-symbols.txt || true
+          for sym in cbjxs_open cbjxs_send_open cbjxs_send_frame cbjxs_send_set_log; do
+            if ! grep -qw "$sym" jxs-ffi-symbols.txt; then cat jxs-ffi-nm.err; echo "ERROR: libjxs_recv_ffi.a does not define $sym (issue 1387)"; exit 1; fi
+          done
+          echo "JXS_FFI_NATIVE_LIBS=$libs" >> "$GITHUB_ENV"
+          echo "jxs-recv-ffi: $(stat -c%s target/release/libjxs_recv_ffi.a) bytes, native libs: $libs"
+
+      # issue 1317: fetch the EXACT obs-deps CEF the vendored OBS pins so obs-browser links against
+      # it. The vendored ubuntu-ci preset does NOT auto-fetch CEF on Linux (no cmake/linux/
+      # buildspec.cmake -- only macos/windows call _check_dependencies), so we do it the same way
+      # upstream OBS's own Linux CI does: download the pinned tarball, sha256-verify, extract, and
+      # hand FindCEF.cmake a CEF_ROOT_DIR. Cached by version+hash so the ~325 MB download is paid once.
+      - name: Cache CEF binary distribution (issue 1317)
+        if: env.STRIH_ENABLE_BROWSER == 'ON'
+        uses: actions/cache@v4
+        with:
+          path: cef-dl/${{ env.CEF_ARCHIVE }}
+          key: cef-${{ env.CEF_VERSION }}-${{ env.CEF_SHA256 }}
+
+      - name: Fetch + verify + extract CEF (issue 1317)
+        if: env.STRIH_ENABLE_BROWSER == 'ON'
+        run: |
+          set -euo pipefail
+          mkdir -p cef-dl cef-root
+          archive="cef-dl/${CEF_ARCHIVE}"
+          if [ ! -f "$archive" ]; then
+            echo "Downloading ${CEF_BASE_URL}/${CEF_ARCHIVE}"
+            curl -fSL --retry 3 -o "$archive" "${CEF_BASE_URL}/${CEF_ARCHIVE}"
+          else
+            echo "CEF archive restored from cache: $archive"
+          fi
+          echo "${CEF_SHA256}  ${archive}" | sha256sum -c -
+          tar -xf "$archive" -C cef-root
+          # The tarball extracts to a top-level cef_binary_<ver>_linux_x86_64[_v<rev>]/ dir -- point
+          # CEF_ROOT_DIR at THAT dir (never its parent), located by name so the _v<rev> suffix never
+          # has to be guessed. Absolute path so it survives the OBS configure step's working-directory.
+          cef_dir="$(find "$PWD/cef-root" -maxdepth 1 -type d -name 'cef_binary_*' | head -1)"
+          if [ -z "$cef_dir" ]; then echo "ERROR: extracted CEF top dir not found under cef-root"; exit 1; fi
+          echo "CEF_ROOT_DIR=$cef_dir" >> "$GITHUB_ENV"
+          echo "resolved CEF_ROOT_DIR=$cef_dir"
+
+      - name: Configure OBS (ubuntu-ci preset + genlock build flags, strih variant)
+        working-directory: vendor/obs-studio
+        run: >
+          cmake --preset ubuntu-ci
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
+          -DENABLE_WHATSNEW=OFF
+          -DENABLE_AJA=OFF
+          -DENABLE_VLC=ON
+          -DENABLE_TEST_INPUT=OFF
+          -DENABLE_BROWSER=${{ env.STRIH_ENABLE_BROWSER }}
+          -DCEF_ROOT_DIR=${{ env.CEF_ROOT_DIR }}
+
+      - name: Build OBS
+        working-directory: vendor/obs-studio
+        run: cmake --build build_ubuntu --parallel
+
+      - name: Install OBS SDK prefix (+ Development component, the #392 trick)
+        working-directory: vendor/obs-studio
+        run: |
+          cmake --install build_ubuntu --prefix "$GITHUB_WORKSPACE/obs-sdk"
+          cmake --install build_ubuntu --prefix "$GITHUB_WORKSPACE/obs-sdk" --component Development
+
+      - name: Configure DistroAV against the genlocked OBS SDK
+        working-directory: vendor/distroav
+        run: >
+          cmake --preset ubuntu-ci-x86_64
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DCAMERA_BOX_JXS_SOURCE=ON
+          -DCAMERA_BOX_JXS_FFI_LIB="$GITHUB_WORKSPACE/target/release/libjxs_recv_ffi.a"
+          -DCAMERA_BOX_JXS_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/recv-ffi/include"
+          -DCAMERA_BOX_JXS_SEND_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/send-ffi/include"
+          -DCAMERA_BOX_JXS_FFI_NATIVE_LIBS="$JXS_FFI_NATIVE_LIBS"
+
+      - name: Build DistroAV
+        working-directory: vendor/distroav
+        run: cmake --build --preset ubuntu-ci-x86_64
+
+      # issue 1439: a Linux stream box takes the console's VBAN program stream straight into the
+      # vendored obs-vban SOURCE (receive timeline + fixed reserve, stamped for the genlock ASRC):
+      # no intercom hub, never PipeWire. Built against the genlocked SDK like DistroAV; the
+      # imag-parity bundle consumes no VBAN and stays without it.
+      - name: Configure obs-vban against the genlocked OBS SDK (issue 1439)
+        working-directory: vendor/obs-vban
+        run: >
+          cmake -B build_ubuntu
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build obs-vban (issue 1439)
+        working-directory: vendor/obs-vban
+        run: cmake --build build_ubuntu --parallel
+
+      # issue 1470: the camera-box A/V-sync dock (vendor/av-sync-dock: the lock / offset / latency
+      # display, the mbc ASRC readout, the diag + LOCK-CORRECT SUGGESTED lines the av-step watchdog
+      # reads) on the Linux stream box -- the Windows bundle always carried it (windows-genlock.yml
+      # "Configure/Build av-sync-dock (#188)"). Built against the SAME genlocked SDK: libobs +
+      # obs-frontend-api (the Development component installed above) + the system Qt6 Widgets OBS
+      # itself links. The dock's source anchors are OS-independent text checks that already run on
+      # every push in ci.yml (the tests/av_sync_dock_*.rs twins of the windows-genlock pwsh dock
+      # steps), so this job adds what they cannot prove: the dock COMPILES and LINKS with gcc on Linux
+      # (its CMakeLists links with -Wl,-z,defs, so an unresolved symbol fails here).
+      - name: Configure av-sync-dock against the genlocked OBS SDK (issue 1470)
+        working-directory: vendor/av-sync-dock
+        run: >
+          cmake -B build_ubuntu
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DQT_VERSION=6
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build av-sync-dock (issue 1470)
+        working-directory: vendor/av-sync-dock
+        run: cmake --build build_ubuntu --parallel
+
+      # issue 1470: setup-strih step 16g seeds the dock into the stream OBS's saved layout
+      # (scripts/obs_dock_state.py edits the Qt saveState blob in user.ini [BasicWindow] DockState). A blob
+      # Qt cannot read resets the operator's whole dock layout, so prove the seed with THIS Qt (the
+      # release the strih bundle ships for) on the live stream-snv / stream-pp captures.
+      - name: Prove the A/V-sync dock layout seed against the real Qt (issue 1470)
+        run: bash tests/qt/run_dock_state_restore_1470.sh
+
+      - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
+        run: |
+          set -euo pipefail
+          rundir="vendor/obs-studio/build_ubuntu/rundir/RelWithDebInfo"
+          if [ ! -d "$rundir" ]; then echo "OBS rundir not found: $rundir"; exit 1; fi
+          mkdir -p stage
+          cp -a "$rundir"/. stage/
+
+          distroav_so=$(find vendor/distroav -name 'distroav.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$distroav_so" ]; then echo "distroav.so not found after the DistroAV build"; exit 1; fi
+
+          # issue 1387 slice 2: the strih distroav.so carries the JPEG XS source, and its stack is not
+          # executable (SVT's nasm objects would mark it so without -z noexecstack, and glibc 2.41+
+          # on the 26.04 box then refuses to load the plugin).
+          if ! grep -aq 'camera_box_jxs_source' "$distroav_so"; then echo "ERROR: $distroav_so has no camera_box_jxs_source (issue 1387)"; exit 1; fi
+          # issue 1387 slice 3: and the JPEG XS program output
+          if ! grep -aq 'camera_box_jxs_output' "$distroav_so"; then echo "ERROR: $distroav_so has no camera_box_jxs_output (issue 1387)"; exit 1; fi
+          stack="$(readelf -lW "$distroav_so" | awk '$1 == "GNU_STACK" {print $7}')"
+          if [ "$stack" != "RW" ]; then echo "ERROR: $distroav_so GNU_STACK flags '$stack', want RW (issue 1387)"; exit 1; fi
+          echo "distroav.so carries the JPEG XS source, GNU_STACK $stack (issue 1387)"
+
+          plugin_lib_dir=$(find stage -type d -path '*/obs-plugins' -not -path '*/share/*' | head -1)
+          if [ -z "$plugin_lib_dir" ]; then
+            echo "ERROR: no lib/obs-plugins dir found in the staged rundir"
+            exit 1
+          fi
+          cp "$distroav_so" "$plugin_lib_dir/"
+          # issue 1439: the vendored obs-vban (the VBAN receive source) next to DistroAV.
+          vban_so=$(find vendor/obs-vban/build_ubuntu -name 'obs-vban.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$vban_so" ]; then echo "ERROR: obs-vban.so not found after the obs-vban build (issue 1439)"; exit 1; fi
+          cp "$vban_so" "$plugin_lib_dir/"
+          # issue 1470: the camera-box A/V-sync dock next to obs-vban (the stream role's dock, verify-strih item 47).
+          dock_so=$(find vendor/av-sync-dock/build_ubuntu -name 'obs-audio-video-sync-dock.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$dock_so" ]; then echo "ERROR: obs-audio-video-sync-dock.so not found after the av-sync-dock build (issue 1470)"; exit 1; fi
+          if ! nm -D --defined-only "$dock_so" | grep -w obs_module_load >/dev/null; then echo "ERROR: $dock_so exports no obs_module_load -- OBS would not load it (issue 1470)"; exit 1; fi
+          cp "$dock_so" "$plugin_lib_dir/"
+          # issue 1425: the vendored vlc-video plugin (stamps on the OBS media clock) is built by the OBS build
+          # (-DENABLE_VLC=ON, libvlc-dev headers); it loads libvlc from the installed VLC at runtime.
+          if [ ! -f "$plugin_lib_dir/vlc-video.so" ]; then echo "ERROR: vlc-video.so not built (issue 1425)"; exit 1; fi
+
+          data_root=$(find stage -type d -path '*/share/obs/obs-plugins' | head -1)
+          if [ -z "$data_root" ]; then data_root="stage/share/obs/obs-plugins"; fi
+          if [ -d "vendor/distroav/data" ]; then
+            mkdir -p "$data_root/distroav"
+            cp -a vendor/distroav/data/. "$data_root/distroav/"
+          fi
+          mkdir -p "$data_root/obs-vban"
+          cp -a vendor/obs-vban/data/. "$data_root/obs-vban/"
+          echo "staged obs-vban.so from: $vban_so -> $plugin_lib_dir/"
+          mkdir -p "$data_root/obs-audio-video-sync-dock"
+          cp -a vendor/av-sync-dock/data/. "$data_root/obs-audio-video-sync-dock/"
+          if [ ! -f "$data_root/obs-audio-video-sync-dock/locale/en-US.ini" ]; then echo "ERROR: the dock locale did not stage (issue 1470)"; exit 1; fi
+          echo "staged obs-audio-video-sync-dock.so from: $dock_so -> $plugin_lib_dir/"
+
+          git rev-parse HEAD > stage/GENLOCK_BUILD_SHA.txt
+          # issue 1317: the strih variant's build-flags marker -- written INTO the stage BEFORE the
+          # manifest step so genlock-manifest.sh --check accounts for it (an unlisted file in stage
+          # would fail the manifest self-consistency check). Env-conditional so a flip of
+          # STRIH_ENABLE_BROWSER is the ONLY change: ON => a truthful BROWSER-ON marker (which
+          # verify-strih.sh's browser-bundle gate reads), OFF => the original BROWSER-OFF text.
+          if [ "$STRIH_ENABLE_BROWSER" = "ON" ]; then
+            marker="BROWSER-ON: obs-browser + CEF ${CEF_VERSION}"
+          else
+            marker="BROWSER-OFF: obs-browser/CEF not built (flip STRIH_ENABLE_BROWSER=ON to build it, issue 1317)"
+          fi
+          # issue 1317: the TARGET-RELEASE line records the Ubuntu release this bundle was BUILT on
+          # (single-sourced from the STRIH_TARGET_RELEASE job env, pinned equal to runs-on). verify-strih.sh
+          # + setup-strih.sh fail closed if this != the box's /etc/os-release VERSION_ID.
+          printf 'variant=strih\nENABLE_BROWSER=%s\n%s\nTARGET-RELEASE: %s\n' \
+            "$STRIH_ENABLE_BROWSER" "$marker" "$STRIH_TARGET_RELEASE" > stage/STRIH_BUILD_FLAGS.txt
+          echo "staged strih variant (ENABLE_BROWSER=$STRIH_ENABLE_BROWSER, TARGET-RELEASE=$STRIH_TARGET_RELEASE)"
+
+      # issue 1317: record the apt packages the built strih bundle links against (Qt6 / ffmpeg /
+      # libOpenGL runtime) into RUNTIME_PACKAGES.txt so setup-strih.sh installs them on the fresh
+      # 26.04 box BEFORE the bundle -- the fix for the 13-soname `libavcodec.so.62` load failure.
+      # Written INTO stage/ BEFORE the manifest step so genlock-manifest.sh --check accounts for it.
+      # `--extra qt6-wayland`: OBS DLOPENS its Qt Wayland platform plugin at runtime (ldd cannot see
+      # it), so it is FORCED into the list -- without it OBS aborts on 26.04 GNOME with
+      # `Could not find the Qt platform plugin "wayland"` (the strih box is Wayland, unlike imag).
+      - name: Record runtime packages (#1317)
+        run: scripts/genlock-runtime-packages.sh --stage stage --out stage/RUNTIME_PACKAGES.txt --extra qt6-wayland
+
+      - name: Generate per-component SHA manifest (#120)
+        run: scripts/genlock-manifest.sh --stage stage --out stage/BUNDLE_MANIFEST.json
+
+      - name: Assert bundle manifest self-consistent (#120)
+        run: scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
+
+      - name: Upload artifact (strih variant)
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-genlock-linux-x86_64-strih
+          path: stage/
+          if-no-files-found: error
