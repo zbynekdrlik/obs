@@ -83,6 +83,7 @@ int main(int argc, char **argv)
 		expect(src != NULL, "a dante_input source is created");
 		expect(logged_has("dante-input source: 'Dante test' created (1 source(s) now; device running"),
 		       "the create line names the running device");
+		expect(logged_has(", 2 channels at 96000 Hz)"), "the source runs at the device rate, 96 kHz");
 		/* Let the pump run blocks into the source. */
 		os_sleep_ms(2000);
 		obs_source_release(src);

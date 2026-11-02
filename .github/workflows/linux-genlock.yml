@@ -615,7 +615,7 @@ jobs:
             esac
             if [ -n "$iface" ]; then
               mkdir -p "$home/.camera-box"
-              printf 'name = "obs-ci"\niface = "%s"\nrx = ["Master L", "Master R"]\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 47200\n' "$iface" > "$home/.camera-box/dante-input.toml"
+              printf 'name = "obs-ci"\niface = "%s"\nsample_rate = 96000\nrx = ["Master L", "Master R"]\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 47200\n' "$iface" > "$home/.camera-box/dante-input.toml"
             fi
             echo "== $mode"
             HOME="$home" xvfb-run -a "$test_bin" "$so" "$mode"
