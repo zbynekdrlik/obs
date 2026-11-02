@@ -2,13 +2,15 @@
 
 ## Status
 
-This project owns the forked OBS. It splits from `zbynekdrlik/camera-box` under ticket airuleset#1280. The repository starts empty on purpose.
+This project owns the forked OBS. It split from `zbynekdrlik/camera-box` under ticket airuleset#1280, with history, from camera-box main 3d06cb46f8.
 
-The tree arrives from camera-box only after camera-box extracts the JPEG XS crate, so that no OBS build depends on the whole camera-box crate. camera-box reports that to airuleset. Do not copy `vendor/` by hand before that: the import keeps history and the `vendor/` paths.
+Imported: `vendor/obs-studio`, `vendor/distroav`, `vendor/av-sync-dock`, `vendor/obs-vban`, `vendor/README.md`, `vendor/BUILD.md`, `scripts/update-av-stack.sh`, `scripts/genlock-manifest.sh` and the four genlock workflows.
+
+The tree does not build yet. It needs `jxs/*`, `vendor/svt-jpeg-xs` and `rig/core`, which moved to `zbynekdrlik/vstack`. First work: pin a vstack tag, make the build and the imported workflows run here. The Rust tests that touch only vendored source are listed in section C of camera-box#1487 and still live in camera-box.
 
 ## Agreed with camera-box
 
-- The JPEG XS crate moves here first.
+- JPEG XS and `rig/core` live in vstack (owner, 2026-11-02). Direction: vstack, then obs and the cambox app, then camera-box as orchestrator.
 - Parity runs through versioned test vectors that camera-box publishes.
 - `vendor/` paths stay as they are.
 - The Dante OBS source (camera-box#1485) is written here, not in camera-box. This is the owner's decision of 2026-11-02, relayed by camera-box.
@@ -16,6 +18,7 @@ The tree arrives from camera-box only after camera-box extracts the JPEG XS crat
 ## What else acts on the machines
 
 - camera-box: the picture, the boxes, the deploy. It pins your released OBS builds. You do not deploy to the boxes yourself.
+- vstack: the shared video libraries. You pin its tags.
 - dstack: all Dante code. A Dante need or bug goes there, and this project only moves the stack version.
 - airuleset: accounts, tools, permissions.
 
