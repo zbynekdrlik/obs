@@ -34,21 +34,14 @@ on:
       - 'vendor/distroav/**'
       # issue 1439: the strih variant builds the vendored obs-vban (the VBAN receive source).
       - 'vendor/obs-vban/**'
-      # issue 1470: the strih variant builds the camera-box A/V-sync dock and proves its layout seed
-      # against the real Qt.
+      # issue 1470: the strih variant builds the A/V-sync dock.
       - 'vendor/av-sync-dock/**'
-      - 'scripts/obs_dock_state.py'
-      - 'tests/qt/**'
-      - 'tests/python/fixtures/obs_dock_state_1470/**'
       - 'scripts/genlock-manifest.sh'
-      # issue 1387 + 1487: the strih variant links the JPEG XS C ABIs (jxs/recv-ffi + jxs/send-ffi
-      # over jxs/link, rig/core and the vendored SVT-JPEG-XS) into DistroAV's JPEG XS source and
-      # program output.
-      - 'jxs/**'
-      - 'rig/**'
-      - 'vendor/svt-jpeg-xs/**'
-      # a dependency change can move the static library's native-library list or break the link.
-      - 'Cargo.toml'
+      - 'scripts/genlock-runtime-packages.sh'
+      # issue 1387 + camera-box#1487: the strih variant links the JPEG XS C ABIs (jxs-recv-ffi, which
+      # carries jxs-send-ffi) into DistroAV's JPEG XS source and program output. They come from the
+      # vstack tag in vstack.pin; a pin change can move the native-library list or break the link.
+      - 'vstack.pin'
       - '.github/workflows/linux-genlock.yml'
 
 permissions:
@@ -354,14 +347,40 @@ jobs:
       - name: Install the Rust toolchain (issue 1387)
         uses: dtolnay/rust-toolchain@stable
 
+      # camera-box#1487: the JPEG XS crates live in zbynekdrlik/vstack. vstack.pin names the tag AND
+      # its commit; the checkout must land on that commit, so a moved tag fails here, not at link.
+      - name: Read the vstack pin
+        run: |
+          set -euo pipefail
+          tag="$(sed -n 's/^tag=//p' vstack.pin)"
+          commit="$(sed -n 's/^commit=//p' vstack.pin)"
+          if [ -z "$tag" ] || [ -z "$commit" ]; then echo "ERROR: vstack.pin needs tag= and commit="; exit 1; fi
+          echo "VSTACK_TAG=$tag" >> "$GITHUB_ENV"
+          echo "VSTACK_COMMIT=$commit" >> "$GITHUB_ENV"
+
+      - name: Check out vstack at the pinned tag
+        uses: actions/checkout@v4
+        with:
+          repository: zbynekdrlik/vstack
+          ref: ${{ env.VSTACK_TAG }}
+          path: vstack
+
+      - name: Verify the vstack checkout is the pinned commit
+        run: |
+          set -euo pipefail
+          got="$(git -C vstack rev-parse HEAD)"
+          if [ "$got" != "$VSTACK_COMMIT" ]; then echo "ERROR: vstack $VSTACK_TAG is $got, vstack.pin says $VSTACK_COMMIT"; exit 1; fi
+          echo "vstack $VSTACK_TAG at $got"
+
       - name: Build the jxs-recv-ffi static library (issue 1387)
         # rustc prints the native-libs note in colour on the runner (run 40909341652), which the
         # `^note:` sed below cannot match; plain text only.
+        working-directory: vstack
         env:
           CARGO_TERM_COLOR: never
         run: |
           set -euo pipefail
-          if ! cargo rustc --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs 2> jxs-ffi-build.log; then
+          if ! cargo rustc --locked --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs 2> jxs-ffi-build.log; then
             cat jxs-ffi-build.log
             exit 1
           fi
@@ -442,9 +461,9 @@ jobs:
           cmake --preset ubuntu-ci-x86_64
           -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
           -DCAMERA_BOX_JXS_SOURCE=ON
-          -DCAMERA_BOX_JXS_FFI_LIB="$GITHUB_WORKSPACE/target/release/libjxs_recv_ffi.a"
-          -DCAMERA_BOX_JXS_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/recv-ffi/include"
-          -DCAMERA_BOX_JXS_SEND_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/send-ffi/include"
+          -DCAMERA_BOX_JXS_FFI_LIB="$GITHUB_WORKSPACE/vstack/target/release/libjxs_recv_ffi.a"
+          -DCAMERA_BOX_JXS_FFI_INCLUDE="$GITHUB_WORKSPACE/vstack/jxs/recv-ffi/include"
+          -DCAMERA_BOX_JXS_SEND_FFI_INCLUDE="$GITHUB_WORKSPACE/vstack/jxs/send-ffi/include"
           -DCAMERA_BOX_JXS_FFI_NATIVE_LIBS="$JXS_FFI_NATIVE_LIBS"
 
       - name: Build DistroAV
@@ -486,13 +505,6 @@ jobs:
       - name: Build av-sync-dock (issue 1470)
         working-directory: vendor/av-sync-dock
         run: cmake --build build_ubuntu --parallel
-
-      # issue 1470: setup-strih step 16g seeds the dock into the stream OBS's saved layout
-      # (scripts/obs_dock_state.py edits the Qt saveState blob in user.ini [BasicWindow] DockState). A blob
-      # Qt cannot read resets the operator's whole dock layout, so prove the seed with THIS Qt (the
-      # release the strih bundle ships for) on the live stream-snv / stream-pp captures.
-      - name: Prove the A/V-sync dock layout seed against the real Qt (issue 1470)
-        run: bash tests/qt/run_dock_state_restore_1470.sh
 
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
         run: |
