@@ -384,7 +384,7 @@ jobs:
       - name: Install build dependencies (apt)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }} nasm libclang-dev zstd  # obs#1: zstd packs the release bundle; issue 1387: nasm for SVT-JPEG-XS, libclang for the v4l2 sys crate's bindgen (the jxs-recv-ffi build below)
+          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }} nasm libclang-dev zstd xvfb  # obs#1: zstd packs the release bundle, xvfb gives the dante-input module test the X display libobs opens; issue 1387: nasm for SVT-JPEG-XS, libclang for the v4l2 sys crate's bindgen (the jxs-recv-ffi build below)
 
       # issue 1387 slice 2: DistroAV's JPEG XS source links the jxs-recv-ffi static library (a C ABI
       # over the JPEG XS crate's receive loop, the code jxs-recv-probe runs). rustc names the native
@@ -618,7 +618,7 @@ jobs:
               printf 'name = "obs-ci"\niface = "%s"\nrx = ["Master L", "Master R"]\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 47200\n' "$iface" > "$home/.camera-box/dante-input.toml"
             fi
             echo "== $mode"
-            HOME="$home" "$test_bin" "$so" "$mode"
+            HOME="$home" xvfb-run -a "$test_bin" "$so" "$mode"
           done
 
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
