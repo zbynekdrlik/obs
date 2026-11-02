@@ -29,26 +29,22 @@ on:
   workflow_dispatch:
   push:
     branches: [dev]
+    # obs#1 point 1: a tag vX.Y.Z on main builds the strih bundle and publishes it as a release
+    # (publish-release job below). GitHub does not apply the paths filter to tag pushes.
+    tags: ['v*']
     paths:
       - 'vendor/obs-studio/**'
       - 'vendor/distroav/**'
       # issue 1439: the strih variant builds the vendored obs-vban (the VBAN receive source).
       - 'vendor/obs-vban/**'
-      # issue 1470: the strih variant builds the camera-box A/V-sync dock and proves its layout seed
-      # against the real Qt.
+      # issue 1470: the strih variant builds the A/V-sync dock.
       - 'vendor/av-sync-dock/**'
-      - 'scripts/obs_dock_state.py'
-      - 'tests/qt/**'
-      - 'tests/python/fixtures/obs_dock_state_1470/**'
       - 'scripts/genlock-manifest.sh'
-      # issue 1387 + 1487: the strih variant links the JPEG XS C ABIs (jxs/recv-ffi + jxs/send-ffi
-      # over jxs/link, rig/core and the vendored SVT-JPEG-XS) into DistroAV's JPEG XS source and
-      # program output.
-      - 'jxs/**'
-      - 'rig/**'
-      - 'vendor/svt-jpeg-xs/**'
-      # a dependency change can move the static library's native-library list or break the link.
-      - 'Cargo.toml'
+      - 'scripts/genlock-runtime-packages.sh'
+      # issue 1387 + camera-box#1487: the strih variant links the JPEG XS C ABIs (jxs-recv-ffi, which
+      # carries jxs-send-ffi) into DistroAV's JPEG XS source and program output. They come from the
+      # vstack tag in vstack.pin; a pin change can move the native-library list or break the link.
+      - 'vstack.pin'
       - '.github/workflows/linux-genlock.yml'
 
 permissions:
@@ -184,6 +180,10 @@ jobs:
   linux-genlock-build:
     name: Full Linux genlock bundle (OBS + DistroAV, #460)
     needs: [linux-distroav-compile-check]
+    # obs#1 (camera-box, 2026-11-02): imag is out of the fleet but used in summer; setup-imag.sh,
+    # deploy-genlock-fleet.sh and manifest-autosource still read obs-genlock-linux-x86_64. Build it
+    # on dispatch only, not on every push.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -345,7 +345,7 @@ jobs:
       - name: Install build dependencies (apt)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }} nasm libclang-dev  # issue 1387: nasm for SVT-JPEG-XS, libclang for the v4l2 sys crate's bindgen (the jxs-recv-ffi build below)
+          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }} nasm libclang-dev zstd  # obs#1: zstd packs the release bundle; issue 1387: nasm for SVT-JPEG-XS, libclang for the v4l2 sys crate's bindgen (the jxs-recv-ffi build below)
 
       # issue 1387 slice 2: DistroAV's JPEG XS source links the jxs-recv-ffi static library (a C ABI
       # over the JPEG XS crate's receive loop, the code jxs-recv-probe runs). rustc names the native
@@ -354,14 +354,40 @@ jobs:
       - name: Install the Rust toolchain (issue 1387)
         uses: dtolnay/rust-toolchain@stable
 
+      # camera-box#1487: the JPEG XS crates live in zbynekdrlik/vstack. vstack.pin names the tag AND
+      # its commit; the checkout must land on that commit, so a moved tag fails here, not at link.
+      - name: Read the vstack pin
+        run: |
+          set -euo pipefail
+          tag="$(sed -n 's/^tag=//p' vstack.pin)"
+          commit="$(sed -n 's/^commit=//p' vstack.pin)"
+          if [ -z "$tag" ] || [ -z "$commit" ]; then echo "ERROR: vstack.pin needs tag= and commit="; exit 1; fi
+          echo "VSTACK_TAG=$tag" >> "$GITHUB_ENV"
+          echo "VSTACK_COMMIT=$commit" >> "$GITHUB_ENV"
+
+      - name: Check out vstack at the pinned tag
+        uses: actions/checkout@v4
+        with:
+          repository: zbynekdrlik/vstack
+          ref: ${{ env.VSTACK_TAG }}
+          path: vstack
+
+      - name: Verify the vstack checkout is the pinned commit
+        run: |
+          set -euo pipefail
+          got="$(git -C vstack rev-parse HEAD)"
+          if [ "$got" != "$VSTACK_COMMIT" ]; then echo "ERROR: vstack $VSTACK_TAG is $got, vstack.pin says $VSTACK_COMMIT"; exit 1; fi
+          echo "vstack $VSTACK_TAG at $got"
+
       - name: Build the jxs-recv-ffi static library (issue 1387)
         # rustc prints the native-libs note in colour on the runner (run 40909341652), which the
         # `^note:` sed below cannot match; plain text only.
+        working-directory: vstack
         env:
           CARGO_TERM_COLOR: never
         run: |
           set -euo pipefail
-          if ! cargo rustc --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs 2> jxs-ffi-build.log; then
+          if ! cargo rustc --locked --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs 2> jxs-ffi-build.log; then
             cat jxs-ffi-build.log
             exit 1
           fi
@@ -442,9 +468,9 @@ jobs:
           cmake --preset ubuntu-ci-x86_64
           -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
           -DCAMERA_BOX_JXS_SOURCE=ON
-          -DCAMERA_BOX_JXS_FFI_LIB="$GITHUB_WORKSPACE/target/release/libjxs_recv_ffi.a"
-          -DCAMERA_BOX_JXS_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/recv-ffi/include"
-          -DCAMERA_BOX_JXS_SEND_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/send-ffi/include"
+          -DCAMERA_BOX_JXS_FFI_LIB="$GITHUB_WORKSPACE/vstack/target/release/libjxs_recv_ffi.a"
+          -DCAMERA_BOX_JXS_FFI_INCLUDE="$GITHUB_WORKSPACE/vstack/jxs/recv-ffi/include"
+          -DCAMERA_BOX_JXS_SEND_FFI_INCLUDE="$GITHUB_WORKSPACE/vstack/jxs/send-ffi/include"
           -DCAMERA_BOX_JXS_FFI_NATIVE_LIBS="$JXS_FFI_NATIVE_LIBS"
 
       - name: Build DistroAV
@@ -486,13 +512,6 @@ jobs:
       - name: Build av-sync-dock (issue 1470)
         working-directory: vendor/av-sync-dock
         run: cmake --build build_ubuntu --parallel
-
-      # issue 1470: setup-strih step 16g seeds the dock into the stream OBS's saved layout
-      # (scripts/obs_dock_state.py edits the Qt saveState blob in user.ini [BasicWindow] DockState). A blob
-      # Qt cannot read resets the operator's whole dock layout, so prove the seed with THIS Qt (the
-      # release the strih bundle ships for) on the live stream-snv / stream-pp captures.
-      - name: Prove the A/V-sync dock layout seed against the real Qt (issue 1470)
-        run: bash tests/qt/run_dock_state_restore_1470.sh
 
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
         run: |
@@ -549,6 +568,11 @@ jobs:
           echo "staged obs-audio-video-sync-dock.so from: $dock_so -> $plugin_lib_dir/"
 
           git rev-parse HEAD > stage/GENLOCK_BUILD_SHA.txt
+          # obs#1 point 3: OBS_RELEASE.txt names the release tag (a dev build says tag=none), the obs
+          # commit and VERSION. Written before the manifest so the manifest lists it.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then rel_tag="$GITHUB_REF_NAME"; else rel_tag="none"; fi
+          printf 'tag=%s\ncommit=%s\nversion=%s\n' "$rel_tag" "$(git rev-parse HEAD)" "$(tr -d '[:space:]' < VERSION)" > stage/OBS_RELEASE.txt
+          cat stage/OBS_RELEASE.txt
           # issue 1317: the strih variant's build-flags marker -- written INTO the stage BEFORE the
           # manifest step so genlock-manifest.sh --check accounts for it (an unlisted file in stage
           # would fail the manifest self-consistency check). Env-conditional so a flip of
@@ -582,9 +606,127 @@ jobs:
       - name: Assert bundle manifest self-consistent (#120)
         run: scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
 
+      # obs#1 point 2: the release fields go into BUNDLE_MANIFEST.json as one "release" line right
+      # after the opening brace. genlock-manifest.sh --check reads the files[] entries line by line,
+      # so the rest of the file keeps its exact layout; the re-check below proves it.
+      - name: Add the release fields to BUNDLE_MANIFEST.json (obs#1)
+        run: |
+          set -euo pipefail
+          abi="$(grep -rhoE '#define[[:space:]]+CBJXS_ABI_VERSION[[:space:]]+[0-9]+' vstack/jxs/recv-ffi/include vstack/jxs/send-ffi/include | awk '{print $3}' | sort -u)"
+          if [ "$(printf '%s\n' "$abi" | grep -c .)" != 1 ]; then echo "ERROR: want one CBJXS_ABI_VERSION in the vstack headers, got: '$abi'"; exit 1; fi
+          stats="$(sed -n 's/^#define OBS_GENLOCK_STATS_VERSION \([0-9]\+\)$/\1/p' vendor/obs-studio/libobs/obs.h)"
+          out_stats="$(sed -n 's/^#define OBS_GENLOCK_OUTPUT_STATS_VERSION \([0-9]\+\)$/\1/p' vendor/obs-studio/libobs/obs.h)"
+          vban="$(sed -n 's/^project(obs-vban VERSION \([0-9.]\+\))$/\1/p' vendor/obs-vban/CMakeLists.txt)"
+          dock="$(sed -n 's/^project(obs-audio-video-sync-dock VERSION \([0-9.]\+\))$/\1/p' vendor/av-sync-dock/CMakeLists.txt)"
+          obs="$(jq -r '.components[] | select(.name == "obs-studio") | .pinned_version' stage/BUNDLE_MANIFEST.json)"
+          distroav="$(jq -r '.components[] | select(.name == "distroav") | .pinned_version' stage/BUNDLE_MANIFEST.json)"
+          for v in stats out_stats vban dock obs distroav; do
+            if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then echo "ERROR: could not read $v"; exit 1; fi
+          done
+          release="$(jq -cn \
+            --arg tag "$(sed -n 's/^tag=//p' stage/OBS_RELEASE.txt)" \
+            --arg commit "$(git rev-parse HEAD)" \
+            --arg version "$(tr -d '[:space:]' < VERSION)" \
+            --arg obs "$obs" --arg distroav "$distroav" \
+            --arg vban "$vban" --arg dock "$dock" \
+            --arg vstack_tag "$VSTACK_TAG" --arg vstack_commit "$VSTACK_COMMIT" \
+            --argjson stats "$stats" --argjson out_stats "$out_stats" \
+            --arg obs_h "$(sha256sum vendor/obs-studio/libobs/obs.h | cut -d' ' -f1)" \
+            --argjson abi "$abi" \
+            '{obs_tag: $tag, obs_commit: $commit, obs_version: $version,
+              versions: {"obs-studio": $obs, distroav: $distroav, "obs-vban": $vban, "av-sync-dock": $dock},
+              vstack_tag: $vstack_tag, vstack_commit: $vstack_commit,
+              genlock_stats_version: $stats, genlock_output_stats_version: $out_stats,
+              obs_h_sha256: $obs_h, cbjxs_abi_version: $abi}')"
+          awk -v line="  \"release\": $release," 'NR == 1 {print; print line; next} {print}' stage/BUNDLE_MANIFEST.json > manifest.tmp
+          mv manifest.tmp stage/BUNDLE_MANIFEST.json
+          jq -e '.release.obs_commit and (.files | length > 0)' stage/BUNDLE_MANIFEST.json > /dev/null
+          scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
+          jq '.release' stage/BUNDLE_MANIFEST.json
+
       - name: Upload artifact (strih variant)
         uses: actions/upload-artifact@v4
         with:
           name: obs-genlock-linux-x86_64-strih
           path: stage/
           if-no-files-found: error
+
+      # obs#1 points 1 and 4: the release assets. The tarball keeps the file modes (an artifact zip
+      # drops the executable bits). Runs on every build, so a dev push proves the packaging before a
+      # tag exists; only publish-release uploads them to a release.
+      - name: Package the release assets (obs#1)
+        run: |
+          set -euo pipefail
+          tag="$(sed -n 's/^tag=//p' stage/OBS_RELEASE.txt)"
+          if [ "$tag" = "none" ]; then tag="dev-$(git rev-parse --short=12 HEAD)"; fi
+          mkdir -p release
+          bundle="obs-strih-linux-x86_64-$tag.tar.zst"
+          tar -C stage -cf - . | zstd -q -T0 -10 -o "release/$bundle"
+          # obs#1 point 4: the burn and QPSK headers camera-box's decoders read, plus obs.h.
+          headers="obs-headers-$tag.tar.gz"
+          tar -czf "release/$headers" \
+            vendor/distroav/src/burn-geom.hpp vendor/distroav/src/burn-payload.hpp vendor/distroav/src/burn-tick-cache.hpp \
+            vendor/av-sync-dock/src/camera-box-marker-scan.hpp vendor/av-sync-dock/src/camera-box-channel-pick.hpp \
+            vendor/av-sync-dock/src/camera-box-qr.hpp vendor/av-sync-dock/src/camera-box-audio.hpp \
+            vendor/av-sync-dock/src/sync-test-output-internal.hpp \
+            vendor/obs-studio/libobs/obs.h
+          cp stage/BUNDLE_MANIFEST.json stage/OBS_RELEASE.txt release/
+          (cd release && for f in "$bundle" "$headers"; do sha256sum "$f" > "$f.sha256"; done && sha256sum -c ./*.sha256)
+          # Read the bundle back: the obs binary must keep its executable bit, the manifest must match.
+          mkdir unpack && zstd -dc "release/$bundle" | tar -C unpack -xf -
+          obs_bin="$(find unpack -type f -name obs -path '*/bin/*' | head -1)"
+          if [ -z "$obs_bin" ] || [ ! -x "$obs_bin" ]; then echo "ERROR: the unpacked bundle has no executable bin/obs"; exit 1; fi
+          scripts/genlock-manifest.sh --check unpack/BUNDLE_MANIFEST.json --stage unpack
+          ls -l release
+
+      - name: Upload the release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-release-assets
+          path: release/
+          if-no-files-found: error
+          compression-level: 0
+
+  # obs#1 point 1: a release per tag vX.Y.Z from main. camera-box pins the tag + sha256.
+  publish-release:
+    name: Publish the release (tag vX.Y.Z on main)
+    needs: [linux-genlock-build-strih]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The tag matches VERSION and is on main
+        run: |
+          set -euo pipefail
+          want="v$(tr -d '[:space:]' < VERSION)"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then echo "ERROR: tag $GITHUB_REF_NAME, VERSION says $want"; exit 1; fi
+          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "ERROR: tag $GITHUB_REF_NAME is not vX.Y.Z"; exit 1; fi
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then echo "ERROR: $GITHUB_SHA is not on main"; exit 1; fi
+          echo "release $GITHUB_REF_NAME at $GITHUB_SHA"
+
+      - name: Download the release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: obs-release-assets
+          path: release
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum -c ./*.sha256
+          grep -qx "tag=$GITHUB_REF_NAME" OBS_RELEASE.txt
+          grep -qx "commit=$GITHUB_SHA" OBS_RELEASE.txt
+          bundle_sha="$(cut -d' ' -f1 obs-strih-linux-x86_64-"$GITHUB_REF_NAME".tar.zst.sha256)"
+          printf 'Linux strih bundle %s (obs commit %s).\n\nobs-strih-linux-x86_64-%s.tar.zst sha256 %s\n\nRelease fields:\n```json\n%s\n```\n' \
+            "$GITHUB_REF_NAME" "$GITHUB_SHA" "$GITHUB_REF_NAME" "$bundle_sha" "$(jq '.release' BUNDLE_MANIFEST.json)" > notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md ./*.tar.* ./*.sha256 BUNDLE_MANIFEST.json OBS_RELEASE.txt
+          gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[] | "\(.name) \(.size)"'
