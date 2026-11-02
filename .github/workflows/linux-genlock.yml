@@ -839,5 +839,10 @@ jobs:
           bundle_sha="$(cut -d' ' -f1 obs-strih-linux-x86_64-"$GITHUB_REF_NAME".tar.zst.sha256)"
           printf 'Linux strih bundle %s (obs commit %s).\n\nobs-strih-linux-x86_64-%s.tar.zst sha256 %s\n\nRelease fields:\n```json\n%s\n```\n' \
             "$GITHUB_REF_NAME" "$GITHUB_SHA" "$GITHUB_REF_NAME" "$bundle_sha" "$(jq '.release' BUNDLE_MANIFEST.json)" > notes.md
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md ./*.tar.* ./*.sha256 BUNDLE_MANIFEST.json OBS_RELEASE.txt
+          # Named one by one: a `*.tar.*` glob also matches the .sha256 files, and a name given twice
+          # fails the upload (v0.1.0, run 41545413697: HTTP 404 on the second copy).
+          bundle="obs-strih-linux-x86_64-$GITHUB_REF_NAME.tar.zst"
+          headers="obs-headers-$GITHUB_REF_NAME.tar.gz"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            "$bundle" "$bundle.sha256" "$headers" "$headers.sha256" BUNDLE_MANIFEST.json OBS_RELEASE.txt
           gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[] | "\(.name) \(.size)"'
