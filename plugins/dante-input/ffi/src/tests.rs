@@ -111,6 +111,7 @@ fn a_closed_gate_keeps_every_later_block_from_the_plugin() {
 }
 
 #[test]
-fn the_sample_rate_is_dlinks() {
-    assert_eq!(dante_input_sample_rate(), 48_000);
+fn no_device_has_no_rate() {
+    // SAFETY: NULL is allowed.
+    assert_eq!(unsafe { dante_input_sample_rate(std::ptr::null()) }, 0);
 }

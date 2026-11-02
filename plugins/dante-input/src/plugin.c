@@ -30,7 +30,8 @@ OBS_DECLARE_MODULE()
 
 static struct dante_input *device;
 static uint32_t device_channels;
-static uint32_t device_rate;
+/* Written once after the start; the pump thread reads it (0: not known yet, the block is skipped). */
+static volatile long device_rate;
 static pthread_mutex_t sources_mutex = PTHREAD_MUTEX_INITIALIZER;
 static DARRAY(obs_source_t *) sources;
 static bool registered;
@@ -68,7 +69,7 @@ static void on_log(int level, const char *msg)
 /* Blocks are stamped by their sample count, so OBS sees the device's steady pace, not the
  * pump's wake jitter; a stamp that drifts past DANTE_INPUT_RESYNC_NS from the system clock (a gap,
  * a stall, clock drift) is re-anchored on it. */
-static uint64_t stamp(uint32_t frames)
+static uint64_t stamp(uint32_t frames, uint32_t rate)
 {
 	uint64_t now = os_gettime_ns();
 	uint64_t diff = now > next_ts ? now - next_ts : next_ts - now;
@@ -81,7 +82,7 @@ static uint64_t stamp(uint32_t frames)
 		next_ts = now;
 	}
 	uint64_t ts = next_ts;
-	next_ts += util_mul_div64(frames, 1000000000ULL, device_rate);
+	next_ts += util_mul_div64(frames, 1000000000ULL, rate);
 	return ts;
 }
 
@@ -89,14 +90,17 @@ static uint64_t stamp(uint32_t frames)
 static void on_audio(void *opaque, const float *const *planes, uint32_t channels, uint32_t frames)
 {
 	UNUSED_PARAMETER(opaque);
+	uint32_t rate = (uint32_t)os_atomic_load_long(&device_rate);
+	if (rate == 0)
+		return;
 	struct obs_source_audio audio = {0};
 	for (uint32_t c = 0; c < channels && c < MAX_AV_PLANES; c++)
 		audio.data[c] = (const uint8_t *)planes[c];
 	audio.frames = frames;
 	audio.speakers = layout_of(channels);
 	audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
-	audio.samples_per_sec = device_rate;
-	audio.timestamp = stamp(frames);
+	audio.samples_per_sec = rate;
+	audio.timestamp = stamp(frames, rate);
 
 	/* Strong refs under the lock, the output outside it: OBS's own locks are never taken while
 	 * sources_mutex is held, so source create/destroy cannot deadlock against the pump. */
@@ -129,7 +133,8 @@ static void *dante_input_create(obs_data_t *settings, obs_source_t *source)
 	size_t n = sources.num;
 	pthread_mutex_unlock(&sources_mutex);
 	blog(LOG_INFO, "dante-input source: '%s' created (%zu source(s) now; device %s, %u channels at %u Hz)",
-	     obs_source_get_name(source), n, device ? "running" : "NOT running", device_channels, device_rate);
+	     obs_source_get_name(source), n, device ? "running" : "NOT running", device_channels,
+	     (unsigned)os_atomic_load_long(&device_rate));
 	return source;
 }
 
@@ -178,11 +183,13 @@ bool obs_module_load(void)
 	}
 
 	dante_input_set_log(on_log);
-	device_rate = dante_input_sample_rate();
 	char err[512] = {0};
+	/* device_rate is set before the first block can need it: the pump may run before
+	 * dante_input_start returns, so on_audio skips blocks until it is set. */
 	device = dante_input_start(path.array, on_audio, NULL, err, sizeof(err));
 	if (device) {
 		device_channels = dante_input_channels(device);
+		os_atomic_set_long(&device_rate, (long)dante_input_sample_rate(device));
 		pin_module();
 	} else {
 		/* The source kind is still registered, so a scene that names it loads silent, not missing;

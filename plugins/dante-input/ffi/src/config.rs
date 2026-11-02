@@ -34,6 +34,10 @@ pub struct InputConfig {
     pub state_file: Option<PathBuf>,
     #[serde(default = "default_latency")]
     pub latency_ms: u32,
+    /// Hz; the Dante network's rate (the site runs 96000). dlink's 48000 unless set. OBS resamples
+    /// each source to its own rate, so any rate dlink takes works.
+    #[serde(default = "default_rate")]
+    pub sample_rate: u32,
     /// The RX channels' names, in channel order: OBS gets them in this order.
     pub rx: Vec<String>,
     pub arc_port: Option<u16>,
@@ -47,6 +51,10 @@ pub struct InputConfig {
 
 fn default_latency() -> u32 {
     DEFAULT_LATENCY_MS
+}
+
+fn default_rate() -> u32 {
+    dlink::SAMPLE_RATE
 }
 
 impl InputConfig {
@@ -101,6 +109,7 @@ impl InputConfig {
         let mut c = dlink::Config::new(self.name.clone(), state)
             .rx(self.rx.clone())
             .latency_ns(u64::from(self.latency_ms) * 1_000_000)
+            .sample_rate(self.sample_rate)
             .product("obs", "dante-input");
         if let (Some(arc), Some(cmc), Some(flows)) = (self.arc_port, self.cmc_port, self.flows_port)
         {

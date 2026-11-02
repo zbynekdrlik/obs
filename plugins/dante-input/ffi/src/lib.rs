@@ -199,6 +199,7 @@ impl Process for Sink {
 pub struct DanteInput {
     link: Arc<Mutex<Option<Link>>>,
     channels: u32,
+    rate: u32,
     delivered: Arc<AtomicU64>,
     gate: Arc<Mutex<bool>>,
     stop: mpsc::Sender<()>,
@@ -212,11 +213,12 @@ impl DanteInput {
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: config={} name={} iface={} latency_ms={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
+                "dante-input start: config={} name={} iface={} latency_ms={} sample_rate={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
                 path.display(),
                 cfg.name,
                 cfg.iface,
                 cfg.latency_ms,
+                cfg.sample_rate,
                 cfg.rx,
                 cfg.arc_port,
                 cfg.cmc_port,
@@ -253,6 +255,7 @@ impl DanteInput {
         let mut d = DanteInput {
             link,
             channels: n as u32,
+            rate: cfg.sample_rate,
             delivered,
             gate,
             stop,
@@ -271,6 +274,11 @@ impl DanteInput {
 
     pub fn channels(&self) -> u32 {
         self.channels
+    }
+
+    /// The device's sample rate, Hz: every block's.
+    pub fn rate(&self) -> u32 {
+        self.rate
     }
 
     /// The device's counts now; `None` once it is stopped.
@@ -395,10 +403,14 @@ pub unsafe extern "C" fn dante_input_start(
     std::ptr::null_mut()
 }
 
-/// The sample rate of every block: dlink's (the config sets none).
+/// The device's sample rate, Hz: every block's.
+///
+/// # Safety
+/// `d` comes from dante_input_start and was not stopped.
 #[unsafe(no_mangle)]
-pub extern "C" fn dante_input_sample_rate() -> u32 {
-    dlink::SAMPLE_RATE
+pub unsafe extern "C" fn dante_input_sample_rate(d: *const DanteInput) -> u32 {
+    // SAFETY: the caller's contract.
+    unsafe { d.as_ref() }.map_or(0, DanteInput::rate)
 }
 
 /// The RX channels the device hands over per block.

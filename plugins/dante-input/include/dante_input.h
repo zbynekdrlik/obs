@@ -23,8 +23,8 @@ void dante_input_set_log(dante_input_log_cb cb);
 struct dante_input *dante_input_start(const char *path, dante_input_audio_cb cb, void *opaque, char *err,
 				      size_t err_len);
 
-/* The sample rate of every block (dlink's). */
-uint32_t dante_input_sample_rate(void);
+/* The device's sample rate, Hz: every block's (the config's sample_rate, 48000 unless set). */
+uint32_t dante_input_sample_rate(const struct dante_input *d);
 
 /* The RX channels per block. */
 uint32_t dante_input_channels(const struct dante_input *d);

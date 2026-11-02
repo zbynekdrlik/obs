@@ -122,3 +122,41 @@ fn a_latency_outside_4_to_100_ms_is_refused() {
         assert_eq!(InputConfig::load(&path).unwrap().latency_ms, good);
     }
 }
+
+#[test]
+fn the_rate_is_48_khz_unless_the_file_sets_96() {
+    let (_d, path) = write(GOOD);
+    assert_eq!(
+        InputConfig::load(&path)
+            .unwrap()
+            .dlink()
+            .device()
+            .unwrap()
+            .sample_rate,
+        48_000
+    );
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\nsample_rate = 96000",
+    ));
+    let cfg = InputConfig::load(&path).unwrap();
+    assert_eq!(cfg.sample_rate, 96_000);
+    assert_eq!(cfg.dlink().device().unwrap().sample_rate, 96_000);
+}
+
+#[test]
+fn a_rate_dlink_refuses_is_refused_before_anything_runs() {
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\nsample_rate = 12345",
+    ));
+    let problems = InputConfig::load(&path)
+        .unwrap()
+        .dlink()
+        .device()
+        .unwrap_err();
+    assert!(
+        problems.iter().any(|p| p.contains("sample_rate: 12345")),
+        "{problems:?}"
+    );
+}
