@@ -1,0 +1,6 @@
+target/
+build/
+.env
+TARGETS.md
+*.pem
+*.key
