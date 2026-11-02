@@ -1,0 +1,124 @@
+use super::*;
+
+const GOOD: &str = r#"
+name = "strih-obs"
+iface = "enp7s0.70"
+rx = ["Master L", "Master R"]
+arc_port = 4440
+cmc_port = 8800
+flows_port = 4455
+rx_port_base = 47200
+
+[[subscribe]]
+rx = 1
+tx_channel = "A"
+tx_device = "foh"
+
+[[subscribe]]
+rx = 2
+tx_channel = "B"
+tx_device = "foh"
+"#;
+
+fn write(text: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dante-input.toml");
+    std::fs::write(&path, text).unwrap();
+    (dir, path)
+}
+
+#[test]
+fn a_full_file_reads_with_10_ms_and_the_state_file_next_to_it() {
+    let (_d, path) = write(GOOD);
+    let cfg = InputConfig::load(&path).unwrap();
+    assert_eq!(cfg.name, "strih-obs");
+    assert_eq!(cfg.iface, "enp7s0.70");
+    assert_eq!(cfg.latency_ms, 10);
+    assert_eq!(cfg.rx, ["Master L", "Master R"]);
+    assert_eq!(
+        cfg.state_file,
+        Some(path.with_file_name("dante-input.state.toml"))
+    );
+    assert_eq!(cfg.subscribe.len(), 2);
+}
+
+#[test]
+fn the_dlink_device_takes_ports_subscriptions_latency_and_no_tx() {
+    let (_d, path) = write(GOOD);
+    let dev = InputConfig::load(&path).unwrap().dlink().device().unwrap();
+    assert_eq!(dev.name, "strih-obs");
+    assert_eq!(dev.latency_ns, 10_000_000);
+    assert_eq!(
+        (dev.arc_port, dev.cmc_port, dev.flows_port),
+        (4440, 8800, 4455)
+    );
+    assert_eq!(dev.rx_port_base, Some(47200));
+    assert_eq!(dev.rx, ["Master L", "Master R"]);
+    assert!(dev.tx.is_empty());
+    assert_eq!(dev.subscribe.len(), 2);
+}
+
+#[test]
+fn a_latency_from_the_file_reaches_the_device() {
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\nlatency_ms = 20",
+    ));
+    let dev = InputConfig::load(&path).unwrap().dlink().device().unwrap();
+    assert_eq!(dev.latency_ns, 20_000_000);
+}
+
+#[test]
+fn every_problem_is_listed() {
+    let bad = r#"
+name = "x"
+iface = ""
+rx = ["1","2","3","4","5","6","7"]
+arc_port = 4440
+[[subscribe]]
+rx = 9
+tx_channel = "A"
+tx_device = "foh"
+"#;
+    let (_d, path) = write(bad);
+    let e = InputConfig::load(&path).unwrap_err();
+    assert!(e.contains("iface: empty"), "{e}");
+    assert!(e.contains("rx: 7 channels"), "{e}");
+    assert!(e.contains("set all three or none"), "{e}");
+    assert!(e.contains("subscribe: rx 9"), "{e}");
+}
+
+#[test]
+fn an_unknown_key_is_refused() {
+    let (_d, path) = write(&format!("{GOOD}\nlatency = 5\n"));
+    let e = InputConfig::load(&path).unwrap_err();
+    assert!(e.contains("unknown field"), "{e}");
+}
+
+#[test]
+fn a_missing_file_names_the_path() {
+    let e = InputConfig::load(Path::new("/nonexistent/dante-input.toml")).unwrap_err();
+    assert!(e.starts_with("/nonexistent/dante-input.toml: "), "{e}");
+}
+
+#[test]
+fn a_latency_outside_4_to_100_ms_is_refused() {
+    for bad in [0, 3, 101] {
+        let (_d, path) = write(&GOOD.replace(
+            "rx_port_base = 47200",
+            &format!("rx_port_base = 47200\nlatency_ms = {bad}"),
+        ));
+        let e = InputConfig::load(&path).unwrap_err();
+        assert!(
+            e.contains(&format!("latency_ms: {bad} is not one of 4..=100")),
+            "{e}"
+        );
+    }
+    for good in [4, 100] {
+        let (_d, path) = write(&GOOD.replace(
+            "rx_port_base = 47200",
+            &format!("rx_port_base = 47200\nlatency_ms = {good}"),
+        ));
+        assert_eq!(InputConfig::load(&path).unwrap().latency_ms, good);
+    }
+}
