@@ -1,0 +1,38 @@
+# ~/.camera-box/dante-input.toml: the dante_input source's device (obs#1, camera-box#1485).
+# camera-box's deploy writes the box's own file; this is the format, with placeholder names.
+# No file: no Dante device and no dante_input source. Real device and channel names are site
+# config only; keep them out of this public repo (the names below are placeholders).
+
+name = "strih-obs"                # the device name Dante Controller lists
+iface = "enp7s0.70"               # the interface that faces the Dante network
+network_rate = 96000              # the network's rate; dlink's 2:1 step gives OBS its own rate
+# sample_rate = 48000             # OBS's audio rate unless set
+latency_ms = 10                   # 4..=100
+rx = ["Master L", "Master R", "Click", "Guide"]   # 1-6 or 8 channels; OBS gets them in this order
+arc_port = 4440                   # arc/cmc/flows: all three or none
+cmc_port = 8800
+flows_port = 4455
+rx_port_base = 47200
+# state_file = "..."              # default: dante-input.state.toml next to this file
+
+# One subscription per RX channel; each names its own transmitter, so channels from two TX
+# devices are fine.
+[[subscribe]]
+rx = 1
+tx_channel = "MASTER-L"
+tx_device = "foh-master-tx"
+
+[[subscribe]]
+rx = 2
+tx_channel = "MASTER-R"
+tx_device = "foh-master-tx"
+
+[[subscribe]]
+rx = 3
+tx_channel = "CLICK"
+tx_device = "foh-band-tx"
+
+[[subscribe]]
+rx = 4
+tx_channel = "GUIDE"
+tx_device = "foh-band-tx"

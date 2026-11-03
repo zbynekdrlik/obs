@@ -201,3 +201,19 @@ fn a_rate_dlink_refuses_is_refused_before_anything_runs() {
         "{problems:?}"
     );
 }
+
+#[test]
+fn the_example_config_reads_and_subscribes_from_two_transmitters() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dante-input.example.toml");
+    let cfg = InputConfig::load(&path).unwrap();
+    assert_eq!(cfg.rx.len(), 4);
+    assert_eq!(cfg.network_rate, Some(96_000));
+    let devices: std::collections::BTreeSet<_> =
+        cfg.subscribe.iter().map(|s| s.tx_device.as_str()).collect();
+    assert_eq!(devices.len(), 2, "{devices:?}");
+    let link = cfg.dlink(48_000);
+    assert!(link.halved());
+    let dev = link.device().unwrap();
+    assert_eq!(dev.subscribe.len(), 4);
+    assert_eq!(dev.sample_rate, 96_000);
+}
