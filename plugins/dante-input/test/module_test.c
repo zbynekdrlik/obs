@@ -53,6 +53,21 @@ static bool logged_has(const char *s)
 	return found;
 }
 
+/* Whether a mapping of this process names `name`. /proc files report size 0, so they are read
+ * line by line, not by a size-first reader. */
+static bool mapped(const char *name)
+{
+	FILE *f = fopen("/proc/self/maps", "r");
+	if (!f)
+		return false;
+	char line[4096];
+	bool found = false;
+	while (!found && fgets(line, sizeof(line), f))
+		found = strstr(line, name) != NULL;
+	fclose(f);
+	return found;
+}
+
 /* `s` logged within `ms` (libobs destroys a released source on another thread). */
 static bool logged_within(const char *s, int ms)
 {
@@ -120,9 +135,7 @@ int main(int argc, char **argv)
 	obs_shutdown();
 	if (strcmp(mode, "running") == 0) {
 		/* RTLD_NODELETE held: the module stays mapped after OBS unloaded it. */
-		char *maps = os_quick_read_utf8_file("/proc/self/maps");
-		expect(maps && strstr(maps, "dante-input.so") != NULL, "the module stays mapped after unload (pinned)");
-		bfree(maps);
+		expect(mapped("dante-input.so"), "the module stays mapped after unload (pinned)");
 		expect(logged_has("held loaded for the process"), "the pin was logged");
 		expect(logged_has("dante-input stop: device stopped (Done)"), "unload stops the device cleanly");
 		expect(!logged_has("did not end within the stop wait"), "no pump left running");
