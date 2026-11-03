@@ -141,7 +141,7 @@ fn obs_gets_its_own_rate_and_the_device_runs_at_the_network_s() {
     assert_eq!(cfg.app_rate(48_000), 48_000);
     let link = cfg.dlink(48_000);
     assert_eq!(link.device_rate(), 96_000);
-    assert!(link.halved());
+    assert!(link.converts());
     assert_eq!(link.device().unwrap().sample_rate, 96_000);
 }
 
@@ -150,7 +150,7 @@ fn without_a_network_rate_the_device_runs_at_obs_s() {
     let (_d, path) = write(GOOD);
     let cfg = InputConfig::load(&path).unwrap();
     assert_eq!(cfg.dlink(48_000).device().unwrap().sample_rate, 48_000);
-    assert!(!cfg.dlink(48_000).halved());
+    assert!(!cfg.dlink(48_000).converts());
     // OBS's rate unknown: dlink's.
     assert_eq!(cfg.app_rate(0), dlink::SAMPLE_RATE);
 }
@@ -163,26 +163,19 @@ fn the_file_s_sample_rate_wins_over_obs_s() {
     ));
     let cfg = InputConfig::load(&path).unwrap();
     assert_eq!(cfg.app_rate(44_100), 48_000);
-    assert!(cfg.dlink(44_100).halved());
+    assert!(cfg.dlink(44_100).converts());
 }
 
+/// dlink v0.6.8 (dstack #90): any app rate converts on the device's clock, no longer only half.
 #[test]
-fn obs_at_44_1_khz_on_a_96_khz_network_is_refused_with_the_reason() {
+fn obs_at_44_1_khz_on_a_96_khz_network_runs_through_dlink_s_converter() {
     let (_d, path) = write(&GOOD.replace(
         "rx_port_base = 47200",
         "rx_port_base = 47200\nnetwork_rate = 96000",
     ));
-    let problems = InputConfig::load(&path)
-        .unwrap()
-        .dlink(44_100)
-        .device()
-        .unwrap_err();
-    assert!(
-        problems
-            .iter()
-            .any(|p| p.contains("network_rate 96000 must be the sample rate 44100 or twice it")),
-        "{problems:?}"
-    );
+    let link = InputConfig::load(&path).unwrap().dlink(44_100);
+    assert!(link.converts());
+    assert_eq!(link.device().unwrap().sample_rate, 96_000);
 }
 
 #[test]
@@ -212,7 +205,7 @@ fn the_example_config_reads_and_subscribes_from_two_transmitters() {
         cfg.subscribe.iter().map(|s| s.tx_device.as_str()).collect();
     assert_eq!(devices.len(), 2, "{devices:?}");
     let link = cfg.dlink(48_000);
-    assert!(link.halved());
+    assert!(link.converts());
     let dev = link.device().unwrap();
     assert_eq!(dev.subscribe.len(), 4);
     assert_eq!(dev.sample_rate, 96_000);
