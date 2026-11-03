@@ -123,7 +123,7 @@ impl Status {
     pub fn pump(&mut self, p: Pump) {
         self.media_clock = p.media;
         self.blocks = p.blocks;
-        self.underruns = p.late + p.missed;
+        self.underruns = p.missed;
         self.late_blocks = p.late;
         self.rebootstraps = p.rebootstraps;
         self.overruns = p.overruns;
