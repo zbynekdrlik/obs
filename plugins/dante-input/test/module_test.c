@@ -118,7 +118,7 @@ int main(int argc, char **argv)
 		expect(logged_has("dante-input source: 'Dante test' created (1 source(s) now; device running"),
 		       "the create line names the running device");
 		expect(logged_has(", 2 channels at 48000 Hz)"), "OBS gets 48 kHz blocks from the 96 kHz network");
-		expect(logged_has("device_rate=96000 halved=true"), "the device runs at the network's 96 kHz");
+		expect(logged_has("device_rate=96000 converts=true"), "the device runs at the network's 96 kHz");
 		/* The pump's blocks reach the source. */
 		expect(logged_within("dante-input source: first block delivered (", 2000),
 		       "a block reached the source within 2 s");

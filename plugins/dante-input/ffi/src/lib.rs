@@ -371,13 +371,13 @@ impl DanteInput {
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} halved={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
+                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
                 path.display(),
                 cfg.name,
                 cfg.iface,
                 cfg.latency_ms,
                 link_cfg.device_rate(),
-                link_cfg.halved(),
+                link_cfg.converts(),
                 cfg.rx,
                 cfg.arc_port,
                 cfg.cmc_port,
