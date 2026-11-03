@@ -38,6 +38,8 @@ static bool registered;
 /* The pump thread's own: the stamp the next block gets, and the re-anchors. */
 static uint64_t next_ts;
 static uint64_t resyncs;
+/* Set once the first block reached a source (logged once, the pump's proof of life in OBS). */
+static volatile long first_block_logged;
 
 static enum speaker_layout layout_of(uint32_t channels)
 {
@@ -117,6 +119,9 @@ static void on_audio(void *opaque, const float *const *planes, uint32_t channels
 		obs_source_output_audio(targets[i], &audio);
 		obs_source_release(targets[i]);
 	}
+	if (n > 0 && !os_atomic_set_long(&first_block_logged, 1))
+		blog(LOG_INFO, "dante-input source: first block delivered (%u frames, %u channels at %u Hz, %zu source(s))",
+		     frames, channels, rate, n);
 }
 
 static const char *dante_input_name(void *type_data)

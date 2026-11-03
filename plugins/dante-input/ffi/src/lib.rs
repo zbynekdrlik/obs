@@ -6,11 +6,11 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dlink::{Block, Link, Map, Place, Process};
 
@@ -24,6 +24,9 @@ use status::Status;
 pub const LOG_ERROR: c_int = 100;
 pub const LOG_WARNING: c_int = 200;
 pub const LOG_INFO: c_int = 300;
+
+/// The longest [`DanteInput::stop`] waits for a callback still inside the plugin.
+pub const GATE_WAIT: Duration = Duration::from_secs(2);
 
 /// How often the status line is logged (obs#1 log contract).
 pub const STATUS_EVERY: Duration = Duration::from_secs(10);
@@ -120,6 +123,54 @@ pub unsafe extern "C" fn dante_input_set_log(cb: LogCb) {
     }
 }
 
+/// Lets blocks through to the plugin until closed. Closing waits, bounded, for a callback still
+/// inside the plugin; no lock is held across the callback, so nothing it locks can deadlock it.
+#[derive(Debug)]
+pub struct Gate {
+    open: AtomicBool,
+    in_flight: AtomicU32,
+}
+
+/// One callback inside the gate; leaving drops the count.
+pub struct Pass<'a>(&'a Gate);
+
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Gate {
+    pub fn new() -> Arc<Gate> {
+        Arc::new(Gate {
+            open: AtomicBool::new(true),
+            in_flight: AtomicU32::new(0),
+        })
+    }
+
+    /// A pass while the gate is open. The count goes up before the check, so a close that sees
+    /// no callback in flight sees every later one refused.
+    pub fn enter(&self) -> Option<Pass<'_>> {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        let pass = Pass(self);
+        self.open.load(Ordering::SeqCst).then_some(pass)
+    }
+
+    /// Closes the gate and waits up to `wait` for the callbacks in flight; false if one is still
+    /// inside after that.
+    pub fn close(&self, wait: Duration) -> bool {
+        self.open.store(false, Ordering::SeqCst);
+        let deadline = Instant::now() + wait;
+        while self.in_flight.load(Ordering::SeqCst) != 0 {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+}
+
 /// The C callback and its argument, sent to the pump thread.
 struct Target {
     cb: AudioCb,
@@ -138,7 +189,7 @@ pub struct Sink {
     delivered: Arc<AtomicU64>,
     /// Closed by [`DanteInput::stop`] before the device stops: no callback reaches the plugin
     /// after that, even when dlink leaves its pump running past the stop wait.
-    gate: Arc<Mutex<bool>>,
+    gate: Arc<Gate>,
 }
 
 // SAFETY: `ptrs` only ever points into `planes`, owned by the same value.
@@ -150,7 +201,7 @@ impl Sink {
         opaque: *mut c_void,
         channels: usize,
         delivered: Arc<AtomicU64>,
-        gate: Arc<Mutex<bool>>,
+        gate: Arc<Gate>,
     ) -> Sink {
         Sink {
             target: Target { cb, opaque },
@@ -164,11 +215,9 @@ impl Sink {
 
 impl Process for Sink {
     fn process(&mut self, block: &mut Block<'_>) {
-        // Held for the whole call, so closing the gate waits for a callback in flight.
-        let Ok(open) = self.gate.lock() else { return };
-        if !*open {
+        let Some(_pass) = self.gate.enter() else {
             return;
-        }
+        };
         let frames = block.frames();
         let channels = block.inputs().min(self.planes.len());
         for c in 0..channels {
@@ -201,7 +250,7 @@ pub struct DanteInput {
     channels: u32,
     rate: u32,
     delivered: Arc<AtomicU64>,
-    gate: Arc<Mutex<bool>>,
+    gate: Arc<Gate>,
     stop: mpsc::Sender<()>,
     status: Option<JoinHandle<()>>,
 }
@@ -239,7 +288,7 @@ impl DanteInput {
         );
         let n = cfg.rx.len();
         let delivered = Arc::new(AtomicU64::new(0));
-        let gate = Arc::new(Mutex::new(true));
+        let gate = Gate::new();
         let sink = Sink::new(cb, opaque, n, Arc::clone(&delivered), Arc::clone(&gate));
         let map = Map {
             rx: (0..n).collect(),
@@ -303,7 +352,15 @@ impl DanteInput {
     /// Closes the gate (no callback reaches the plugin after this; one in flight is waited for),
     /// stops the status thread, then the device (its goodbyes sent).
     pub fn stop(mut self) {
-        close_gate(&self.gate);
+        if !self.gate.close(GATE_WAIT) {
+            log(
+                LOG_ERROR,
+                &format!(
+                    "dante-input error: a block was still inside OBS {} ms after the stop; going on",
+                    GATE_WAIT.as_millis()
+                ),
+            );
+        }
         let _ = self.stop.send(());
         if let Some(t) = self.status.take() {
             let _ = t.join();
@@ -323,13 +380,6 @@ impl DanteInput {
             },
             None => log(LOG_INFO, "dante-input stop: no device was running"),
         }
-    }
-}
-
-fn close_gate(gate: &Mutex<bool>) {
-    match gate.lock() {
-        Ok(mut open) => *open = false,
-        Err(poisoned) => *poisoned.into_inner() = false,
     }
 }
 

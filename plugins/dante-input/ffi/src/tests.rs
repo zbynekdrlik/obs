@@ -24,7 +24,7 @@ unsafe extern "C" fn record(
 #[test]
 fn the_sink_hands_each_block_as_float_planes_and_counts_the_frames() {
     let delivered = Arc::new(AtomicU64::new(0));
-    let gate = Arc::new(Mutex::new(true));
+    let gate = Gate::new();
     let mut sink = Sink::new(
         record,
         std::ptr::null_mut(),
@@ -93,7 +93,7 @@ unsafe extern "C" fn count(_: *mut c_void, _: *const *const f32, _: u32, _: u32)
 #[test]
 fn a_closed_gate_keeps_every_later_block_from_the_plugin() {
     let delivered = Arc::new(AtomicU64::new(0));
-    let gate = Arc::new(Mutex::new(true));
+    let gate = Gate::new();
     let mut sink = Sink::new(
         count,
         std::ptr::null_mut(),
@@ -104,7 +104,7 @@ fn a_closed_gate_keeps_every_later_block_from_the_plugin() {
     let input = [0.0; 32];
     let mut out: [f64; 0] = [];
     sink.process(&mut Block::new(32, &input, &mut out));
-    close_gate(&gate);
+    assert!(gate.close(GATE_WAIT));
     sink.process(&mut Block::new(32, &input, &mut out));
     sink.process(&mut Block::new(32, &input, &mut out));
     assert_eq!(GATED.load(Ordering::Relaxed), 1);
@@ -115,4 +115,16 @@ fn a_closed_gate_keeps_every_later_block_from_the_plugin() {
 fn no_device_has_no_rate() {
     // SAFETY: NULL is allowed.
     assert_eq!(unsafe { dante_input_sample_rate(std::ptr::null()) }, 0);
+}
+
+#[test]
+fn closing_waits_for_a_callback_in_flight_and_gives_up_after_the_wait() {
+    let gate = Gate::new();
+    let pass = gate.enter().expect("open");
+    // A callback still inside: the close gives up after its wait.
+    assert!(!gate.close(Duration::from_millis(50)));
+    // Closed: no new pass.
+    assert!(gate.enter().is_none());
+    drop(pass);
+    assert!(gate.close(Duration::from_millis(50)));
 }

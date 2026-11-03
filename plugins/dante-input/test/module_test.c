@@ -104,8 +104,11 @@ int main(int argc, char **argv)
 		       "the create line names the running device");
 		expect(logged_has(", 2 channels at 48000 Hz)"), "OBS gets 48 kHz blocks from the 96 kHz network");
 		expect(logged_has("device_rate=96000 halved=true"), "the device runs at the network's 96 kHz");
-		/* Let the pump run blocks into the source. */
-		os_sleep_ms(2000);
+		/* The pump's blocks reach the source. */
+		expect(logged_within("dante-input source: first block delivered (", 2000),
+		       "a block reached the source within 2 s");
+		expect(logged_has("channels at 48000 Hz, 1 source(s))"), "the block is 48 kHz, to the one source");
+		os_sleep_ms(500);
 		obs_source_release(src);
 		expect(logged_within("dante-input source: destroyed (0 source(s) left)", 3000),
 		       "the source is destroyed within 3 s");
@@ -116,6 +119,11 @@ int main(int argc, char **argv)
 
 	obs_shutdown();
 	if (strcmp(mode, "running") == 0) {
+		/* RTLD_NODELETE held: the module stays mapped after OBS unloaded it. */
+		char *maps = os_quick_read_utf8_file("/proc/self/maps");
+		expect(maps && strstr(maps, "dante-input.so") != NULL, "the module stays mapped after unload (pinned)");
+		bfree(maps);
+		expect(logged_has("held loaded for the process"), "the pin was logged");
 		expect(logged_has("dante-input stop: device stopped (Done)"), "unload stops the device cleanly");
 		expect(!logged_has("did not end within the stop wait"), "no pump left running");
 	}
