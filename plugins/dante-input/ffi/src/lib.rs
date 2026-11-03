@@ -19,6 +19,7 @@ use dlink::{Block, Link, Map, Place, Process};
 
 pub mod config;
 pub mod status;
+pub mod tray;
 
 use config::InputConfig;
 use status::Status;
@@ -414,6 +415,24 @@ impl DanteInput {
                 cfg.name, cfg.iface
             ),
         );
+        // dtray's obs line: the hand-off to OBS, on dlink's own status thread.
+        let tray_feed = Arc::clone(&feed);
+        let tray = Mutex::new(tray::Tray::new(rate, Instant::now()));
+        link.set_app_status(move || {
+            let counts = tray::Counts {
+                delivered: tray_feed.delivered.load(Ordering::Relaxed),
+                dropped: tray_feed.dropped.load(Ordering::Relaxed),
+                max_obs_ns: tray_feed.max_obs_ns.load(Ordering::Relaxed),
+            };
+            match tray.lock() {
+                Ok(mut t) => t.app_status(counts, Instant::now()),
+                Err(_) => r#"{"line":"OBS: status lock poisoned","state":"error"}"#.to_owned(),
+            }
+        });
+        log(
+            LOG_INFO,
+            "dante-input start: dtray shows the OBS hand-off (error on a dropped frame, warn after 2 s without audio)",
+        );
         let link = Arc::new(Mutex::new(Some(link)));
         let (stop, stopped) = mpsc::channel();
         let watched = Arc::clone(&link);
@@ -473,6 +492,11 @@ impl DanteInput {
     /// The device's counts now; `None` once it is stopped.
     pub fn status(&self) -> Option<Status> {
         status_of(&self.link, &self.feed)
+    }
+
+    /// dlink's status JSON (what dtray reads), the obs part as `app`; `None` once stopped.
+    pub fn device_status(&self) -> Option<String> {
+        Some(self.link.lock().ok()?.as_ref()?.status())
     }
 
     /// Why the device ended by itself, if it did.

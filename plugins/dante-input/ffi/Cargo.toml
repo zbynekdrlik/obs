@@ -16,9 +16,10 @@ crate-type = ["staticlib", "rlib"]
 # v0.5.20: network_rate, the 2:1 step from the 96 kHz network to the app's rate (dstack #90).
 # v0.6.8: the RX ring counts a sample the reader overtook mid-write as late (dstack #99).
 # v0.6.10: the clock follower seeds from the dsync service and keeps it until it settles (dsync-ptp v1.27.3).
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.10" }
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.19" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
