@@ -1,0 +1,31 @@
+[package]
+name = "dante-input-ffi"
+version = "0.2.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+description = "The C ABI under the OBS dante_input source: a dlink device (dstack) whose RX blocks reach OBS"
+
+[lib]
+name = "dante_input_ffi"
+# staticlib for the OBS plugin; rlib for the tests.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# obs#1 / camera-box#1485: the Dante device an app embeds. The tag is the only pin; dstack moves it.
+# v0.5.20: network_rate, the 2:1 step from the 96 kHz network to the app's rate (dstack #90).
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.20" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# A crate of its own, not a member of any parent workspace.
+[workspace]
+
+[profile.release]
+lto = true
+codegen-units = 1

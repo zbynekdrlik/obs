@@ -45,6 +45,8 @@ on:
       # carries jxs-send-ffi) into DistroAV's JPEG XS source and program output. They come from the
       # vstack tag in vstack.pin; a pin change can move the native-library list or break the link.
       - 'vstack.pin'
+      # obs#1 / camera-box#1485: the dante_input source (C) and its Rust device (dlink).
+      - 'plugins/**'
       - '.github/workflows/linux-genlock.yml'
 
 permissions:
@@ -310,9 +312,46 @@ jobs:
   # CEF_ROOT_DIR, with STRIH_ENABLE_BROWSER=ON (issue 1317). Flip that one env var to 'OFF' to drop
   # the browser sources again. The imag-parity linux-genlock-build job above is left byte-identical
   # (browser OFF -- imag needs no browser source).
+  # obs#1 / camera-box#1485: the dante_input source's Rust side. fmt, clippy, the unit tests, and the
+  # real device on a dummy interface (device_e2e: its UDP ports bound while it runs, the status line,
+  # the ports free after stop), all under the coverage gate.
+  dante-input-ffi:
+    name: dante-input FFI (fmt, clippy, tests, device on a dummy iface, coverage)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: plugins/dante-input/ffi
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: A dummy interface for the device test
+        run: |
+          set -euo pipefail
+          sudo ip link add dante0 type dummy
+          sudo ip addr add 10.99.0.1/24 dev dante0
+          sudo ip link set dante0 up
+          ip -4 addr show dante0
+      - name: Tests and the device test, under the coverage gate
+        env:
+          DANTE_INPUT_TEST_IFACE: dante0
+          DANTE_INPUT_TEST_IP: 10.99.0.1
+        run: cargo llvm-cov --locked --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }} -- --nocapture
+
   linux-genlock-build-strih:
     name: Full Linux genlock bundle -- strih variant (issue 1317)
-    needs: [linux-distroav-compile-check]
+    needs: [linux-distroav-compile-check, dante-input-ffi]
     # issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-snv notebook runs Ubuntu 26.04 (resolute) --
     # noble's ffmpeg/Qt sonames (libavcodec60 / Qt 6.4) do not exist there, so the strih bundle must
     # be built on the 26.04 runner or it cannot load on the box. ONLY this job moves; the imag-parity
@@ -345,7 +384,7 @@ jobs:
       - name: Install build dependencies (apt)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }} nasm libclang-dev zstd  # obs#1: zstd packs the release bundle; issue 1387: nasm for SVT-JPEG-XS, libclang for the v4l2 sys crate's bindgen (the jxs-recv-ffi build below)
+          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }} nasm libclang-dev zstd xvfb  # obs#1: zstd packs the release bundle, xvfb gives the dante-input module test the X display libobs opens; issue 1387: nasm for SVT-JPEG-XS, libclang for the v4l2 sys crate's bindgen (the jxs-recv-ffi build below)
 
       # issue 1387 slice 2: DistroAV's JPEG XS source links the jxs-recv-ffi static library (a C ABI
       # over the JPEG XS crate's receive loop, the code jxs-recv-probe runs). rustc names the native
@@ -513,6 +552,75 @@ jobs:
         working-directory: vendor/av-sync-dock
         run: cmake --build build_ubuntu --parallel
 
+      # obs#1 / camera-box#1485: the dante_input source. Its Rust device (dlink, pinned dstack tag in
+      # plugins/dante-input/ffi/Cargo.toml) is a static library; rustc names its native libraries.
+      - name: Build the dante-input FFI static library (obs#1)
+        working-directory: plugins/dante-input/ffi
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set -euo pipefail
+          if ! cargo rustc --locked --release --lib --crate-type staticlib -- --print native-static-libs 2> ffi-build.log; then
+            cat ffi-build.log
+            exit 1
+          fi
+          cat ffi-build.log
+          libs="$(sed -n 's/^note: native-static-libs: //p' ffi-build.log | tail -1)"
+          if [ -z "$libs" ]; then echo "ERROR: rustc printed no native-static-libs line"; exit 1; fi
+          if [ ! -f target/release/libdante_input_ffi.a ]; then echo "ERROR: libdante_input_ffi.a not built"; exit 1; fi
+          echo "DANTE_INPUT_FFI_NATIVE_LIBS=$libs" >> "$GITHUB_ENV"
+
+      - name: Configure and build the dante-input source (obs#1)
+        working-directory: plugins/dante-input
+        run: |
+          set -euo pipefail
+          cmake -B build_ubuntu -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DDANTE_INPUT_FFI_LIB="$GITHUB_WORKSPACE/plugins/dante-input/ffi/target/release/libdante_input_ffi.a" \
+            -DDANTE_INPUT_FFI_NATIVE_LIBS="$DANTE_INPUT_FFI_NATIVE_LIBS"
+          cmake --build build_ubuntu --parallel
+          so=build_ubuntu/dante-input.so
+          if [ ! -f "$so" ]; then echo "ERROR: $so not built"; exit 1; fi
+          exports="$(nm -D --defined-only "$so" | awk '{print $3}' | sort)"
+          echo "$exports"
+          for sym in obs_module_load obs_module_unload obs_module_name; do
+            if ! grep -qx "$sym" <<< "$exports"; then echo "ERROR: $so does not export $sym"; exit 1; fi
+          done
+          if grep -E '^_ZN|^_R|^dante_input_' <<< "$exports"; then echo "ERROR: $so exports its Rust symbols (want them private)"; exit 1; fi
+          stack="$(readelf -lW "$so" | awk '$1 == "GNU_STACK" {print $7}')"
+          if [ "$stack" != "RW" ]; then echo "ERROR: $so GNU_STACK flags '$stack', want RW"; exit 1; fi
+          echo "dante-input.so: $(stat -c%s "$so") bytes, GNU_STACK $stack"
+
+      # obs#1: the module through real libobs: no config = no kind and no device; a config with an
+      # interface the box lacks = the kind, no device, the error line; a config on a dummy interface =
+      # the device runs, a source is created and destroyed, unload stops the device cleanly.
+      - name: Test the dante-input module through libobs (obs#1)
+        working-directory: plugins/dante-input
+        run: |
+          set -euo pipefail
+          libobs="$(find "$GITHUB_WORKSPACE/obs-sdk" -name 'libobs.so*' -type f | head -1)"
+          if [ -z "$libobs" ]; then echo "ERROR: no libobs.so in obs-sdk"; exit 1; fi
+          export LD_LIBRARY_PATH="$(dirname "$libobs")"
+          so="$PWD/build_ubuntu/dante-input.so"
+          test_bin="$PWD/build_ubuntu/dante-input-module-test"
+          sudo ip link add dante0 type dummy
+          sudo ip addr add 10.99.0.1/24 dev dante0
+          sudo ip link set dante0 up
+          for mode in absent bad-iface running; do
+            home="$RUNNER_TEMP/home-$mode"
+            mkdir -p "$home"
+            case "$mode" in
+              bad-iface) iface=nosuch0 ;;
+              running) iface=dante0 ;;
+              *) iface="" ;;
+            esac
+            if [ -n "$iface" ]; then
+              mkdir -p "$home/.camera-box"
+              printf 'name = "obs-ci"\niface = "%s"\nnetwork_rate = 96000\nrx = ["Master L", "Master R"]\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 47200\n' "$iface" > "$home/.camera-box/dante-input.toml"
+            fi
+            echo "== $mode"
+            HOME="$home" xvfb-run -a "$test_bin" "$so" "$mode"
+          done
+
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
         run: |
           set -euo pipefail
@@ -549,6 +657,9 @@ jobs:
           if [ -z "$dock_so" ]; then echo "ERROR: obs-audio-video-sync-dock.so not found after the av-sync-dock build (issue 1470)"; exit 1; fi
           if ! nm -D --defined-only "$dock_so" | grep -w obs_module_load >/dev/null; then echo "ERROR: $dock_so exports no obs_module_load -- OBS would not load it (issue 1470)"; exit 1; fi
           cp "$dock_so" "$plugin_lib_dir/"
+          # obs#1 / camera-box#1485: the dante_input source (no device and no source kind without
+          # ~/.camera-box/dante-input.toml on the box).
+          cp plugins/dante-input/build_ubuntu/dante-input.so "$plugin_lib_dir/"
           # issue 1425: the vendored vlc-video plugin (stamps on the OBS media clock) is built by the OBS build
           # (-DENABLE_VLC=ON, libvlc-dev headers); it loads libvlc from the installed VLC at runtime.
           if [ ! -f "$plugin_lib_dir/vlc-video.so" ]; then echo "ERROR: vlc-video.so not built (issue 1425)"; exit 1; fi
@@ -728,5 +839,10 @@ jobs:
           bundle_sha="$(cut -d' ' -f1 obs-strih-linux-x86_64-"$GITHUB_REF_NAME".tar.zst.sha256)"
           printf 'Linux strih bundle %s (obs commit %s).\n\nobs-strih-linux-x86_64-%s.tar.zst sha256 %s\n\nRelease fields:\n```json\n%s\n```\n' \
             "$GITHUB_REF_NAME" "$GITHUB_SHA" "$GITHUB_REF_NAME" "$bundle_sha" "$(jq '.release' BUNDLE_MANIFEST.json)" > notes.md
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md ./*.tar.* ./*.sha256 BUNDLE_MANIFEST.json OBS_RELEASE.txt
+          # Named one by one: a `*.tar.*` glob also matches the .sha256 files, and a name given twice
+          # fails the upload (v0.1.0, run 41545413697: HTTP 404 on the second copy).
+          bundle="obs-strih-linux-x86_64-$GITHUB_REF_NAME.tar.zst"
+          headers="obs-headers-$GITHUB_REF_NAME.tar.gz"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            "$bundle" "$bundle.sha256" "$headers" "$headers.sha256" BUNDLE_MANIFEST.json OBS_RELEASE.txt
           gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[] | "\(.name) \(.size)"'
