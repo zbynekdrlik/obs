@@ -38,6 +38,10 @@ pub struct Status {
     pub overruns: u64,
     /// The longest block, µs.
     pub max_process_us: u64,
+    /// Frames lost because the ring to the OBS feeder was full.
+    pub obs_dropped: u64,
+    /// The longest callback into OBS, µs (the feeder thread, not the pump).
+    pub max_obs_us: u64,
     /// Frames handed to OBS.
     pub delivered_frames: u64,
 }
@@ -56,7 +60,8 @@ impl Status {
             s,
             " clock={} holdover={} gm={gm} polls={} re_anchors={} rx_packets={} rx_loss={} \
              rx_gaps={} rx_late={} socket_drops={} blocks={} underruns={} overruns={} delivered_frames={} \
-             rx_holes={} rx_written_late={} late_blocks={} rebootstraps={} max_process_us={}",
+             rx_holes={} rx_written_late={} late_blocks={} rebootstraps={} max_process_us={} \
+             obs_dropped={} max_obs_us={}",
             if self.media_clock { "media" } else { "free" },
             u8::from(self.holdover),
             self.clock_polls,
@@ -75,6 +80,8 @@ impl Status {
             self.late_blocks,
             self.rebootstraps,
             self.max_process_us,
+            self.obs_dropped,
+            self.max_obs_us,
         );
         s
     }
@@ -170,6 +177,8 @@ mod tests {
             rebootstraps: 10,
             overruns: 6,
             max_process_us: 11,
+            obs_dropped: 12,
+            max_obs_us: 13,
             delivered_frames: 4800,
         };
         assert_eq!(
@@ -177,7 +186,7 @@ mod tests {
             "dante-input status: clock=media holdover=0 gm=001dc1fffe0a polls=12 re_anchors=1 \
              rx_packets=100 rx_loss=3 rx_gaps=1 rx_late=2 socket_drops=4 blocks=50 underruns=5 \
              overruns=6 delivered_frames=4800 rx_holes=7 rx_written_late=8 late_blocks=9 \
-             rebootstraps=10 max_process_us=11"
+             rebootstraps=10 max_process_us=11 obs_dropped=12 max_obs_us=13"
         );
     }
 

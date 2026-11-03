@@ -1,5 +1,8 @@
 //! The C ABI under the OBS `dante_input` source (obs#1, camera-box#1485): one dlink device (dstack)
-//! per OBS process, RX only. Every block of its RX channels goes to the C callback as float planes.
+//! per OBS process, RX only. The pump's [`Sink`] only copies each block into a lock-free ring; the
+//! `dante-input-obs` thread ([`Feeder`]) hands it to the C callback as float planes. OBS takes its
+//! source mutexes in that call, so it never runs inside the pump's 0.33 ms block (v0.3.0 on
+//! strih-snv: blocks of up to 6.7 ms, past the 5 ms margin, skipped).
 //! The device's own log (dlink's clock choice, subscriptions, errors) and the 10 s status line go to
 //! the C log callback, so they land in the OBS log.
 
@@ -30,6 +33,16 @@ pub const GATE_WAIT: Duration = Duration::from_secs(2);
 
 /// How often the status line is logged (obs#1 log contract).
 pub const STATUS_EVERY: Duration = Duration::from_secs(10);
+
+/// How often the feeder hands the ring's frames to OBS.
+pub const FEED_EVERY: Duration = Duration::from_millis(2);
+
+/// The ring between the pump and the feeder holds this much audio; a feeder that far behind loses
+/// frames (counted as `obs_dropped`).
+pub const RING_SECONDS: usize = 1;
+
+/// The most frames one callback hands OBS (10 ms at 48 kHz).
+pub const MAX_CHUNK: usize = 480;
 
 /// `planes[c]` holds `frames` samples of channel `c`, -1.0 to 1.0.
 pub type AudioCb = unsafe extern "C" fn(
@@ -171,76 +184,162 @@ impl Gate {
     }
 }
 
-/// The C callback and its argument, sent to the pump thread.
+/// The C callback and its argument, sent to the feeder thread.
 struct Target {
     cb: AudioCb,
     opaque: *mut c_void,
 }
 
 // SAFETY: the plugin's callback is thread-safe (it locks its own state) and `opaque` lives until
-// dante_input_stop returns, which stops the pump first.
+// dante_input_stop returns, which ends the feeder first.
 unsafe impl Send for Target {}
 
-/// The device's processor: f64 channel blocks to f32 planes for OBS.
-pub struct Sink {
-    target: Target,
-    planes: Vec<Vec<f32>>,
-    ptrs: Vec<*const f32>,
-    delivered: Arc<AtomicU64>,
-    /// Closed by [`DanteInput::stop`] before the device stops: no callback reaches the plugin
-    /// after that, even when dlink leaves its pump running past the stop wait.
-    gate: Arc<Gate>,
+/// The feed's counts: written by the pump and the feeder, read by the status thread.
+#[derive(Debug, Default)]
+pub struct Feed {
+    /// Frames handed to OBS.
+    pub delivered: AtomicU64,
+    /// Frames the pump could not queue: the ring was full (the feeder a second behind).
+    pub dropped: AtomicU64,
+    /// The longest callback into OBS, ns.
+    pub max_obs_ns: AtomicU64,
 }
 
-// SAFETY: `ptrs` only ever points into `planes`, owned by the same value.
-unsafe impl Send for Sink {}
+/// The ring between the pump and the feeder: `channels` interleaved samples per frame,
+/// `frames` frames.
+pub fn ring(channels: usize, frames: usize) -> (rtrb::Producer<f32>, rtrb::Consumer<f32>) {
+    rtrb::RingBuffer::new(channels.max(1) * frames.max(1))
+}
+
+/// The device's processor, on the pump thread: each block's f64 channels into the ring as
+/// interleaved f32 frames. No lock, no allocation, no call out.
+pub struct Sink {
+    ring: rtrb::Producer<f32>,
+    channels: usize,
+    feed: Arc<Feed>,
+}
 
 impl Sink {
-    fn new(
-        cb: AudioCb,
-        opaque: *mut c_void,
-        channels: usize,
-        delivered: Arc<AtomicU64>,
-        gate: Arc<Gate>,
-    ) -> Sink {
+    pub fn new(ring: rtrb::Producer<f32>, channels: usize, feed: Arc<Feed>) -> Sink {
         Sink {
-            target: Target { cb, opaque },
-            planes: vec![Vec::new(); channels],
-            ptrs: vec![std::ptr::null(); channels],
-            delivered,
-            gate,
+            ring,
+            channels,
+            feed,
         }
     }
 }
 
 impl Process for Sink {
     fn process(&mut self, block: &mut Block<'_>) {
-        let Some(_pass) = self.gate.enter() else {
+        let frames = block.frames();
+        let n = self.channels;
+        let have = block.inputs().min(n);
+        let Ok(mut chunk) = self.ring.write_chunk_uninit(frames * n) else {
+            self.feed
+                .dropped
+                .fetch_add(frames as u64, Ordering::Relaxed);
             return;
         };
-        let frames = block.frames();
-        let channels = block.inputs().min(self.planes.len());
-        for c in 0..channels {
-            let plane = &mut self.planes[c];
-            // Grows once to the device's block; no allocation after that.
-            if plane.len() != frames {
-                plane.resize(frames, 0.0);
-            }
-            for (out, x) in plane.iter_mut().zip(block.input(c)) {
-                *out = *x as f32;
-            }
-            self.ptrs[c] = plane.as_ptr();
+        let (a, b) = chunk.as_mut_slices();
+        for (i, slot) in a.iter_mut().chain(b.iter_mut()).enumerate() {
+            let (f, c) = (i / n, i % n);
+            let x = if c < have {
+                block.input(c)[f] as f32
+            } else {
+                0.0
+            };
+            slot.write(x);
         }
-        // SAFETY: the planes outlive the call; the callback copies them (obs_source_output_audio).
-        unsafe {
-            (self.target.cb)(
-                self.target.opaque,
-                self.ptrs.as_ptr(),
-                channels as u32,
-                frames as u32,
-            )
-        };
-        self.delivered.fetch_add(frames as u64, Ordering::Relaxed);
+        // SAFETY: every slot of the chunk was written above.
+        unsafe { chunk.commit_all() };
+    }
+}
+
+/// The OBS side, on the `dante-input-obs` thread: the ring's whole frames to the C callback as
+/// planes of at most [`MAX_CHUNK`] frames, behind the gate.
+pub struct Feeder {
+    target: Target,
+    ring: rtrb::Consumer<f32>,
+    planes: Vec<Vec<f32>>,
+    ptrs: Vec<*const f32>,
+    feed: Arc<Feed>,
+    /// Closed by [`DanteInput::stop`]: no callback reaches the plugin after that.
+    gate: Arc<Gate>,
+}
+
+// SAFETY: `ptrs` only ever points into `planes`, owned by the same value.
+unsafe impl Send for Feeder {}
+
+impl Feeder {
+    pub fn new(
+        cb: AudioCb,
+        opaque: *mut c_void,
+        ring: rtrb::Consumer<f32>,
+        channels: usize,
+        feed: Arc<Feed>,
+        gate: Arc<Gate>,
+    ) -> Feeder {
+        Feeder {
+            target: Target { cb, opaque },
+            ring,
+            planes: vec![vec![0.0; MAX_CHUNK]; channels],
+            ptrs: vec![std::ptr::null(); channels],
+            feed,
+            gate,
+        }
+    }
+
+    /// Hands every whole frame queued now to OBS; the frames handed, `None` once the gate is
+    /// closed (nothing handed).
+    pub fn drain(&mut self) -> Option<usize> {
+        let n = self.planes.len();
+        let mut handed = 0;
+        loop {
+            let frames = (self.ring.slots() / n.max(1)).min(MAX_CHUNK);
+            if frames == 0 || n == 0 {
+                return Some(handed);
+            }
+            let pass = self.gate.enter()?;
+            let Ok(chunk) = self.ring.read_chunk(frames * n) else {
+                return Some(handed);
+            };
+            let (a, b) = chunk.as_slices();
+            for (i, &x) in a.iter().chain(b).enumerate() {
+                self.planes[i % n][i / n] = x;
+            }
+            chunk.commit_all();
+            for (p, plane) in self.ptrs.iter_mut().zip(&self.planes) {
+                *p = plane.as_ptr();
+            }
+            let t = Instant::now();
+            // SAFETY: the planes outlive the call; the callback copies them
+            // (obs_source_output_audio).
+            unsafe {
+                (self.target.cb)(
+                    self.target.opaque,
+                    self.ptrs.as_ptr(),
+                    n as u32,
+                    frames as u32,
+                )
+            };
+            let took = u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            drop(pass);
+            self.feed.max_obs_ns.fetch_max(took, Ordering::Relaxed);
+            self.feed
+                .delivered
+                .fetch_add(frames as u64, Ordering::Relaxed);
+            handed += frames;
+        }
+    }
+}
+
+/// The feeder thread: drains every [`FEED_EVERY`] until stopped or the gate closes.
+fn feed_loop(mut feeder: Feeder, stop: &AtomicBool) {
+    while !stop.load(Ordering::Acquire) {
+        if feeder.drain().is_none() {
+            return;
+        }
+        std::thread::sleep(FEED_EVERY);
     }
 }
 
@@ -249,10 +348,12 @@ pub struct DanteInput {
     link: Arc<Mutex<Option<Link>>>,
     channels: u32,
     rate: u32,
-    delivered: Arc<AtomicU64>,
+    feed: Arc<Feed>,
     gate: Arc<Gate>,
     stop: mpsc::Sender<()>,
     status: Option<JoinHandle<()>>,
+    feed_stop: Arc<AtomicBool>,
+    feeder: Option<JoinHandle<()>>,
 }
 
 impl DanteInput {
@@ -287,9 +388,19 @@ impl DanteInput {
             ),
         );
         let n = cfg.rx.len();
-        let delivered = Arc::new(AtomicU64::new(0));
+        let feed = Arc::new(Feed::default());
         let gate = Gate::new();
-        let sink = Sink::new(cb, opaque, n, Arc::clone(&delivered), Arc::clone(&gate));
+        let rate_frames = usize::try_from(rate).unwrap_or(usize::MAX);
+        let (producer, consumer) = ring(n, rate_frames.saturating_mul(RING_SECONDS));
+        let sink = Sink::new(producer, n, Arc::clone(&feed));
+        let feeder = Feeder::new(
+            cb,
+            opaque,
+            consumer,
+            n,
+            Arc::clone(&feed),
+            Arc::clone(&gate),
+        );
         let map = Map {
             rx: (0..n).collect(),
             tx: Vec::new(),
@@ -306,18 +417,21 @@ impl DanteInput {
         let link = Arc::new(Mutex::new(Some(link)));
         let (stop, stopped) = mpsc::channel();
         let watched = Arc::clone(&link);
-        let counted = Arc::clone(&delivered);
+        let counted = Arc::clone(&feed);
         let spawned = std::thread::Builder::new()
             .name("dante-input-status".into())
             .spawn(move || status_loop(&watched, &stopped, &counted));
+        let feed_stop = Arc::new(AtomicBool::new(false));
         let mut d = DanteInput {
             link,
             channels: n as u32,
             rate,
-            delivered,
+            feed,
             gate,
             stop,
             status: None,
+            feed_stop: Arc::clone(&feed_stop),
+            feeder: None,
         };
         match spawned {
             Ok(t) => d.status = Some(t),
@@ -327,6 +441,23 @@ impl DanteInput {
                 return Err(format!("the status thread did not start: {e}"));
             }
         }
+        let fed = std::thread::Builder::new()
+            .name("dante-input-obs".into())
+            .spawn(move || feed_loop(feeder, &feed_stop));
+        match fed {
+            Ok(t) => d.feeder = Some(t),
+            Err(e) => {
+                d.stop();
+                return Err(format!("the OBS feeder thread did not start: {e}"));
+            }
+        }
+        log(
+            LOG_INFO,
+            &format!(
+                "dante-input start: the pump queues into a {RING_SECONDS} s ring; dante-input-obs hands it to OBS every {} ms",
+                FEED_EVERY.as_millis()
+            ),
+        );
         Ok(d)
     }
 
@@ -341,7 +472,7 @@ impl DanteInput {
 
     /// The device's counts now; `None` once it is stopped.
     pub fn status(&self) -> Option<Status> {
-        status_of(&self.link, &self.delivered)
+        status_of(&self.link, &self.feed)
     }
 
     /// Why the device ended by itself, if it did.
@@ -350,9 +481,16 @@ impl DanteInput {
     }
 
     /// Closes the gate (no callback reaches the plugin after this; one in flight is waited for),
-    /// stops the status thread, then the device (its goodbyes sent).
+    /// ends the feeder, stops the status thread, then the device (its goodbyes sent).
     pub fn stop(mut self) {
-        if !self.gate.close(GATE_WAIT) {
+        let closed = self.gate.close(GATE_WAIT);
+        self.feed_stop.store(true, Ordering::Release);
+        if closed {
+            if let Some(t) = self.feeder.take() {
+                let _ = t.join();
+            }
+        } else {
+            // The feeder is stuck inside OBS: left to end on its own, it reaches OBS no more.
             log(
                 LOG_ERROR,
                 &format!(
@@ -383,20 +521,23 @@ impl DanteInput {
     }
 }
 
-fn status_of(link: &Mutex<Option<Link>>, delivered: &AtomicU64) -> Option<Status> {
+fn status_of(link: &Mutex<Option<Link>>, feed: &Feed) -> Option<Status> {
     let guard = link.lock().ok()?;
     let l = guard.as_ref()?;
-    Some(Status::read(l.media(), delivered.load(Ordering::Relaxed)))
+    let mut st = Status::read(l.media(), feed.delivered.load(Ordering::Relaxed));
+    st.obs_dropped = feed.dropped.load(Ordering::Relaxed);
+    st.max_obs_us = feed.max_obs_ns.load(Ordering::Relaxed) / 1_000;
+    Some(st)
 }
 
-fn status_loop(link: &Mutex<Option<Link>>, stopped: &mpsc::Receiver<()>, delivered: &AtomicU64) {
+fn status_loop(link: &Mutex<Option<Link>>, stopped: &mpsc::Receiver<()>, feed: &Feed) {
     let mut ended_logged = false;
     loop {
         match stopped.recv_timeout(STATUS_EVERY) {
             Err(RecvTimeoutError::Timeout) => {}
             _ => return,
         }
-        let Some(st) = status_of(link, delivered) else {
+        let Some(st) = status_of(link, feed) else {
             return;
         };
         log(LOG_INFO, &st.line());

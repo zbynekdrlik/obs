@@ -59,6 +59,8 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         " rx_holes=",
         " late_blocks=",
         " max_process_us=",
+        " obs_dropped=",
+        " max_obs_us=",
         " delivered_frames=",
     ] {
         assert!(line.contains(field), "{field} missing: {line}");
