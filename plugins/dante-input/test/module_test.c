@@ -14,11 +14,14 @@
 #include <util/base.h>
 #include <util/dstr.h>
 #include <util/platform.h>
+#include <util/threading.h>
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
+/* libobs logs from its own threads too (audio, destroy), so the buffer is locked. */
+static pthread_mutex_t logged_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct dstr logged;
 
 static void capture(int level, const char *fmt, va_list args, void *param)
@@ -27,8 +30,10 @@ static void capture(int level, const char *fmt, va_list args, void *param)
 	char line[4096];
 	vsnprintf(line, sizeof(line), fmt, args);
 	fprintf(stderr, "[%d] %s\n", level, line);
+	pthread_mutex_lock(&logged_mutex);
 	dstr_cat(&logged, line);
 	dstr_cat(&logged, "\n");
+	pthread_mutex_unlock(&logged_mutex);
 }
 
 static int failures;
@@ -42,7 +47,21 @@ static void expect(bool ok, const char *what)
 
 static bool logged_has(const char *s)
 {
-	return logged.array && strstr(logged.array, s) != NULL;
+	pthread_mutex_lock(&logged_mutex);
+	bool found = logged.array && strstr(logged.array, s) != NULL;
+	pthread_mutex_unlock(&logged_mutex);
+	return found;
+}
+
+/* `s` logged within `ms` (libobs destroys a released source on another thread). */
+static bool logged_within(const char *s, int ms)
+{
+	for (int waited = 0; waited <= ms; waited += 50) {
+		if (logged_has(s))
+			return true;
+		os_sleep_ms(50);
+	}
+	return false;
 }
 
 int main(int argc, char **argv)
@@ -87,9 +106,8 @@ int main(int argc, char **argv)
 		/* Let the pump run blocks into the source. */
 		os_sleep_ms(2000);
 		obs_source_release(src);
-		/* libobs destroys a released source on its destroy thread; wait for it. */
-		expect(obs_wait_for_destroy_queue(), "the destroy queue ran");
-		expect(logged_has("dante-input source: destroyed (0 source(s) left)"), "the source is destroyed");
+		expect(logged_within("dante-input source: destroyed (0 source(s) left)", 3000),
+		       "the source is destroyed within 3 s");
 	} else {
 		fprintf(stderr, "unknown mode %s\n", mode);
 		return 2;
