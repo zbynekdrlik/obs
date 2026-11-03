@@ -35,10 +35,10 @@ static volatile long device_rate;
 static pthread_mutex_t sources_mutex = PTHREAD_MUTEX_INITIALIZER;
 static DARRAY(obs_source_t *) sources;
 static bool registered;
-/* The pump thread's own: the stamp the next block gets, and the re-anchors. */
+/* The dante-input-obs thread's own: the stamp the next block gets, and the re-anchors. */
 static uint64_t next_ts;
 static uint64_t resyncs;
-/* Set once the first block reached a source (logged once, the pump's proof of life in OBS). */
+/* Set once the first block reached a source (logged once, the proof of life in OBS). */
 static volatile long first_block_logged;
 
 static enum speaker_layout layout_of(uint32_t channels)
