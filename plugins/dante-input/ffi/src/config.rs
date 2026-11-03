@@ -34,10 +34,12 @@ pub struct InputConfig {
     pub state_file: Option<PathBuf>,
     #[serde(default = "default_latency")]
     pub latency_ms: u32,
-    /// Hz; the Dante network's rate (the site runs 96000). dlink's 48000 unless set. OBS resamples
-    /// each source to its own rate, so any rate dlink takes works.
-    #[serde(default = "default_rate")]
-    pub sample_rate: u32,
+    /// Hz: the rate OBS gets its blocks at. OBS's own audio rate unless set (owner, dstack #90:
+    /// obs keeps OBS's rate, dlink converts).
+    pub sample_rate: Option<u32>,
+    /// Hz: the Dante network's rate when it differs (the site runs 96000). The device runs at it
+    /// and dlink's 2:1 step hands OBS half of it; it must be the sample rate or twice it.
+    pub network_rate: Option<u32>,
     /// The RX channels' names, in channel order: OBS gets them in this order.
     pub rx: Vec<String>,
     pub arc_port: Option<u16>,
@@ -51,10 +53,6 @@ pub struct InputConfig {
 
 fn default_latency() -> u32 {
     DEFAULT_LATENCY_MS
-}
-
-fn default_rate() -> u32 {
-    dlink::SAMPLE_RATE
 }
 
 impl InputConfig {
@@ -103,17 +101,29 @@ impl InputConfig {
         }
     }
 
-    /// The dlink config of this file: RX only, no TX channels.
-    pub fn dlink(&self) -> dlink::Config {
+    /// The rate OBS gets: the file's, else OBS's own (`obs_rate`, 0 when unknown), else dlink's.
+    pub fn app_rate(&self, obs_rate: u32) -> u32 {
+        match (self.sample_rate, obs_rate) {
+            (Some(r), _) => r,
+            (None, 0) => dlink::SAMPLE_RATE,
+            (None, r) => r,
+        }
+    }
+
+    /// The dlink config of this file for OBS running at `obs_rate`: RX only, no TX channels.
+    pub fn dlink(&self, obs_rate: u32) -> dlink::Config {
         let state = self.state_file.clone().unwrap_or_default();
         let mut c = dlink::Config::new(self.name.clone(), state)
             .rx(self.rx.clone())
             .latency_ns(u64::from(self.latency_ms) * 1_000_000)
-            .sample_rate(self.sample_rate)
+            .sample_rate(self.app_rate(obs_rate))
             .product("obs", "dante-input");
         if let (Some(arc), Some(cmc), Some(flows)) = (self.arc_port, self.cmc_port, self.flows_port)
         {
             c = c.ports(dlink::Ports { arc, cmc, flows });
+        }
+        if let Some(rate) = self.network_rate {
+            c = c.network_rate(rate);
         }
         if let Some(base) = self.rx_port_base {
             c = c.rx_port_base(base);

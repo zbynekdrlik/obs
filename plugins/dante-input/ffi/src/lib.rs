@@ -208,17 +208,26 @@ pub struct DanteInput {
 
 impl DanteInput {
     /// Starts the device of the config at `path`, its RX blocks into `cb`.
-    pub fn start(path: &Path, cb: AudioCb, opaque: *mut c_void) -> Result<DanteInput, String> {
+    /// `obs_rate` is OBS's audio rate (0 when unknown): the blocks' rate unless the file sets one.
+    pub fn start(
+        path: &Path,
+        obs_rate: u32,
+        cb: AudioCb,
+        opaque: *mut c_void,
+    ) -> Result<DanteInput, String> {
         let cfg = InputConfig::load(path)?;
+        let link_cfg = cfg.dlink(obs_rate);
+        let rate = cfg.app_rate(obs_rate);
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: config={} name={} iface={} latency_ms={} sample_rate={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
+                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} halved={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
                 path.display(),
                 cfg.name,
                 cfg.iface,
                 cfg.latency_ms,
-                cfg.sample_rate,
+                link_cfg.device_rate(),
+                link_cfg.halved(),
                 cfg.rx,
                 cfg.arc_port,
                 cfg.cmc_port,
@@ -236,7 +245,7 @@ impl DanteInput {
             rx: (0..n).collect(),
             tx: Vec::new(),
         };
-        let link = Link::start(&cfg.dlink(), &Place::Iface(cfg.iface.clone()), map, sink)
+        let link = Link::start(&link_cfg, &Place::Iface(cfg.iface.clone()), map, sink)
             .map_err(|e| format!("the device did not start: {e}"))?;
         log(
             LOG_INFO,
@@ -255,7 +264,7 @@ impl DanteInput {
         let mut d = DanteInput {
             link,
             channels: n as u32,
-            rate: cfg.sample_rate,
+            rate,
             delivered,
             gate,
             stop,
@@ -379,6 +388,7 @@ fn write_err(err: *mut c_char, len: usize, msg: &str) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dante_input_start(
     path: *const c_char,
+    obs_rate: u32,
     cb: AudioCb,
     opaque: *mut c_void,
     err: *mut c_char,
@@ -392,7 +402,8 @@ pub unsafe extern "C" fn dante_input_start(
     let path = unsafe { CStr::from_ptr(path) }
         .to_string_lossy()
         .into_owned();
-    let started = std::panic::catch_unwind(|| DanteInput::start(Path::new(&path), cb, opaque));
+    let started =
+        std::panic::catch_unwind(|| DanteInput::start(Path::new(&path), obs_rate, cb, opaque));
     let msg = match started {
         Ok(Ok(d)) => return Box::into_raw(Box::new(d)),
         Ok(Err(why)) => why,

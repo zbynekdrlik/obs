@@ -60,6 +60,7 @@ fn a_bad_config_does_not_start_and_says_why() {
     let d = unsafe {
         dante_input_start(
             p.as_ptr(),
+            48_000,
             record,
             std::ptr::null_mut(),
             err.as_mut_ptr(),

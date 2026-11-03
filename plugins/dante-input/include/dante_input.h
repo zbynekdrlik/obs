@@ -19,11 +19,13 @@ typedef void (*dante_input_log_cb)(int level, const char *msg);
 /* Routes the device's log lines to `cb`. The first call counts. */
 void dante_input_set_log(dante_input_log_cb cb);
 
-/* Starts the device of the TOML config at `path`. NULL on failure, the reason in `err`. */
-struct dante_input *dante_input_start(const char *path, dante_input_audio_cb cb, void *opaque, char *err,
-				      size_t err_len);
+/* Starts the device of the TOML config at `path` for OBS running at `obs_rate` Hz (0: unknown).
+ * The blocks come at obs_rate unless the config sets sample_rate; a network_rate twice it runs the
+ * device at the network's rate with dlink's 2:1 step. NULL on failure, the reason in `err`. */
+struct dante_input *dante_input_start(const char *path, uint32_t obs_rate, dante_input_audio_cb cb, void *opaque,
+				      char *err, size_t err_len);
 
-/* The device's sample rate, Hz: every block's (the config's sample_rate, 48000 unless set). */
+/* The blocks' sample rate, Hz (OBS's rate unless the config sets one). */
 uint32_t dante_input_sample_rate(const struct dante_input *d);
 
 /* The RX channels per block. */

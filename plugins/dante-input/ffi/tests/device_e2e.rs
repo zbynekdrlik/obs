@@ -31,14 +31,16 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         &path,
         format!(
             "name = \"obs-e2e\"\niface = \"{iface}\"\nrx = [\"Master L\", \"Master R\"]\n\
-             sample_rate = 96000\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 47200\n\
+             network_rate = 96000\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 47200\n\
              [[subscribe]]\nrx = 1\ntx_channel = \"L\"\ntx_device = \"nobody\"\n"
         ),
     )
     .unwrap();
-    let d = DanteInput::start(&path, drop_audio, std::ptr::null_mut()).expect("the device starts");
+    // OBS at 48 kHz on a 96 kHz network: dlink's 2:1 step.
+    let d = DanteInput::start(&path, 48_000, drop_audio, std::ptr::null_mut())
+        .expect("the device starts");
     assert_eq!(d.channels(), 2);
-    assert_eq!(d.rate(), 96_000);
+    assert_eq!(d.rate(), 48_000);
     for port in [24440, 28800, 24455, 47200] {
         assert!(
             UdpSocket::bind((ip.as_str(), port)).is_err(),

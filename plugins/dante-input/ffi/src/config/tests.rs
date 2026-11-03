@@ -45,7 +45,11 @@ fn a_full_file_reads_with_10_ms_and_the_state_file_next_to_it() {
 #[test]
 fn the_dlink_device_takes_ports_subscriptions_latency_and_no_tx() {
     let (_d, path) = write(GOOD);
-    let dev = InputConfig::load(&path).unwrap().dlink().device().unwrap();
+    let dev = InputConfig::load(&path)
+        .unwrap()
+        .dlink(48_000)
+        .device()
+        .unwrap();
     assert_eq!(dev.name, "strih-obs");
     assert_eq!(dev.latency_ns, 10_000_000);
     assert_eq!(
@@ -64,7 +68,11 @@ fn a_latency_from_the_file_reaches_the_device() {
         "rx_port_base = 47200",
         "rx_port_base = 47200\nlatency_ms = 20",
     ));
-    let dev = InputConfig::load(&path).unwrap().dlink().device().unwrap();
+    let dev = InputConfig::load(&path)
+        .unwrap()
+        .dlink(48_000)
+        .device()
+        .unwrap();
     assert_eq!(dev.latency_ns, 20_000_000);
 }
 
@@ -124,24 +132,57 @@ fn a_latency_outside_4_to_100_ms_is_refused() {
 }
 
 #[test]
-fn the_rate_is_48_khz_unless_the_file_sets_96() {
-    let (_d, path) = write(GOOD);
-    assert_eq!(
-        InputConfig::load(&path)
-            .unwrap()
-            .dlink()
-            .device()
-            .unwrap()
-            .sample_rate,
-        48_000
-    );
+fn obs_gets_its_own_rate_and_the_device_runs_at_the_network_s() {
     let (_d, path) = write(&GOOD.replace(
         "rx_port_base = 47200",
-        "rx_port_base = 47200\nsample_rate = 96000",
+        "rx_port_base = 47200\nnetwork_rate = 96000",
     ));
     let cfg = InputConfig::load(&path).unwrap();
-    assert_eq!(cfg.sample_rate, 96_000);
-    assert_eq!(cfg.dlink().device().unwrap().sample_rate, 96_000);
+    assert_eq!(cfg.app_rate(48_000), 48_000);
+    let link = cfg.dlink(48_000);
+    assert_eq!(link.device_rate(), 96_000);
+    assert!(link.halved());
+    assert_eq!(link.device().unwrap().sample_rate, 96_000);
+}
+
+#[test]
+fn without_a_network_rate_the_device_runs_at_obs_s() {
+    let (_d, path) = write(GOOD);
+    let cfg = InputConfig::load(&path).unwrap();
+    assert_eq!(cfg.dlink(48_000).device().unwrap().sample_rate, 48_000);
+    assert!(!cfg.dlink(48_000).halved());
+    // OBS's rate unknown: dlink's.
+    assert_eq!(cfg.app_rate(0), dlink::SAMPLE_RATE);
+}
+
+#[test]
+fn the_file_s_sample_rate_wins_over_obs_s() {
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\nsample_rate = 48000\nnetwork_rate = 96000",
+    ));
+    let cfg = InputConfig::load(&path).unwrap();
+    assert_eq!(cfg.app_rate(44_100), 48_000);
+    assert!(cfg.dlink(44_100).halved());
+}
+
+#[test]
+fn obs_at_44_1_khz_on_a_96_khz_network_is_refused_with_the_reason() {
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\nnetwork_rate = 96000",
+    ));
+    let problems = InputConfig::load(&path)
+        .unwrap()
+        .dlink(44_100)
+        .device()
+        .unwrap_err();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("network_rate 96000 must be the sample rate 44100 or twice it")),
+        "{problems:?}"
+    );
 }
 
 #[test]
@@ -152,7 +193,7 @@ fn a_rate_dlink_refuses_is_refused_before_anything_runs() {
     ));
     let problems = InputConfig::load(&path)
         .unwrap()
-        .dlink()
+        .dlink(48_000)
         .device()
         .unwrap_err();
     assert!(

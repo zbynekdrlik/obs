@@ -186,7 +186,11 @@ bool obs_module_load(void)
 	char err[512] = {0};
 	/* device_rate is set before the first block can need it: the pump may run before
 	 * dante_input_start returns, so on_audio skips blocks until it is set. */
-	device = dante_input_start(path.array, on_audio, NULL, err, sizeof(err));
+	/* Owner, dstack #90: OBS keeps its own rate; dlink converts from the network's. */
+	struct obs_audio_info ai = {0};
+	uint32_t obs_rate = obs_get_audio_info(&ai) ? ai.samples_per_sec : 0;
+	blog(LOG_INFO, "dante-input start: OBS audio runs at %u Hz", obs_rate);
+	device = dante_input_start(path.array, obs_rate, on_audio, NULL, err, sizeof(err));
 	if (device) {
 		device_channels = dante_input_channels(device);
 		os_atomic_set_long(&device_rate, (long)dante_input_sample_rate(device));
