@@ -3,7 +3,7 @@
 //! `dante-input-obs` thread ([`Feeder`]) hands it to the C callback as float planes. OBS takes its
 //! source mutexes in that call, so it never runs inside the pump's 0.33 ms block (v0.3.0 on
 //! strih-snv: blocks of up to 6.7 ms, past the 5 ms margin, skipped).
-//! The device's own log (dlink's clock choice, subscriptions, errors) and the 10 s status line go to
+//! The device's own log (dlink's clock choice, subscriptions, errors) and the status line (1 s for 30 s, then 10 s) go to
 //! the C log callback, so they land in the OBS log.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -34,6 +34,21 @@ pub const GATE_WAIT: Duration = Duration::from_secs(2);
 
 /// How often the status line is logged (obs#1 log contract).
 pub const STATUS_EVERY: Duration = Duration::from_secs(10);
+
+/// The status line's cadence at start (camera-box#1485): every [`STATUS_START_EVERY`] for the
+/// first [`STATUS_START_LINES`] lines, so a start skip is timed against the first packets and
+/// camera-box's thread placement; then every [`STATUS_EVERY`].
+pub const STATUS_START_EVERY: Duration = Duration::from_secs(1);
+pub const STATUS_START_LINES: u32 = 30;
+
+/// The wait before status line `n` (from 0).
+pub fn status_wait(n: u32) -> Duration {
+    if n < STATUS_START_LINES {
+        STATUS_START_EVERY
+    } else {
+        STATUS_EVERY
+    }
+}
 
 /// How often the feeder hands the ring's frames to OBS.
 pub const FEED_EVERY: Duration = Duration::from_millis(2);
@@ -556,8 +571,9 @@ fn status_of(link: &Mutex<Option<Link>>, feed: &Feed) -> Option<Status> {
 
 fn status_loop(link: &Mutex<Option<Link>>, stopped: &mpsc::Receiver<()>, feed: &Feed) {
     let mut ended_logged = false;
+    let mut lines = 0u32;
     loop {
-        match stopped.recv_timeout(STATUS_EVERY) {
+        match stopped.recv_timeout(status_wait(lines)) {
             Err(RecvTimeoutError::Timeout) => {}
             _ => return,
         }
@@ -565,6 +581,7 @@ fn status_loop(link: &Mutex<Option<Link>>, stopped: &mpsc::Receiver<()>, feed: &
             return;
         };
         log(LOG_INFO, &st.line());
+        lines = lines.saturating_add(1);
         let ended = link
             .lock()
             .ok()

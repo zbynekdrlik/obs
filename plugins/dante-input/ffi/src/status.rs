@@ -1,4 +1,4 @@
-//! The `dante-input status:` line, every 10 s (obs#1 log contract). Counters are totals since the
+//! The `dante-input status:` line, every 1 s for the first 30 s, then every 10 s (obs#1 log contract). Counters are totals since the
 //! start. Audio reached OBS whole while rx_loss, rx_holes and underruns stay put: rx_loss counts
 //! frames the network never brought, rx_holes samples the pump read before their packet came (OBS
 //! got silence there), underruns blocks the pump skipped (OBS never got them). late_blocks and
