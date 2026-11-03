@@ -200,3 +200,18 @@ fn obs_holding_the_callback_never_lengthens_the_pump_s_block() {
     assert!(obs_ns >= 20_000_000, "max_obs_ns {obs_ns}");
     assert_eq!(feed.delivered.load(Ordering::Relaxed), 96);
 }
+
+/// camera-box#1485: a start skip is timed to the second for the first 30 s, then the 10 s contract.
+#[test]
+fn the_status_line_comes_every_second_for_the_first_30_then_every_10_s() {
+    let waits: Vec<Duration> = (0..32).map(status_wait).collect();
+    assert!(
+        waits[..30].iter().all(|&w| w == Duration::from_secs(1)),
+        "{waits:?}"
+    );
+    assert_eq!(waits[30], Duration::from_secs(10));
+    assert_eq!(waits[31], Duration::from_secs(10));
+    assert_eq!(status_wait(u32::MAX), Duration::from_secs(10));
+    let first_30: Duration = waits[..30].iter().sum();
+    assert_eq!(first_30, Duration::from_secs(30));
+}
