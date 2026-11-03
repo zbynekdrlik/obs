@@ -65,6 +65,29 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
     ] {
         assert!(line.contains(field), "{field} missing: {line}");
     }
+    // dtray's obs part: dlink calls the hook on its own thread, so the first reads may not
+    // carry it yet.
+    let mut app = serde_json::Value::Null;
+    for _ in 0..40 {
+        let v: serde_json::Value =
+            serde_json::from_str(&d.device_status().expect("a running device has a status"))
+                .expect("dlink's status is JSON");
+        app = v["app"].clone();
+        if app.is_object() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    eprintln!("app: {app}");
+    let state = app["state"].as_str().unwrap_or_default();
+    assert!(state == "ok" || state == "warn", "app: {app}");
+    assert!(
+        app["line"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("OBS: "),
+        "app: {app}"
+    );
     d.stop();
     for port in [24440, 28800, 24455, 47200] {
         UdpSocket::bind((ip.as_str(), port))
