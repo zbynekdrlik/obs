@@ -87,6 +87,8 @@ int main(int argc, char **argv)
 		/* Let the pump run blocks into the source. */
 		os_sleep_ms(2000);
 		obs_source_release(src);
+		/* libobs destroys a released source on its destroy thread; wait for it. */
+		expect(obs_wait_for_destroy_queue(), "the destroy queue ran");
 		expect(logged_has("dante-input source: destroyed (0 source(s) left)"), "the source is destroyed");
 	} else {
 		fprintf(stderr, "unknown mode %s\n", mode);
