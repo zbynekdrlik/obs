@@ -51,7 +51,9 @@ fn the_dlink_device_takes_ports_subscriptions_latency_and_no_tx() {
         .device()
         .unwrap();
     assert_eq!(dev.name, "strih-obs");
-    assert_eq!(dev.latency_ns, 10_000_000);
+    // dstack #68: 10 ms is the whole path. At 48 kHz, block 128 (2.67 ms) leaves 7.33 ms of
+    // Dante latency, in whole samples (352).
+    assert_eq!(dev.latency_ns, 352 * 1_000_000_000 / 48_000);
     assert_eq!(
         (dev.arc_port, dev.cmc_port, dev.flows_port),
         (4440, 8800, 4455)
@@ -73,7 +75,8 @@ fn a_latency_from_the_file_reaches_the_device() {
         .dlink(48_000)
         .device()
         .unwrap();
-    assert_eq!(dev.latency_ns, 20_000_000);
+    // 20 ms budget less the 2.67 ms block: 832 samples of Dante latency.
+    assert_eq!(dev.latency_ns, 832 * 1_000_000_000 / 48_000);
 }
 
 #[test]
@@ -209,4 +212,63 @@ fn the_example_config_reads_and_subscribes_from_two_transmitters() {
     let dev = link.device().unwrap();
     assert_eq!(dev.subscribe.len(), 4);
     assert_eq!(dev.sample_rate, 96_000);
+}
+
+#[test]
+fn a_budget_the_work_leaves_under_4_ms_of_is_refused_by_its_key() {
+    // dlink v0.6.24: an RX-only device's work is the RX side alone. At a 96 kHz network with OBS
+    // at 48 kHz that is the 1.33 ms block and the converter's 1.33 ms RX delay, so 6 ms leaves
+    // 3.33 ms and 7 ms leaves 4.33 ms; the RX path is the whole budget.
+    let net = |ms: u32| {
+        GOOD.replace(
+            "rx_port_base = 47200",
+            &format!("rx_port_base = 47200\nnetwork_rate = 96000\nlatency_ms = {ms}"),
+        )
+    };
+    let (_d, path) = write(&net(6));
+    let e = InputConfig::load(&path).unwrap().split(48_000).unwrap_err();
+    assert!(e.starts_with("latency_ms: 6 is too small here: "), "{e}");
+    let (_d, path) = write(&net(7));
+    let split = InputConfig::load(&path).unwrap().split(48_000).unwrap();
+    assert!(split.latency_ns >= 4_000_000, "{split:?}");
+    assert!(split.rx_path_ns <= 7_000_000, "{split:?}");
+}
+
+#[test]
+fn a_zero_rate_is_refused_on_load_by_its_key() {
+    for key in ["network_rate", "sample_rate"] {
+        let (_d, path) = write(&GOOD.replace(
+            "rx_port_base = 47200",
+            &format!("rx_port_base = 47200\n{key} = 0"),
+        ));
+        let e = InputConfig::load(&path).unwrap_err();
+        assert!(e.contains(&format!("{key}: 0 Hz")), "{e}");
+    }
+}
+
+#[test]
+fn the_floor_is_7_ms_at_the_tested_rate_pairs() {
+    for rates in [
+        "",
+        "network_rate = 88200",
+        "network_rate = 96000",
+        "network_rate = 96000\nsample_rate = 44100",
+        "network_rate = 96000\nsample_rate = 32000",
+        "sample_rate = 44100",
+    ] {
+        let cfg = |ms: u32| {
+            let (_d, path) = write(&GOOD.replace(
+                "rx_port_base = 47200",
+                &format!("rx_port_base = 47200\n{rates}\nlatency_ms = {ms}"),
+            ));
+            InputConfig::load(&path).unwrap().split(48_000)
+        };
+        assert!(
+            cfg(6)
+                .unwrap_err()
+                .starts_with("latency_ms: 6 is too small here: "),
+            "{rates}"
+        );
+        assert!(cfg(7).unwrap().latency_ns >= 4_000_000, "{rates}");
+    }
 }

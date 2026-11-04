@@ -5,9 +5,16 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// The device latency unless the file sets one (owner, camera-box#1485: 10 ms).
+/// The latency budget unless the file sets one (owner, camera-box#1485: 10 ms). Since dlink
+/// v0.6.22 (dstack #68, owner 3.11.2026) it is each direction's whole path, the Dante latency
+/// and the work together; dlink gives the Dante latency what the work of the directions the
+/// device uses leaves (v0.6.24: RX only here, so dlink's RX path is the whole budget).
+/// Before v0.4.9 the same `latency_ms` was the Dante latency alone.
 pub const DEFAULT_LATENCY_MS: u32 = 10;
-/// dlink's least device latency.
+/// dlink's least Dante latency, so no budget below it can work. The real floor depends on the
+/// rates and the block: [`InputConfig::split`] refuses a budget that leaves under 4 ms after
+/// the work (v0.6.24, RX only: the floor is 7 ms at the network/app rate pairs 48/48, 88.2/48,
+/// 96/48, 96/44.1, 96/32 and 44.1/44.1 kHz, which the tests check).
 pub const MIN_LATENCY_MS: u32 = 4;
 /// Past this the program audio is too late to be any use.
 pub const MAX_LATENCY_MS: u32 = 100;
@@ -32,6 +39,7 @@ pub struct InputConfig {
     pub iface: String,
     /// Where the device keeps what Dante Controller sets; next to the config unless set.
     pub state_file: Option<PathBuf>,
+    /// The latency budget, ms: each direction's whole path, which dlink splits (dstack #68).
     #[serde(default = "default_latency")]
     pub latency_ms: u32,
     /// Hz: the rate OBS gets its blocks at. OBS's own audio rate unless set (owner, dstack #90:
@@ -75,6 +83,14 @@ impl InputConfig {
         if self.iface.is_empty() {
             problems.push("iface: empty".to_string());
         }
+        for (key, rate) in [
+            ("network_rate", self.network_rate),
+            ("sample_rate", self.sample_rate),
+        ] {
+            if rate == Some(0) {
+                problems.push(format!("{key}: 0 Hz"));
+            }
+        }
         if !(MIN_LATENCY_MS..=MAX_LATENCY_MS).contains(&self.latency_ms) {
             problems.push(format!(
                 "latency_ms: {} is not one of {MIN_LATENCY_MS}..={MAX_LATENCY_MS}",
@@ -110,12 +126,26 @@ impl InputConfig {
         }
     }
 
+    /// How dlink splits this file's budget for OBS at `obs_rate`. A budget that leaves under
+    /// 4 ms of Dante latency is refused, named by its key in the file (dlink names it
+    /// `budget_ns`); any other refusal passes through as dlink's (a 0 Hz rate, which
+    /// [`InputConfig::load`] already refuses by its key).
+    pub fn split(&self, obs_rate: u32) -> Result<dlink::Split, String> {
+        self.dlink(obs_rate).split().map_err(|e| {
+            if e.starts_with("budget_ns:") {
+                format!("latency_ms: {} is too small here: {e}", self.latency_ms)
+            } else {
+                e
+            }
+        })
+    }
+
     /// The dlink config of this file for OBS running at `obs_rate`: RX only, no TX channels.
     pub fn dlink(&self, obs_rate: u32) -> dlink::Config {
         let state = self.state_file.clone().unwrap_or_default();
         let mut c = dlink::Config::new(self.name.clone(), state)
             .rx(self.rx.clone())
-            .latency_ns(u64::from(self.latency_ms) * 1_000_000)
+            .budget_ns(u64::from(self.latency_ms) * 1_000_000)
             .sample_rate(self.app_rate(obs_rate))
             .product("obs", "dante-input");
         if let (Some(arc), Some(cmc), Some(flows)) = (self.arc_port, self.cmc_port, self.flows_port)
