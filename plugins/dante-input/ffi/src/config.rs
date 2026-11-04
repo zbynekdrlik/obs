@@ -59,7 +59,7 @@ pub struct InputConfig {
     /// (camera-box#1485, dstack v0.6.26). Anywhere the kernel puts it when not set.
     pub pump_cpu: Option<usize>,
     /// The CPU dlink's RX thread (`dstack-rx`) runs on. Anywhere when not set. There is no
-    /// `io_cpu`: the device has no TX.
+    /// `io_cpu`: its TX thread sends nothing (RX only), so obs leaves it to the kernel.
     pub rx_cpu: Option<usize>,
     #[serde(default)]
     pub subscribe: Vec<Subscription>,

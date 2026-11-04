@@ -14,4 +14,4 @@ paths:
 
 # dante-input CPUs
 
-- `pump_cpu` and `rx_cpu` in dante-input.toml go to dlink's `Config::pump_cpu` / `rx_cpu` (dstack v0.6.26). camera-box writes them, and on strih-snv both are 15. Unset means the kernel places the thread. There is no `io_cpu`, because the device is RX-only. The start line prints `pump_cpu=N|none rx_cpu=N|none`. dstack logs the applied pin as `pinned to its CPU thread=... cpu=N`, or a WARN `not pinned: the kernel refused that CPU`.
+- `pump_cpu` and `rx_cpu` in dante-input.toml go to dlink's `Config::pump_cpu` / `rx_cpu` (dstack v0.6.26). camera-box writes them, and on strih-snv both are 15. Unset means the kernel places the thread. There is no `io_cpu`: the idle TX thread stays unpinned. `device_e2e` checks each pinned thread's `Cpus_allowed_list` in `/proc`. The start line prints `pump_cpu=N|none rx_cpu=N|none`. dstack logs the applied pin as `pinned to its CPU thread=... cpu=N`, or a WARN `not pinned: the kernel refused that CPU`.
