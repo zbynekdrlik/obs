@@ -129,3 +129,106 @@ static inline bool cb_jxs_out_forward_line(const char *message)
 		return false;
 	return strncmp(message, CB_JXS_OUT_STATUS_PREFIX, strlen(CB_JXS_OUT_STATUS_PREFIX)) != 0;
 }
+
+/* ---- camera-box#1387 (strih-snv reboot 4.11.2026): the start retry ----
+ *
+ * OBS started before the network: the sender's connect failed ("Network is unreachable"), the
+ * output logged "did not start" once and stayed off for good. The output's supervisor thread now
+ * looks twice a second and starts a WANTED output (a start was asked: jxs-output.json enabled=true,
+ * or obs-websocket StartOutput; a stop clears it) that is not active, 2 s after its last failed try.
+ * A start error is logged once per outage (its text changes or it follows a success). */
+
+#define CB_JXS_OUT_RETRY_NS 2000000000ULL
+#define CB_JXS_OUT_ERROR_LEN 256
+
+struct cb_jxs_out_retry {
+	uint32_t fails;   /* failed starts since the last success */
+	uint64_t next_ns; /* the earliest next try (0 = at once) */
+};
+
+/* Whether the supervisor starts the output now. */
+static inline bool cb_jxs_out_retry_due(const struct cb_jxs_out_retry *r, bool wanted, bool active,
+					uint64_t now_ns)
+{
+	return wanted && !active && now_ns >= r->next_ns;
+}
+
+/* One start's outcome at `now_ns`: a success resets, a failure schedules the next try 2 s on. */
+static inline void cb_jxs_out_retry_note(struct cb_jxs_out_retry *r, bool ok, uint64_t now_ns)
+{
+	if (ok) {
+		r->fails = 0;
+		r->next_ns = 0;
+	} else {
+		r->fails++;
+		r->next_ns = now_ns + CB_JXS_OUT_RETRY_NS;
+	}
+}
+
+/* Whether a start error is logged: only when its text differs from the last one logged (`last`,
+ * `len` bytes, kept truncated). */
+static inline bool cb_jxs_out_error_new(char *last, size_t len, const char *err)
+{
+	if (!last || len == 0)
+		return true;
+	if (!err)
+		err = "";
+	/* `last` holds at most len - 1 bytes of the logged error: equal there = the same error */
+	if (strncmp(last, err, len - 1) == 0)
+		return false;
+	strncpy(last, err, len - 1);
+	last[len - 1] = '\0';
+	return true;
+}
+
+/* A success: the next outage's first error is logged again. */
+static inline void cb_jxs_out_error_clear(char *last)
+{
+	if (last)
+		last[0] = '\0';
+}
+
+/* ---- camera-box#1387: a LIVE sender that died ----
+ *
+ * vstack's sender never stops on a send error, but it can die: a panic inside the library poisons
+ * it (every frame -2); a panicked send thread hands out no status window at all (only it drains
+ * the stats), which cb_jxs_out_stats_stale catches; a dead feeder sends nothing while the send
+ * thread still reports, which cb_jxs_out_window_dead catches. That last shows as frames handed to the sender (taken, or dropped busy by the sender's own
+ * count -- an off-grid frame is neither, so a canvas off the 30 fps grid is no death; a refused frame or a
+ * duplicate stamp is not counted, so a failure every frame repeats is no restart loop) and none
+ * sent whole. A send error does NOT: vstack counts a frame with failed sends as sent whole
+ * (send_errors only), so a receiver that is off is no death -- and neither is a source-IP change
+ * (the connected socket keeps its old source); strih runs a static IP. The output then restarts
+ * its sender (stop + the 2 s start retry). */
+
+#define CB_JXS_OUT_DEAD_WINDOWS 2U
+/* No new 5 s status window for this long while frames are offered: the sender's threads are gone. */
+#define CB_JXS_OUT_STATS_STALE_NS 15000000000ULL
+
+/* One status window: `handed` frames handed to the sender (taken + its dropped_busy), `frames_sent` sent
+ * whole by it, `poisoned` = a frame came back -2. True = restart the sender. `dead_windows`
+ * counts the windows in a row with frames handed and none sent. */
+static inline bool cb_jxs_out_window_dead(uint32_t *dead_windows, uint64_t handed, uint64_t frames_sent,
+					  bool poisoned)
+{
+	if (poisoned)
+		return true;
+	if (handed == 0 || frames_sent > 0) {
+		*dead_windows = 0;
+		return false;
+	}
+	return ++*dead_windows >= CB_JXS_OUT_DEAD_WINDOWS;
+}
+
+/* True = the sender has handed out no status window for CB_JXS_OUT_STATS_STALE_NS while frames
+ * were handed to it (its threads are gone, so no window can show the death). */
+static inline bool cb_jxs_out_stats_stale(uint64_t last_window_ns, uint64_t now_ns, uint64_t handed)
+{
+	return handed > 0 && last_window_ns > 0 && now_ns >= last_window_ns + CB_JXS_OUT_STATS_STALE_NS;
+}
+
+/* The supervisor's own restart of a dead sender: the next start 2 s on, no failed try counted. */
+static inline void cb_jxs_out_retry_restart(struct cb_jxs_out_retry *r, uint64_t now_ns)
+{
+	r->next_ns = now_ns + CB_JXS_OUT_RETRY_NS;
+}
