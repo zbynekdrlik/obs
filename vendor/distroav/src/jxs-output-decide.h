@@ -191,8 +191,9 @@ static inline void cb_jxs_out_error_clear(char *last)
 /* ---- camera-box#1387: a LIVE sender that died ----
  *
  * vstack's sender never stops on a send error, but it can die: a panic inside the library poisons
- * it (every frame -2), a panicked send thread leaves every frame not taken, a dead feeder sends
- * nothing. Each shows as frames handed to the sender (taken, or dropped busy by the sender's own
+ * it (every frame -2); a panicked send thread hands out no status window at all (only it drains
+ * the stats), which cb_jxs_out_stats_stale catches; a dead feeder sends nothing while the send
+ * thread still reports, which cb_jxs_out_window_dead catches. That last shows as frames handed to the sender (taken, or dropped busy by the sender's own
  * count -- an off-grid frame is neither, so a canvas off the 30 fps grid is no death; a refused frame or a
  * duplicate stamp is not counted, so a failure every frame repeats is no restart loop) and none
  * sent whole. A send error does NOT: vstack counts a frame with failed sends as sent whole
