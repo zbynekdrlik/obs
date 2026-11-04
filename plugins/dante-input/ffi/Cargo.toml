@@ -20,7 +20,7 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.23: dstack's other entry points follow Dante PTP in process too; dlink already did (camera-box#1485).
 # v0.6.24: an RX-only device sizes P by RX work alone; the pump margin W widens (4 ms at 10 ms) against contention gaps (intercom).
 # v0.6.25: a once-a-second WARN when the engine pump lost or overran blocks (camera-box#1485).
-# v0.6.26: Config::pump_cpu / rx_cpu, the threads on a core the box reserves (camera-box#1485).
+# v0.6.26: no change dante-input uses. Its CPU keys stay unused: the owner ruled CPU pinning out (dstack#1, 4.11.2026).
 dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.26" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
