@@ -8,12 +8,13 @@ use serde::Deserialize;
 /// The latency budget unless the file sets one (owner, camera-box#1485: 10 ms). Since dlink
 /// v0.6.22 (dstack #68, owner 3.11.2026) it is each direction's whole path, the Dante latency
 /// and the work together; dlink gives the Dante latency what the work of the directions the
-/// device uses leaves (v0.6.24: RX only here, so the RX path is the whole budget).
+/// device uses leaves (v0.6.24: RX only here, so dlink's RX path is the whole budget).
 /// Before v0.4.9 the same `latency_ms` was the Dante latency alone.
 pub const DEFAULT_LATENCY_MS: u32 = 10;
 /// dlink's least Dante latency, so no budget below it can work. The real floor depends on the
 /// rates and the block: [`InputConfig::split`] refuses a budget that leaves under 4 ms after
-/// the work (v0.6.24, RX only, 48 kHz OBS: anything under 7 ms).
+/// the work (v0.6.24, RX only, 48 kHz OBS on a 48 or 96 kHz network: anything under 7 ms).
+/// No rate pair starts at 4 ms; it stays the file's hard lower limit.
 pub const MIN_LATENCY_MS: u32 = 4;
 /// Past this the program audio is too late to be any use.
 pub const MAX_LATENCY_MS: u32 = 100;
@@ -117,12 +118,17 @@ impl InputConfig {
         }
     }
 
-    /// How dlink splits this file's budget for OBS at `obs_rate`; a budget that leaves under
-    /// 4 ms of Dante latency is refused, named by its key in the file.
+    /// How dlink splits this file's budget for OBS at `obs_rate`. A budget that leaves under
+    /// 4 ms of Dante latency is refused, named by its key in the file (dlink names it
+    /// `budget_ns`); any other refusal (a rate dlink does not take) passes through as dlink's.
     pub fn split(&self, obs_rate: u32) -> Result<dlink::Split, String> {
-        self.dlink(obs_rate)
-            .split()
-            .map_err(|e| format!("latency_ms: {} is too small here: {e}", self.latency_ms))
+        self.dlink(obs_rate).split().map_err(|e| {
+            if e.starts_with("budget_ns:") {
+                format!("latency_ms: {} is too small here: {e}", self.latency_ms)
+            } else {
+                e
+            }
+        })
     }
 
     /// The dlink config of this file for OBS running at `obs_rate`: RX only, no TX channels.

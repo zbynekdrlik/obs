@@ -233,3 +233,14 @@ fn a_budget_the_work_leaves_under_4_ms_of_is_refused_by_its_key() {
     assert!(split.latency_ns >= 4_000_000, "{split:?}");
     assert!(split.rx_path_ns <= 7_000_000, "{split:?}");
 }
+
+#[test]
+fn a_rate_refusal_is_not_blamed_on_the_latency() {
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\nnetwork_rate = 0",
+    ));
+    let e = InputConfig::load(&path).unwrap().split(48_000).unwrap_err();
+    assert!(!e.contains("latency_ms"), "{e}");
+    assert!(e.contains("0 Hz"), "{e}");
+}
