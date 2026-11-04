@@ -384,14 +384,17 @@ impl DanteInput {
         let cfg = InputConfig::load(path)?;
         let link_cfg = cfg.dlink(obs_rate);
         let rate = cfg.app_rate(obs_rate);
+        let split = link_cfg.split()?;
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
+                "dante-input start: config={} name={} iface={} latency_ms={} dante_latency_ns={} rx_path_ns={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
                 path.display(),
                 cfg.name,
                 cfg.iface,
                 cfg.latency_ms,
+                split.latency_ns,
+                split.rx_path_ns,
                 link_cfg.device_rate(),
                 link_cfg.converts(),
                 cfg.rx,

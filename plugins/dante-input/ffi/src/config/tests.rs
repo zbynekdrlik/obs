@@ -51,7 +51,9 @@ fn the_dlink_device_takes_ports_subscriptions_latency_and_no_tx() {
         .device()
         .unwrap();
     assert_eq!(dev.name, "strih-obs");
-    assert_eq!(dev.latency_ns, 10_000_000);
+    // dstack #68: 10 ms is the whole path. At 48 kHz, block 128 (2.67 ms) leaves 7.33 ms of
+    // Dante latency, in whole samples (352).
+    assert_eq!(dev.latency_ns, 352 * 1_000_000_000 / 48_000);
     assert_eq!(
         (dev.arc_port, dev.cmc_port, dev.flows_port),
         (4440, 8800, 4455)
@@ -73,7 +75,8 @@ fn a_latency_from_the_file_reaches_the_device() {
         .dlink(48_000)
         .device()
         .unwrap();
-    assert_eq!(dev.latency_ns, 20_000_000);
+    // 20 ms budget less the 2.67 ms block: 832 samples of Dante latency.
+    assert_eq!(dev.latency_ns, 832 * 1_000_000_000 / 48_000);
 }
 
 #[test]

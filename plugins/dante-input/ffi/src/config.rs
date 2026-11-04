@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// The device latency unless the file sets one (owner, camera-box#1485: 10 ms).
+/// The latency budget unless the file sets one (owner, camera-box#1485: 10 ms). Since dlink
+/// v0.6.22 (dstack #68, owner 3.11.2026) it is the whole RX path, the Dante latency and the work
+/// together; dlink gives the Dante latency what the work leaves.
 pub const DEFAULT_LATENCY_MS: u32 = 10;
-/// dlink's least device latency.
+/// dlink's least Dante latency. A budget that leaves less after the work is refused by dlink.
 pub const MIN_LATENCY_MS: u32 = 4;
 /// Past this the program audio is too late to be any use.
 pub const MAX_LATENCY_MS: u32 = 100;
@@ -32,6 +34,7 @@ pub struct InputConfig {
     pub iface: String,
     /// Where the device keeps what Dante Controller sets; next to the config unless set.
     pub state_file: Option<PathBuf>,
+    /// The latency budget, ms: the whole path, which dlink splits (dstack #68).
     #[serde(default = "default_latency")]
     pub latency_ms: u32,
     /// Hz: the rate OBS gets its blocks at. OBS's own audio rate unless set (owner, dstack #90:
@@ -115,7 +118,7 @@ impl InputConfig {
         let state = self.state_file.clone().unwrap_or_default();
         let mut c = dlink::Config::new(self.name.clone(), state)
             .rx(self.rx.clone())
-            .latency_ns(u64::from(self.latency_ms) * 1_000_000)
+            .budget_ns(u64::from(self.latency_ms) * 1_000_000)
             .sample_rate(self.app_rate(obs_rate))
             .product("obs", "dante-input");
         if let (Some(arc), Some(cmc), Some(flows)) = (self.arc_port, self.cmc_port, self.flows_port)
