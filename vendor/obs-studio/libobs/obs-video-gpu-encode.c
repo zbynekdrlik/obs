@@ -21,6 +21,25 @@ void handle_encoder_group_reconfigure_request(obs_encoder_t *encoder);
 
 #define NBSP "\xC2\xA0"
 static const char *gpu_encode_frame_name = "gpu_encode_frame";
+
+/* camera-box#1387: returns the frames at the queue's front from an earlier recording session to
+ * the free pool. True when there were any. Called with gpu_encoder_mutex held. */
+static bool drop_earlier_sessions(struct obs_core_video_mix *video)
+{
+	bool dropped = false;
+
+	while (video->gpu_encoder_queue.size) {
+		struct obs_tex_frame *front = deque_data(&video->gpu_encoder_queue, 0);
+		struct obs_tex_frame tf;
+
+		if (front->session == video->gpu_encode_session)
+			break;
+		deque_pop_front(&video->gpu_encoder_queue, &tf, sizeof(tf));
+		deque_push_back(&video->gpu_encoder_avail_queue, &tf, sizeof(tf));
+		dropped = true;
+	}
+	return dropped;
+}
 static void *gpu_encode_thread(void *data)
 {
 	struct obs_core_video_mix *video = data;
@@ -58,6 +77,16 @@ static void *gpu_encode_thread(void *data)
 		/* -------------- */
 
 		pthread_mutex_lock(&video->gpu_encoder_mutex);
+
+		/* camera-box#1387: the thread outlives a recording. Frames of an earlier session go
+		 * back to the free pool unencoded, and this wake encodes nothing: the new session
+		 * starts one frame behind, as a fresh thread did (NUM_ENCODE_TEXTURE_FRAMES_TO_WAIT). */
+		if (drop_earlier_sessions(video) || !video->gpu_encoder_queue.size) {
+			pthread_mutex_unlock(&video->gpu_encoder_mutex);
+			os_event_signal(video->gpu_encode_inactive);
+			profile_end(gpu_encode_thread_name);
+			continue;
+		}
 
 		deque_pop_front(&video->gpu_encoder_queue, &tf, sizeof(tf));
 		timestamp = tf.timestamp;

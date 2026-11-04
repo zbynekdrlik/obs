@@ -518,6 +518,7 @@ static inline bool queue_frame(struct obs_core_video_mix *video, bool raw_active
 	tf.count = 1;
 	tf.timestamp = vframe_info->timestamp;
 	tf.released = true;
+	tf.session = video->gpu_encode_session;
 #ifdef _WIN32
 	tf.handle = gs_texture_get_shared_handle(tf.tex);
 	gs_texture_release_sync(tf.tex, ++tf.lock_key);
@@ -1393,6 +1394,13 @@ void *obs_graphics_thread(void *param)
 	while (obs_graphics_thread_loop(&context))
 #endif
 		;
+
+	/* camera-box#1387: a waiting task queued from now runs on its caller; the ones already queued
+	 * run here, so no caller waits for a thread that has ended. */
+	pthread_mutex_lock(&obs->video.task_mutex);
+	obs->video.tasks_open = false;
+	pthread_mutex_unlock(&obs->video.task_mutex);
+	execute_graphics_tasks();
 
 #ifdef _WIN32
 	uninit_winrt_state(&winrt);

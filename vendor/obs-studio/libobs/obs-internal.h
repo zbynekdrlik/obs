@@ -430,6 +430,8 @@ struct obs_tex_frame {
 	uint64_t lock_key;
 	int count;
 	bool released;
+	/* camera-box#1387: the recording session the frame was queued in (gpu_encode_session) */
+	uint64_t session;
 };
 
 struct obs_task_info {
@@ -473,6 +475,9 @@ struct obs_core_video_mix {
 	pthread_t gpu_encode_thread;
 	bool gpu_encode_thread_initialized;
 	volatile bool gpu_encode_stop;
+	/* camera-box#1387: the thread and its textures live until the mix is freed; each start after
+	 * a pause bumps this, and the thread returns frames of an earlier session unencoded. */
+	uint64_t gpu_encode_session;
 
 	video_t *video;
 	struct obs_video_info ovi;
@@ -548,6 +553,9 @@ struct obs_core_video {
 
 	pthread_mutex_t task_mutex;
 	struct deque tasks;
+	/* camera-box#1387: the graphics thread takes tasks (under task_mutex). False before it starts
+	 * and after it ran the last ones, so a waiting graphics task then runs on its caller. */
+	bool tasks_open;
 
 	pthread_mutex_t encoder_group_mutex;
 	DARRAY(obs_weak_encoder_t *) ready_encoder_groups;
