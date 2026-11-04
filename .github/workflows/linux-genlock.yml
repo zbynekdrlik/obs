@@ -336,6 +336,14 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      - name: VERSION matches the dante-input crate version
+        # v0.4.15 was tagged with VERSION still at 0.4.14 and never published.
+        run: |
+          set -euo pipefail
+          want="$(tr -d '[:space:]' < ../../../VERSION)"
+          got="$(cargo metadata --no-deps --format-version 1 --locked | python3 -c 'import json,sys;print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="dante-input-ffi"))')"
+          if [ "$want" != "$got" ]; then echo "ERROR: VERSION says $want, Cargo.toml says $got"; exit 1; fi
+          echo "version $want"
       - name: Format
         run: cargo fmt --check
       - name: Clippy
