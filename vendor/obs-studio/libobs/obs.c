@@ -697,8 +697,9 @@ static int obs_init_video(struct obs_video_info *ovi)
 	video->video_frame_interval_ns = util_mul_div64(1000000000ULL, ovi->fps_den, ovi->fps_num);
 	video->video_half_frame_interval_ns = util_mul_div64(500000000ULL, ovi->fps_den, ovi->fps_num);
 
-	if (pthread_mutex_init(&video->task_mutex, NULL) < 0)
-		return OBS_VIDEO_FAIL;
+	/* camera-box#1387: task_mutex lives from obs_init to obs_shutdown, not per video reset. A
+	 * waiting graphics task from another thread (obs-websocket, obs-nvenc) may lock it while a
+	 * reset runs. */
 	if (pthread_mutex_init(&video->encoder_group_mutex, NULL) < 0)
 		return OBS_VIDEO_FAIL;
 	if (pthread_mutex_init(&video->mixes_mutex, NULL) < 0)
@@ -870,9 +871,9 @@ static void obs_free_video(void)
 	pthread_mutex_destroy(&obs->video.encoder_group_mutex);
 	pthread_mutex_init_value(&obs->video.encoder_group_mutex);
 
-	pthread_mutex_destroy(&obs->video.task_mutex);
-	pthread_mutex_init_value(&obs->video.task_mutex);
+	pthread_mutex_lock(&obs->video.task_mutex);
 	deque_free(&obs->video.tasks);
+	pthread_mutex_unlock(&obs->video.task_mutex);
 }
 
 static void obs_free_graphics(void)
@@ -1249,7 +1250,11 @@ static bool obs_init(const char *locale, const char *module_config_path, profile
 
 	pthread_mutex_init_value(&obs->audio.monitoring_mutex);
 	pthread_mutex_init_value(&obs->audio.task_mutex);
-	pthread_mutex_init_value(&obs->video.task_mutex);
+	/* camera-box#1387: lives until obs_shutdown (see obs_init_video) */
+	if (pthread_mutex_init(&obs->video.task_mutex, NULL) != 0) {
+		pthread_mutex_init_value(&obs->video.task_mutex);
+		return false;
+	}
 	pthread_mutex_init_value(&obs->video.encoder_group_mutex);
 	pthread_mutex_init_value(&obs->video.mixes_mutex);
 
@@ -1507,6 +1512,7 @@ void obs_shutdown(void)
 
 	bfree(obs->module_config_path);
 	bfree(obs->locale);
+	pthread_mutex_destroy(&obs->video.task_mutex);
 	bfree(obs);
 	obs = NULL;
 	bfree(cmdline_args.argv);

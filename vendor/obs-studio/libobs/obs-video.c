@@ -1097,13 +1097,25 @@ static void execute_graphics_tasks(void)
 	struct obs_core_video *video = &obs->video;
 	bool tasks_remaining = true;
 
+	/* camera-box#1387: a task runs outside task_mutex. A task may enter graphics (obs-websocket's
+	 * screenshot does); under task_mutex, a thread that holds graphics and queues a graphics task
+	 * would wait for task_mutex while the task waits for that thread. Only this thread pops, so
+	 * the queue order holds. */
 	while (tasks_remaining) {
+		struct obs_task_info info;
+		bool have_task = false;
+
 		pthread_mutex_lock(&video->task_mutex);
 		if (video->tasks.size) {
-			struct obs_task_info info;
 			deque_pop_front(&video->tasks, &info, sizeof(info));
-			info.task(info.param);
+			have_task = true;
 		}
+		pthread_mutex_unlock(&video->task_mutex);
+
+		if (have_task)
+			info.task(info.param);
+
+		pthread_mutex_lock(&video->task_mutex);
 		tasks_remaining = !!video->tasks.size;
 		pthread_mutex_unlock(&video->task_mutex);
 	}
