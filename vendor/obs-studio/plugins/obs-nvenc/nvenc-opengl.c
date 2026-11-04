@@ -39,7 +39,12 @@ void cuda_opengl_free(struct nvenc_data *enc)
 	/* camera-box#1387: the encoder is destroyed from the output's stop thread, a fresh thread
 	 * at every StopRecord. Its first GL MakeCurrent under the graphics lock stalled the render
 	 * tick 52-60 ms (NVIDIA), so the unregister runs on the graphics thread instead (or here,
-	 * when that thread has ended). */
+	 * when that thread has ended, or when the caller already holds graphics). */
+	if (gs_get_context()) {
+		/* the caller holds graphics: the graphics thread could not take it */
+		cuda_opengl_free_task(enc);
+		return;
+	}
 	obs_queue_task(OBS_TASK_GRAPHICS, cuda_opengl_free_task, enc, true);
 }
 

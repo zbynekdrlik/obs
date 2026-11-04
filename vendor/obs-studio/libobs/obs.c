@@ -646,7 +646,7 @@ static int obs_init_video_mix(struct obs_video_info *ovi, struct obs_core_video_
 
 	if (pthread_mutex_init(&video->gpu_encoder_mutex, NULL) < 0)
 		return OBS_VIDEO_FAIL;
-	if (pthread_mutex_init(&video->gpu_encode_lifecycle_mutex, NULL) < 0)
+	if (pthread_mutex_init(&video->gpu_encode_lifecycle_mutex, NULL) != 0)
 		return OBS_VIDEO_FAIL;
 
 	gs_enter_context(obs->video.graphics);
@@ -714,12 +714,6 @@ static int obs_init_video(struct obs_video_info *ovi)
 	if (!restore_canvases())
 		return OBS_VIDEO_FAIL;
 
-	/* camera-box#1387: a waiting graphics task queued from here runs on the graphics thread;
-	 * the thread closes the queue when it ends (obs_graphics_thread). */
-	pthread_mutex_lock(&video->task_mutex);
-	video->tasks_open = true;
-	pthread_mutex_unlock(&video->task_mutex);
-
 	int errorcode;
 #ifdef __APPLE__
 	pthread_attr_t attr;
@@ -729,12 +723,14 @@ static int obs_init_video(struct obs_video_info *ovi)
 #else
 	errorcode = pthread_create(&video->video_thread, NULL, obs_graphics_thread, obs);
 #endif
-	if (errorcode != 0) {
-		pthread_mutex_lock(&video->task_mutex);
-		video->tasks_open = false;
-		pthread_mutex_unlock(&video->task_mutex);
+	if (errorcode != 0)
 		return OBS_VIDEO_FAIL;
-	}
+
+	/* camera-box#1387: from here a waiting graphics task runs on the graphics thread (before,
+	 * on its caller); the thread closes the queue when it ends (obs_graphics_thread). */
+	pthread_mutex_lock(&video->task_mutex);
+	video->tasks_open = true;
+	pthread_mutex_unlock(&video->task_mutex);
 
 	video->thread_initialized = true;
 
@@ -3356,7 +3352,10 @@ bool start_gpu_encode(obs_encoder_t *encoder)
 	/* camera-box#1387: the encode thread and its textures outlive a recording, so a later start
 	 * takes no graphics. A fresh thread's first GL MakeCurrent under the graphics lock stalled
 	 * the render tick 52-60 ms (NVIDIA) at every StartRecord. */
-	pthread_mutex_lock(&video->gpu_encode_lifecycle_mutex);
+	/* a GPU-rescale mix ends its thread at stop: a start must not reuse it meanwhile */
+	const bool serialize = video->encoder_only_mix;
+	if (serialize)
+		pthread_mutex_lock(&video->gpu_encode_lifecycle_mutex);
 	pthread_mutex_lock(&video->gpu_encoder_mutex);
 	if (video->gpu_encode_thread_initialized) {
 		if (!video->gpu_encoders.num)
@@ -3397,7 +3396,8 @@ bool start_gpu_encode(obs_encoder_t *encoder)
 		os_atomic_inc_long(&video->gpu_encoder_active);
 		video_output_inc_texture_encoders(video->video);
 	}
-	pthread_mutex_unlock(&video->gpu_encode_lifecycle_mutex);
+	if (serialize)
+		pthread_mutex_unlock(&video->gpu_encode_lifecycle_mutex);
 
 	return success;
 }
@@ -3407,7 +3407,9 @@ void stop_gpu_encode(obs_encoder_t *encoder)
 	struct obs_core_video_mix *video = get_mix_for_video(encoder->media);
 	bool call_free = false;
 
-	pthread_mutex_lock(&video->gpu_encode_lifecycle_mutex);
+	const bool serialize = video->encoder_only_mix;
+	if (serialize)
+		pthread_mutex_lock(&video->gpu_encode_lifecycle_mutex);
 	os_atomic_dec_long(&video->gpu_encoder_active);
 	video_output_dec_texture_encoders(video->video);
 
@@ -3434,7 +3436,8 @@ void stop_gpu_encode(obs_encoder_t *encoder)
 		obs_leave_graphics();
 		blog(LOG_INFO, "gpu-encode: encoder-only mix, encode thread ended at stop (camera-box#1387)");
 	}
-	pthread_mutex_unlock(&video->gpu_encode_lifecycle_mutex);
+	if (serialize)
+		pthread_mutex_unlock(&video->gpu_encode_lifecycle_mutex);
 }
 
 bool obs_video_active(void)
