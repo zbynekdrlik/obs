@@ -14,6 +14,8 @@ cmc_port = 8800
 flows_port = 4455
 rx_port_base = 47200
 # state_file = "..."              # default: dante-input.state.toml next to this file
+# pump_cpu = 15                   # the core the box reserves for dlink's pump thread; kernel picks when unset
+# rx_cpu = 15                     # and for its RX thread
 
 # One subscription per RX channel; each names its own transmitter, so channels from two TX
 # devices are fine.

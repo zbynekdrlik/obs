@@ -34,12 +34,13 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         &path,
         format!(
             "name = \"obs-e2e\"\niface = \"{iface}\"\nrx = [\"Master L\", \"Master R\"]\n\
-             network_rate = 96000\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 22200\n\
+             network_rate = 96000\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 22200\npump_cpu = 0\nrx_cpu = 0\n\
              [[subscribe]]\nrx = 1\ntx_channel = \"L\"\ntx_device = \"nobody\"\n"
         ),
     )
     .unwrap();
-    // OBS at 48 kHz on a 96 kHz network: dlink's 2:1 step.
+    // OBS at 48 kHz on a 96 kHz network: dlink's 2:1 step. pump_cpu/rx_cpu 0 run the pinning
+    // (camera-box#1485): CPU 0 is on every runner.
     let d = DanteInput::start(&path, 48_000, drop_audio, std::ptr::null_mut())
         .expect("the device starts");
     assert_eq!(d.channels(), 2);

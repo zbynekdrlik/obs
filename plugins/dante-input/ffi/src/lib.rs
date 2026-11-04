@@ -81,6 +81,11 @@ pub fn log(level: c_int, msg: &str) {
     }
 }
 
+/// A CPU key of the start line: the number, or `none` when the file leaves it to the kernel.
+fn cpu_text(cpu: Option<usize>) -> String {
+    cpu.map_or_else(|| "none".to_string(), |c| c.to_string())
+}
+
 /// tracing's lines (dlink and dstack log with tracing) into the C log, one line per event.
 struct LineWriter {
     level: c_int,
@@ -387,7 +392,7 @@ impl DanteInput {
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
+                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} pump_cpu={} rx_cpu={} subscriptions={} state_file={}",
                 path.display(),
                 cfg.name,
                 cfg.iface,
@@ -399,6 +404,8 @@ impl DanteInput {
                 cfg.cmc_port,
                 cfg.flows_port,
                 cfg.rx_port_base,
+                cpu_text(cfg.pump_cpu),
+                cpu_text(cfg.rx_cpu),
                 cfg.subscribe.len(),
                 cfg.state_file.as_deref().unwrap_or(Path::new("")).display(),
             ),
