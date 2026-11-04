@@ -55,6 +55,12 @@ pub struct InputConfig {
     pub flows_port: Option<u16>,
     pub rx_port_base: Option<u16>,
     pub flow_slots: Option<usize>,
+    /// The CPU dlink's pump thread (`dstack-engine`) runs on: a core the box reserves for it
+    /// (camera-box#1485, dstack v0.6.26). Anywhere the kernel puts it when not set.
+    pub pump_cpu: Option<usize>,
+    /// The CPU dlink's RX thread (`dstack-rx`) runs on. Anywhere when not set. There is no
+    /// `io_cpu`: its TX thread sends nothing (RX only), so obs leaves it to the kernel.
+    pub rx_cpu: Option<usize>,
     #[serde(default)]
     pub subscribe: Vec<Subscription>,
 }
@@ -160,6 +166,12 @@ impl InputConfig {
         }
         if let Some(n) = self.flow_slots {
             c = c.flow_slots(n);
+        }
+        if let Some(cpu) = self.pump_cpu {
+            c = c.pump_cpu(cpu);
+        }
+        if let Some(cpu) = self.rx_cpu {
+            c = c.rx_cpu(cpu);
         }
         for s in &self.subscribe {
             c = c.subscribe(s.rx, s.tx_channel.clone(), s.tx_device.clone());

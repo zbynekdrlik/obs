@@ -272,3 +272,40 @@ fn the_floor_is_7_ms_at_the_tested_rate_pairs() {
         assert!(cfg(7).unwrap().latency_ns >= 4_000_000, "{rates}");
     }
 }
+
+#[test]
+fn the_pump_and_rx_cpus_reach_the_device_and_default_to_none() {
+    let (_d, path) = write(GOOD);
+    let dev = InputConfig::load(&path)
+        .unwrap()
+        .dlink(48_000)
+        .device()
+        .unwrap();
+    assert_eq!((dev.pump_cpu, dev.io_cpu, dev.rx_cpu), (None, None, None));
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\npump_cpu = 15\nrx_cpu = 14",
+    ));
+    let cfg = InputConfig::load(&path).unwrap();
+    assert_eq!((cfg.pump_cpu, cfg.rx_cpu), (Some(15), Some(14)));
+    let dev = cfg.dlink(48_000).device().unwrap();
+    assert_eq!(
+        (dev.pump_cpu, dev.io_cpu, dev.rx_cpu),
+        (Some(15), None, Some(14))
+    );
+}
+
+#[test]
+fn a_cpu_past_dlink_s_limit_is_refused_by_its_key() {
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\npump_cpu = 100000",
+    ));
+    let e = InputConfig::load(&path)
+        .unwrap()
+        .dlink(48_000)
+        .device()
+        .unwrap_err()
+        .join("; ");
+    assert!(e.contains("pump_cpu"), "{e}");
+}
