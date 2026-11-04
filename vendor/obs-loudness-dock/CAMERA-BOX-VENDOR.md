@@ -19,7 +19,11 @@ short-term and integrated loudness, LRA and true peak.
 
 ## Our diff
 
-None. The camera-box build settings live in `.github/workflows/linux-genlock.yml`:
+| file | change |
+|---|---|
+| `src/loudness.c` | `init_state` adds `EBUR128_MODE_HISTOGRAM` to the meter mode. Without it, libebur128 keeps every 100 ms block since start, and the integrated/LRA read walks the whole list. That read runs every 48 ms under the mutex that `audio_cb` takes on OBS's audio thread, so the hold grows with uptime: about 3 ms at 8 h and 9 ms at 24 h, against a 21.3 ms audio tick (v0.4.12 deep review). Histogram mode makes the read constant-time, at 0.1 LU resolution; the EBU reference reads -22.95 LUFS integrated. |
+
+The camera-box build settings live in `.github/workflows/linux-genlock.yml`:
 
 - It builds against the genlocked OBS SDK with `-DQT_VERSION=6`.
 - Upstream uses a system libebur128 only when pkg-config finds one. The runner has none, so the build
@@ -37,6 +41,7 @@ and `src/plugin-main.c` appends `.main`. OBS uses it as the dock's Qt objectName
 
 - `tests/loudness-ebur128` feeds the vendored libebur128 the EBU Tech 3341 reference signal: a 1 kHz
   sine at -23 dBFS stereo at 48 kHz. Momentary, short-term and integrated loudness must read
-  -23.0 ± 0.1 LUFS, the true peak -23 ± 0.5 dBTP, and silence -inf.
+  -23.0 ± 0.1 LUFS, the true peak -23 ± 0.5 dBTP, and silence -inf. The test meters in histogram mode, as the
+  dock does, and fails if the dock's `init_state` mode line loses `EBUR128_MODE_HISTOGRAM`.
 - The staging step checks that the dock exports `obs_module_load`, that its locale is staged, and that it
   carries the dock id.

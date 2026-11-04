@@ -727,7 +727,7 @@ jobs:
           if [ -z "$loud_so" ]; then echo "ERROR: loudness-dock.so not found after the obs-loudness-dock build (camera-box#1436)"; exit 1; fi
           if ! nm -D --defined-only "$loud_so" | grep -w obs_module_load >/dev/null; then echo "ERROR: $loud_so exports no obs_module_load -- OBS would not load it (camera-box#1436)"; exit 1; fi
           if ! strings "$loud_so" | grep -Fx 'net.nagater.obs-loudness-dock..main' >/dev/null; then echo "ERROR: $loud_so does not carry the dock id camera-box seeds (camera-box#1436)"; exit 1; fi
-          if ldd "$loud_so" | grep -q ebur128; then echo "ERROR: $loud_so links a system libebur128, not the vendored one (camera-box#1436)"; exit 1; fi
+          if ldd "$loud_so" | grep ebur128 >/dev/null; then echo "ERROR: $loud_so links a system libebur128, not the vendored one (camera-box#1436)"; exit 1; fi
           cp "$loud_so" "$plugin_lib_dir/"
           # obs#1 / camera-box#1485: the dante_input source (no device and no source kind without
           # ~/.camera-box/dante-input.toml on the box).
