@@ -621,6 +621,22 @@ jobs:
             HOME="$home" xvfb-run -a "$test_bin" "$so" "$mode"
           done
 
+      # camera-box#1387 (obs#1): texture encoding across recordings through real libobs and
+      # libobs-opengl: one encode thread for both, a stop that takes no graphics, no stale frame in
+      # the second recording, a waiting graphics task that never hangs without a graphics thread.
+      - name: Test libobs texture encoding across recordings (camera-box#1387)
+        working-directory: tests/libobs-gpu-encode
+        run: |
+          set -euo pipefail
+          libobs="$(find "$GITHUB_WORKSPACE/obs-sdk" -name 'libobs.so*' -type f | head -1)"
+          if [ -z "$libobs" ]; then echo "ERROR: no libobs.so in obs-sdk"; exit 1; fi
+          data="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs"
+          if [ ! -f "$data/default.effect" ]; then echo "ERROR: no libobs effects in $data"; exit 1; fi
+          cmake -B build -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk" -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+          export LD_LIBRARY_PATH="$(dirname "$libobs")"
+          xvfb-run -a build/gpu-encode-test "$data/"
+
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
         run: |
           set -euo pipefail

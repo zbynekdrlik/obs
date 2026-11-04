@@ -5,17 +5,16 @@
  * NVENC implementation using CUDA context and OpenGL textures
  */
 
-void cuda_opengl_free(struct nvenc_data *enc)
+/* camera-box#1387: runs on the graphics thread, which has the GL context current every tick */
+static void cuda_opengl_free_task(void *param)
 {
-	if (!enc->cu_ctx || !enc->input_textures.num)
-		return;
+	struct nvenc_data *enc = param;
 
 	/* issue 1462: the textures were registered inside obs_enter_graphics()
-	 * (cuda_opengl_encode). The encoder is destroyed from the output's stop
-	 * thread with no GL context current, and a GL-interop unregister there
-	 * fails, which pinned the GPU memory of every encoder start/stop. The
-	 * CUDA context wraps the graphics context, the order cuda_opengl_encode
-	 * takes them in. */
+	 * (cuda_opengl_encode), and a GL-interop unregister with no GL context
+	 * current fails, which pinned the GPU memory of every encoder start/stop.
+	 * The CUDA context wraps the graphics context, the order
+	 * cuda_opengl_encode takes them in. */
 	if (!cuda_error_check(enc, cu->cuCtxPushCurrent(enc->cu_ctx), __FUNCTION__,
 			      "cu->cuCtxPushCurrent(enc->cu_ctx)"))
 		return;
@@ -30,6 +29,23 @@ void cuda_opengl_free(struct nvenc_data *enc)
 	}
 	obs_leave_graphics();
 	cuda_error_check(enc, cu->cuCtxPopCurrent(NULL), __FUNCTION__, "cu->cuCtxPopCurrent(NULL)");
+}
+
+void cuda_opengl_free(struct nvenc_data *enc)
+{
+	if (!enc->cu_ctx || !enc->input_textures.num)
+		return;
+
+	/* camera-box#1387: the encoder is destroyed from the output's stop thread, a fresh thread
+	 * at every StopRecord. Its first GL MakeCurrent under the graphics lock stalled the render
+	 * tick 52-60 ms (NVIDIA), so the unregister runs on the graphics thread instead (or here,
+	 * when that thread has ended, or when the caller already holds graphics). */
+	if (gs_get_context()) {
+		/* the caller holds graphics: the graphics thread could not take it */
+		cuda_opengl_free_task(enc);
+		return;
+	}
+	obs_queue_task(OBS_TASK_GRAPHICS, cuda_opengl_free_task, enc, true);
 }
 
 /* ------------------------------------------------------------------------- */

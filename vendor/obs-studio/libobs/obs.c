@@ -643,7 +643,7 @@ static int obs_init_video_mix(struct obs_video_info *ovi, struct obs_core_video_
 		return OBS_VIDEO_FAIL;
 	}
 
-	if (pthread_mutex_init(&video->gpu_encoder_mutex, NULL) < 0)
+	if (pthread_mutex_init(&video->gpu_encoder_mutex, NULL) != 0)
 		return OBS_VIDEO_FAIL;
 
 	gs_enter_context(obs->video.graphics);
@@ -723,6 +723,12 @@ static int obs_init_video(struct obs_video_info *ovi)
 	if (errorcode != 0)
 		return OBS_VIDEO_FAIL;
 
+	/* camera-box#1387: from here a waiting graphics task runs on the graphics thread (before,
+	 * on its caller); the thread closes the queue when it ends (obs_graphics_thread). */
+	pthread_mutex_lock(&video->task_mutex);
+	video->tasks_open = true;
+	pthread_mutex_unlock(&video->task_mutex);
+
 	video->thread_initialized = true;
 
 	calldata_t parameters = {0};
@@ -798,9 +804,23 @@ static void obs_free_render_textures(struct obs_core_video_mix *video)
 	gs_leave_context();
 }
 
+extern void stop_gpu_encoding_thread(struct obs_core_video_mix *video);
+extern void free_gpu_encoding(struct obs_core_video_mix *video);
+
 void obs_free_video_mix(struct obs_core_video_mix *video)
 {
 	if (video->video) {
+		/* camera-box#1387: the encode thread and its textures outlive recordings; they end here,
+		 * before the video output they report to closes. */
+		if (video->gpu_encode_thread_initialized) {
+			stop_gpu_encoding_thread(video);
+			if (obs->video.graphics) {
+				gs_enter_context(obs->video.graphics);
+				free_gpu_encoding(video);
+				gs_leave_context();
+			}
+		}
+
 		video_output_close(video->video);
 		video->video = NULL;
 
@@ -3316,26 +3336,54 @@ obs_data_t *obs_get_private_data(void)
 }
 
 extern bool init_gpu_encoding(struct obs_core_video_mix *video);
-extern void stop_gpu_encoding_thread(struct obs_core_video_mix *video);
-extern void free_gpu_encoding(struct obs_core_video_mix *video);
 
 bool start_gpu_encode(obs_encoder_t *encoder)
 {
 	struct obs_core_video_mix *video = get_mix_for_video(encoder->media);
 	bool success = true;
+	bool reused = false;
+	uint64_t session = 0;
 
-	obs_enter_graphics();
+	/* camera-box#1387: the encode thread and its textures outlive a recording, so a later start
+	 * takes no graphics. A fresh thread's first GL MakeCurrent under the graphics lock stalled
+	 * the render tick 52-60 ms (NVIDIA) at every StartRecord. */
+	/* A GPU-rescale (encoder-only) mix ends its thread at the last stop and runs upstream's
+	 * start and stop unchanged: it never reuses a thread. */
 	pthread_mutex_lock(&video->gpu_encoder_mutex);
-
-	if (!video->gpu_encoders.num)
-		success = init_gpu_encoding(video);
-	if (success)
+	if (!video->encoder_only_mix && video->gpu_encode_thread_initialized) {
+		if (!video->gpu_encoders.num)
+			video->gpu_encode_session++;
+		session = video->gpu_encode_session;
 		da_push_back(video->gpu_encoders, &encoder);
-	else
-		free_gpu_encoding(video);
-
+		reused = true;
+	}
 	pthread_mutex_unlock(&video->gpu_encoder_mutex);
-	obs_leave_graphics();
+
+	if (reused) {
+		blog(LOG_INFO, "gpu-encode: '%s' starts on the running encode thread, session %llu (camera-box#1387)",
+		     obs_encoder_get_name(encoder), (unsigned long long)session);
+	} else {
+		obs_enter_graphics();
+		pthread_mutex_lock(&video->gpu_encoder_mutex);
+
+		if (video->encoder_only_mix ? !video->gpu_encoders.num : !video->gpu_encode_thread_initialized) {
+			success = init_gpu_encoding(video);
+			if (!success)
+				free_gpu_encoding(video);
+		}
+		if (success)
+			da_push_back(video->gpu_encoders, &encoder);
+
+		pthread_mutex_unlock(&video->gpu_encoder_mutex);
+		obs_leave_graphics();
+
+		if (success)
+			blog(LOG_INFO, "gpu-encode: '%s' starts the encode thread, kept until %s (camera-box#1387)",
+			     obs_encoder_get_name(encoder),
+			     video->encoder_only_mix ? "its last encoder stops (GPU rescale mix)" : "video reset");
+		else
+			blog(LOG_ERROR, "gpu-encode: '%s' could not start the encode thread", obs_encoder_get_name(encoder));
+	}
 
 	if (success) {
 		os_atomic_inc_long(&video->gpu_encoder_active);
@@ -3355,7 +3403,12 @@ void stop_gpu_encode(obs_encoder_t *encoder)
 
 	pthread_mutex_lock(&video->gpu_encoder_mutex);
 	da_erase_item(video->gpu_encoders, &encoder);
-	if (!video->gpu_encoders.num)
+	/* camera-box#1387: a canvas mix keeps the thread and its textures for the next start (freed
+	 * with the mix), so the stop takes no graphics: entering it from the per-stop thread stalled
+	 * the render tick 52-60 ms at every StopRecord. An encoder-only (GPU rescale) mix is freed
+	 * under mixes_mutex when its last encoder goes (maybe_clear_encoder_core_video_mix), where
+	 * joining a live thread could deadlock; it ends the thread here, as before. */
+	if (!video->gpu_encoders.num && video->encoder_only_mix)
 		call_free = true;
 	pthread_mutex_unlock(&video->gpu_encoder_mutex);
 
@@ -3369,6 +3422,7 @@ void stop_gpu_encode(obs_encoder_t *encoder)
 		free_gpu_encoding(video);
 		pthread_mutex_unlock(&video->gpu_encoder_mutex);
 		obs_leave_graphics();
+		blog(LOG_INFO, "gpu-encode: encoder-only mix, encode thread ended at stop (camera-box#1387)");
 	}
 }
 
@@ -3456,6 +3510,29 @@ void obs_queue_task(enum obs_task_type type, obs_task_t task, void *param, bool 
 	} else {
 		if (obs_in_task_thread(type)) {
 			task(param);
+
+		} else if (wait && type == OBS_TASK_GRAPHICS) {
+			/* camera-box#1387: with no graphics thread to run it, the task runs here; it used
+			 * to wait forever (a texture encoder destroyed after the video thread ended). */
+			struct obs_core_video *video = &obs->video;
+			struct task_wait_info info = {
+				.task = task,
+				.param = param,
+			};
+			struct obs_task_info queued = {task_wait_callback, &info};
+			bool open;
+
+			os_event_init(&info.event, OS_EVENT_TYPE_MANUAL);
+			pthread_mutex_lock(&video->task_mutex);
+			open = video->tasks_open;
+			if (open)
+				deque_push_back(&video->tasks, &queued, sizeof(queued));
+			pthread_mutex_unlock(&video->task_mutex);
+			if (open)
+				os_event_wait(info.event);
+			else
+				task(param);
+			os_event_destroy(info.event);
 
 		} else if (wait) {
 			struct task_wait_info info = {

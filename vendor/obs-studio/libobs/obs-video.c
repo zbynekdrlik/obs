@@ -464,14 +464,22 @@ static inline void stage_output_texture(struct obs_core_video_mix *video, int cu
 
 static inline bool queue_frame(struct obs_core_video_mix *video, bool raw_active, struct obs_vframe_info *vframe_info)
 {
-	bool duplicate = !video->gpu_encoder_avail_queue.size ||
-			 (video->gpu_encoder_queue.size && vframe_info->count > 1);
+	struct obs_tex_frame *back =
+		video->gpu_encoder_queue.size
+			? deque_data(&video->gpu_encoder_queue, video->gpu_encoder_queue.size - sizeof(*back))
+			: NULL;
+	/* camera-box#1387: a frame of an earlier recording session is never this one's to repeat; the
+	 * encode thread returns it unencoded, with any count added to it. */
+	if (back && back->session != video->gpu_encode_session)
+		back = NULL;
+
+	bool duplicate = !video->gpu_encoder_avail_queue.size || (back && vframe_info->count > 1);
 
 	if (duplicate) {
-		struct obs_tex_frame *tf =
-			deque_data(&video->gpu_encoder_queue, video->gpu_encoder_queue.size - sizeof(*tf));
+		struct obs_tex_frame *tf = back;
 
-		/* texture-based encoding is stopping */
+		/* texture-based encoding is stopping, or every texture still holds an earlier session's
+		 * frame: this frame is not encoded */
 		if (!tf) {
 			return false;
 		}
@@ -518,6 +526,7 @@ static inline bool queue_frame(struct obs_core_video_mix *video, bool raw_active
 	tf.count = 1;
 	tf.timestamp = vframe_info->timestamp;
 	tf.released = true;
+	tf.session = video->gpu_encode_session;
 #ifdef _WIN32
 	tf.handle = gs_texture_get_shared_handle(tf.tex);
 	gs_texture_release_sync(tf.tex, ++tf.lock_key);
@@ -1393,6 +1402,13 @@ void *obs_graphics_thread(void *param)
 	while (obs_graphics_thread_loop(&context))
 #endif
 		;
+
+	/* camera-box#1387: a waiting task queued from now runs on its caller; the ones already queued
+	 * run here, so no caller waits for a thread that has ended. */
+	pthread_mutex_lock(&obs->video.task_mutex);
+	obs->video.tasks_open = false;
+	pthread_mutex_unlock(&obs->video.task_mutex);
+	execute_graphics_tasks();
 
 #ifdef _WIN32
 	uninit_winrt_state(&winrt);
