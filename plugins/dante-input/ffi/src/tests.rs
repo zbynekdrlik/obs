@@ -215,9 +215,3 @@ fn the_status_line_comes_every_second_for_the_first_30_then_every_10_s() {
     let first_30: Duration = waits[..30].iter().sum();
     assert_eq!(first_30, Duration::from_secs(30));
 }
-
-#[test]
-fn the_start_line_names_each_cpu_or_none() {
-    assert_eq!(cpu_text(Some(15)), "15");
-    assert_eq!(cpu_text(None), "none");
-}

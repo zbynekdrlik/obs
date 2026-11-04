@@ -39,6 +39,8 @@ on:
       - 'vendor/obs-vban/**'
       # issue 1470: the strih variant builds the A/V-sync dock.
       - 'vendor/av-sync-dock/**'
+      # camera-box#1436: the strih variant builds the loudness dock (the stream operator's LUFS meter).
+      - 'vendor/obs-loudness-dock/**'
       - 'scripts/genlock-manifest.sh'
       - 'scripts/genlock-runtime-packages.sh'
       # issue 1387 + camera-box#1487: the strih variant links the JPEG XS C ABIs (jxs-recv-ffi, which
@@ -554,6 +556,38 @@ jobs:
         working-directory: vendor/av-sync-dock
         run: cmake --build build_ubuntu --parallel
 
+      # camera-box#1436 (owner 4.11.2026): the stream operator's LUFS meter (vendor/obs-loudness-dock,
+      # norihiro 0.5.1: EBU R128 momentary / short-term / integrated, LRA, true peak) -- the Windows
+      # stream OBS had one, the Linux bundle lost it. Same genlocked SDK and system Qt6 as the A/V-sync
+      # dock; upstream links with -Wl,-z,defs. Upstream uses a system libebur128 only when pkg-config finds
+      # one; the runner has none, and the staging step fails if the .so links one (the box must need no
+      # libebur128 package). PkgConfig stays on: Qt6Gui's FindXKB needs it.
+      - name: Configure obs-loudness-dock against the genlocked OBS SDK (camera-box#1436)
+        working-directory: vendor/obs-loudness-dock
+        run: >
+          cmake -B build_ubuntu
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DQT_VERSION=6
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build obs-loudness-dock (camera-box#1436)
+        working-directory: vendor/obs-loudness-dock
+        run: cmake --build build_ubuntu --parallel
+
+      # camera-box#1436: the vendored libebur128 the dock meters with reads the EBU Tech 3341 reference
+      # (1 kHz, -23 dBFS stereo) as -23 LUFS momentary / short-term / integrated and ~-23 dBTP.
+      - name: Test the loudness meter against the EBU reference (camera-box#1436)
+        working-directory: tests/loudness-ebur128
+        run: |
+          set -euo pipefail
+          cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+          build/ebur128-reference
+          # The dock's only ebur128_init call (a code line, not a comment) passes the shared mode the test ran.
+          calls="$(grep -v '^[[:space:]]*\(//\|/\*\|\*\)' ../../vendor/obs-loudness-dock/src/*.c ../../vendor/obs-loudness-dock/src/*.cpp | grep -c 'ebur128_init(' || true)"
+          good="$(grep -v '^[[:space:]]*\(//\|/\*\|\*\)' ../../vendor/obs-loudness-dock/src/loudness.c | grep -c 'ebur128_init(.*LOUDNESS_DOCK_EBUR128_MODE)' || true)"
+          if [ "$calls" != 1 ] || [ "$good" != 1 ]; then echo "ERROR: want one ebur128_init in the dock, passing LOUDNESS_DOCK_EBUR128_MODE (calls=$calls good=$good, camera-box#1436)"; exit 1; fi
+
       # obs#1 / camera-box#1485: the dante_input source. Its Rust device (dlink, pinned dstack tag in
       # plugins/dante-input/ffi/Cargo.toml) is a static library; rustc names its native libraries.
       - name: Build the dante-input FFI static library (obs#1)
@@ -691,6 +725,14 @@ jobs:
           if [ -z "$dock_so" ]; then echo "ERROR: obs-audio-video-sync-dock.so not found after the av-sync-dock build (issue 1470)"; exit 1; fi
           if ! nm -D --defined-only "$dock_so" | grep -w obs_module_load >/dev/null; then echo "ERROR: $dock_so exports no obs_module_load -- OBS would not load it (issue 1470)"; exit 1; fi
           cp "$dock_so" "$plugin_lib_dir/"
+          # camera-box#1436: the loudness dock (dock id net.nagater.obs-loudness-dock..main -- upstream's
+          # ID_PREFIX ends in '.' and it appends '.main'; camera-box seeds that dock open on the stream role).
+          loud_so=$(find vendor/obs-loudness-dock/build_ubuntu -name 'loudness-dock.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$loud_so" ]; then echo "ERROR: loudness-dock.so not found after the obs-loudness-dock build (camera-box#1436)"; exit 1; fi
+          if ! nm -D --defined-only "$loud_so" | grep -w obs_module_load >/dev/null; then echo "ERROR: $loud_so exports no obs_module_load -- OBS would not load it (camera-box#1436)"; exit 1; fi
+          if ! strings "$loud_so" | grep -Fx 'net.nagater.obs-loudness-dock..main' >/dev/null; then echo "ERROR: $loud_so does not carry the dock id camera-box seeds (camera-box#1436)"; exit 1; fi
+          if ldd "$loud_so" | grep ebur128 >/dev/null; then echo "ERROR: $loud_so links a system libebur128, not the vendored one (camera-box#1436)"; exit 1; fi
+          cp "$loud_so" "$plugin_lib_dir/"
           # obs#1 / camera-box#1485: the dante_input source (no device and no source kind without
           # ~/.camera-box/dante-input.toml on the box).
           cp plugins/dante-input/build_ubuntu/dante-input.so "$plugin_lib_dir/"
@@ -711,6 +753,10 @@ jobs:
           cp -a vendor/av-sync-dock/data/. "$data_root/obs-audio-video-sync-dock/"
           if [ ! -f "$data_root/obs-audio-video-sync-dock/locale/en-US.ini" ]; then echo "ERROR: the dock locale did not stage (issue 1470)"; exit 1; fi
           echo "staged obs-audio-video-sync-dock.so from: $dock_so -> $plugin_lib_dir/"
+          mkdir -p "$data_root/loudness-dock"
+          cp -a vendor/obs-loudness-dock/data/. "$data_root/loudness-dock/"
+          if [ ! -f "$data_root/loudness-dock/locale/en-US.ini" ]; then echo "ERROR: the loudness dock locale did not stage (camera-box#1436)"; exit 1; fi
+          echo "staged loudness-dock.so from: $loud_so -> $plugin_lib_dir/"
 
           git rev-parse HEAD > stage/GENLOCK_BUILD_SHA.txt
           # obs#1 point 3: OBS_RELEASE.txt names the release tag (a dev build says tag=none), the obs
@@ -763,9 +809,10 @@ jobs:
           out_stats="$(sed -n 's/^#define OBS_GENLOCK_OUTPUT_STATS_VERSION \([0-9]\+\)$/\1/p' vendor/obs-studio/libobs/obs.h)"
           vban="$(sed -n 's/^project(obs-vban VERSION \([0-9.]\+\))$/\1/p' vendor/obs-vban/CMakeLists.txt)"
           dock="$(sed -n 's/^project(obs-audio-video-sync-dock VERSION \([0-9.]\+\))$/\1/p' vendor/av-sync-dock/CMakeLists.txt)"
+          loudness="$(sed -n 's/^project(loudness-dock VERSION \([0-9.]\+\))$/\1/p' vendor/obs-loudness-dock/CMakeLists.txt)"
           obs="$(jq -r '.components[] | select(.name == "obs-studio") | .pinned_version' stage/BUNDLE_MANIFEST.json)"
           distroav="$(jq -r '.components[] | select(.name == "distroav") | .pinned_version' stage/BUNDLE_MANIFEST.json)"
-          for v in stats out_stats vban dock obs distroav; do
+          for v in stats out_stats vban dock loudness obs distroav; do
             if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then echo "ERROR: could not read $v"; exit 1; fi
           done
           release="$(jq -cn \
@@ -773,13 +820,13 @@ jobs:
             --arg commit "$(git rev-parse HEAD)" \
             --arg version "$(tr -d '[:space:]' < VERSION)" \
             --arg obs "$obs" --arg distroav "$distroav" \
-            --arg vban "$vban" --arg dock "$dock" \
+            --arg vban "$vban" --arg dock "$dock" --arg loudness "$loudness" \
             --arg vstack_tag "$VSTACK_TAG" --arg vstack_commit "$VSTACK_COMMIT" \
             --argjson stats "$stats" --argjson out_stats "$out_stats" \
             --arg obs_h "$(sha256sum vendor/obs-studio/libobs/obs.h | cut -d' ' -f1)" \
             --argjson abi "$abi" \
             '{obs_tag: $tag, obs_commit: $commit, obs_version: $version,
-              versions: {"obs-studio": $obs, distroav: $distroav, "obs-vban": $vban, "av-sync-dock": $dock},
+              versions: {"obs-studio": $obs, distroav: $distroav, "obs-vban": $vban, "av-sync-dock": $dock, "loudness-dock": $loudness},
               vstack_tag: $vstack_tag, vstack_commit: $vstack_commit,
               genlock_stats_version: $stats, genlock_output_stats_version: $out_stats,
               obs_h_sha256: $obs_h, cbjxs_abi_version: $abi}')"
