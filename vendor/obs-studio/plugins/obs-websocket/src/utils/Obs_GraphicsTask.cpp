@@ -34,8 +34,9 @@ struct GraphicsWork {
 	void *param;
 };
 
-/* On the graphics thread the context is already current, so entering it is cheap. With no
- * graphics thread it runs on its caller, as before. */
+/* Graphics tasks run outside the graphics context, so the task enters it. On the graphics thread
+ * that is cheap: the GL context was made current on this thread before. With no graphics thread
+ * the task runs on its caller, as before. */
 static void GraphicsTaskEntry(void *param)
 {
 	auto *w = static_cast<GraphicsWork *>(param);
@@ -70,10 +71,14 @@ static void RenderTask(void *param)
 	const uint32_t sourceHeight = obs_source_get_height(d->source);
 	const size_t rowBytes = (size_t)d->width * 4;
 
+	d->success = false;
+	/* the source may have lost its size since the request read it */
+	if (!sourceWidth || !sourceHeight)
+		return;
+
 	gs_texrender_t *texRender = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	gs_stagesurf_t *stageSurface = gs_stagesurface_create(d->width, d->height, GS_RGBA);
 
-	d->success = false;
 	gs_texrender_reset(texRender);
 	if (gs_texrender_begin(texRender, d->width, d->height)) {
 		vec4 background;
