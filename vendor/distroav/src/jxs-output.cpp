@@ -381,7 +381,10 @@ static void jxs_output_rawvideo(void *data, struct video_data *frame)
 	const char *why = nullptr;
 	if (cbjxs_send_get_stats(o->tx, &st) == 1) {
 		o->last_window_ns = now;
-		if (cb_jxs_out_window_dead(&o->dead_windows, o->taken + o->not_taken, st.frames, o->poisoned)) {
+		/* handed = frames the sender took or dropped busy (its own count): an off-grid frame (also a
+		 * 0 from cbjxs_send_frame, never counted by the sender) is not one, so a canvas off the
+		 * 30 fps grid never reads as a dead sender */
+		if (cb_jxs_out_window_dead(&o->dead_windows, o->taken + st.dropped_busy, st.frames, o->poisoned)) {
 			dead = true;
 			why = o->poisoned ? "the sender is poisoned (a panic in the library)"
 					  : "two 5 s windows with frames handed to the sender and none sent whole";

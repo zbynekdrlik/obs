@@ -192,8 +192,8 @@ static inline void cb_jxs_out_error_clear(char *last)
  *
  * vstack's sender never stops on a send error, but it can die: a panic inside the library poisons
  * it (every frame -2), a panicked send thread leaves every frame not taken, a dead feeder sends
- * nothing. Each shows as frames handed to the sender (taken or not taken -- not taken also counts
- * an off-grid frame the sender never saw, harmless: on-grid frames are still taken; a refused frame or a
+ * nothing. Each shows as frames handed to the sender (taken, or dropped busy by the sender's own
+ * count -- an off-grid frame is neither, so a canvas off the 30 fps grid is no death; a refused frame or a
  * duplicate stamp is not counted, so a failure every frame repeats is no restart loop) and none
  * sent whole. A send error does NOT: vstack counts a frame with failed sends as sent whole
  * (send_errors only), so a receiver that is off is no death -- and neither is a source-IP change
@@ -204,7 +204,7 @@ static inline void cb_jxs_out_error_clear(char *last)
 /* No new 5 s status window for this long while frames are offered: the sender's threads are gone. */
 #define CB_JXS_OUT_STATS_STALE_NS 15000000000ULL
 
-/* One status window: `handed` frames handed to the sender (taken + not taken), `frames_sent` sent
+/* One status window: `handed` frames handed to the sender (taken + its dropped_busy), `frames_sent` sent
  * whole by it, `poisoned` = a frame came back -2. True = restart the sender. `dead_windows`
  * counts the windows in a row with frames handed and none sent. */
 static inline bool cb_jxs_out_window_dead(uint32_t *dead_windows, uint64_t handed, uint64_t frames_sent,
