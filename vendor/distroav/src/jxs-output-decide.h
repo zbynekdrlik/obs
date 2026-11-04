@@ -187,3 +187,37 @@ static inline void cb_jxs_out_error_clear(char *last)
 	if (last)
 		last[0] = '\0';
 }
+
+/* ---- camera-box#1387: a LIVE sender that died ----
+ *
+ * vstack's sender never stops on a send error, but it can die: a panic inside the library poisons
+ * it (every frame -2), a panicked send thread leaves every frame not taken, a source-IP change
+ * fails every send (the connected socket keeps its old source). Each shows as frames offered and
+ * none sent whole; a receiver that is off still sends whole frames (ECONNREFUSED only counts
+ * send_errors). The output then restarts its sender (stop + the 2 s start retry). */
+
+#define CB_JXS_OUT_DEAD_WINDOWS 2U
+/* No new 5 s status window for this long while frames are offered: the sender's threads are gone. */
+#define CB_JXS_OUT_STATS_STALE_NS 15000000000ULL
+
+/* One status window: `offered` frames handed to the output, `frames_sent` sent whole by the
+ * sender, `poisoned` = a frame came back -2. True = restart the sender. `dead_windows` counts the
+ * windows in a row with frames offered and none sent. */
+static inline bool cb_jxs_out_window_dead(uint32_t *dead_windows, uint64_t offered, uint64_t frames_sent,
+					  bool poisoned)
+{
+	if (poisoned)
+		return true;
+	if (offered == 0 || frames_sent > 0) {
+		*dead_windows = 0;
+		return false;
+	}
+	return ++*dead_windows >= CB_JXS_OUT_DEAD_WINDOWS;
+}
+
+/* True = the sender has handed out no status window for CB_JXS_OUT_STATS_STALE_NS while frames
+ * were offered (its threads are gone, so no window can show the death). */
+static inline bool cb_jxs_out_stats_stale(uint64_t last_window_ns, uint64_t now_ns, uint64_t offered)
+{
+	return offered > 0 && last_window_ns > 0 && now_ns >= last_window_ns + CB_JXS_OUT_STATS_STALE_NS;
+}
