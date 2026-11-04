@@ -409,8 +409,8 @@ impl DanteInput {
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: latency split dante_latency_ns={} rx_path_ns={} tx_path_ns={}",
-                split.latency_ns, split.rx_path_ns, split.tx_path_ns,
+                "dante-input start: latency split dante_latency_ns={} rx_path_ns={}",
+                split.latency_ns, split.rx_path_ns,
             ),
         );
         let n = cfg.rx.len();

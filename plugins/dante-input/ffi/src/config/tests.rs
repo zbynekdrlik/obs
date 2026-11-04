@@ -216,19 +216,20 @@ fn the_example_config_reads_and_subscribes_from_two_transmitters() {
 
 #[test]
 fn a_budget_the_work_leaves_under_4_ms_of_is_refused_by_its_key() {
-    // dstack #68: at a 96 kHz network with OBS at 48 kHz the work is 4.83 ms (2 ms margin and
-    // the converter's 2.83 ms TX delay), so 8 ms leaves 3.17 ms and 9 ms leaves 4.17 ms.
+    // dlink v0.6.24: an RX-only device's work is the RX side alone. At a 96 kHz network with OBS
+    // at 48 kHz that is the 1.33 ms block and the converter's 1.33 ms RX delay, so 6 ms leaves
+    // 3.33 ms and 7 ms leaves 4.33 ms; the RX path is the whole budget.
     let net = |ms: u32| {
         GOOD.replace(
             "rx_port_base = 47200",
             &format!("rx_port_base = 47200\nnetwork_rate = 96000\nlatency_ms = {ms}"),
         )
     };
-    let (_d, path) = write(&net(8));
+    let (_d, path) = write(&net(6));
     let e = InputConfig::load(&path).unwrap().split(48_000).unwrap_err();
-    assert!(e.starts_with("latency_ms: 8 is too small here: "), "{e}");
-    let (_d, path) = write(&net(9));
+    assert!(e.starts_with("latency_ms: 6 is too small here: "), "{e}");
+    let (_d, path) = write(&net(7));
     let split = InputConfig::load(&path).unwrap().split(48_000).unwrap();
     assert!(split.latency_ns >= 4_000_000, "{split:?}");
-    assert!(split.rx_path_ns <= 9_000_000, "{split:?}");
+    assert!(split.rx_path_ns <= 7_000_000, "{split:?}");
 }

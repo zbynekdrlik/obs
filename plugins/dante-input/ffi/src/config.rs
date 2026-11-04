@@ -7,12 +7,13 @@ use serde::Deserialize;
 
 /// The latency budget unless the file sets one (owner, camera-box#1485: 10 ms). Since dlink
 /// v0.6.22 (dstack #68, owner 3.11.2026) it is each direction's whole path, the Dante latency
-/// and the work together; dlink gives the Dante latency what the larger direction's work leaves.
+/// and the work together; dlink gives the Dante latency what the work of the directions the
+/// device uses leaves (v0.6.24: RX only here, so the RX path is the whole budget).
 /// Before v0.4.9 the same `latency_ms` was the Dante latency alone.
 pub const DEFAULT_LATENCY_MS: u32 = 10;
 /// dlink's least Dante latency, so no budget below it can work. The real floor depends on the
 /// rates and the block: [`InputConfig::split`] refuses a budget that leaves under 4 ms after
-/// the work (at 96 kHz network and 48 kHz OBS, anything under 9 ms).
+/// the work (v0.6.24, RX only, 48 kHz OBS: anything under 7 ms).
 pub const MIN_LATENCY_MS: u32 = 4;
 /// Past this the program audio is too late to be any use.
 pub const MAX_LATENCY_MS: u32 = 100;
