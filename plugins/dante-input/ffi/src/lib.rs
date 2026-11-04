@@ -1,7 +1,7 @@
 //! The C ABI under the OBS `dante_input` source (obs#1, camera-box#1485): one dlink device (dstack)
 //! per OBS process, RX only. The pump's [`Sink`] only copies each block into a lock-free ring; the
 //! `dante-input-obs` thread ([`Feeder`]) hands it to the C callback as float planes. OBS takes its
-//! source mutexes in that call, so it never runs inside the pump's 0.33 ms block (v0.3.0 on
+//! source mutexes in that call, so it never runs inside the pump's block (1.33 ms at 96 kHz since dlink v0.6.20) (v0.3.0 on
 //! strih-snv: blocks of up to 6.7 ms, past the 5 ms margin, skipped).
 //! The device's own log (dlink's clock choice, subscriptions, errors) and the status line (1 s for 30 s, then 10 s) go to
 //! the C log callback, so they land in the OBS log.
@@ -384,17 +384,14 @@ impl DanteInput {
         let cfg = InputConfig::load(path)?;
         let link_cfg = cfg.dlink(obs_rate);
         let rate = cfg.app_rate(obs_rate);
-        let split = link_cfg.split()?;
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: config={} name={} iface={} latency_ms={} dante_latency_ns={} rx_path_ns={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
+                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
                 path.display(),
                 cfg.name,
                 cfg.iface,
                 cfg.latency_ms,
-                split.latency_ns,
-                split.rx_path_ns,
                 link_cfg.device_rate(),
                 link_cfg.converts(),
                 cfg.rx,
@@ -404,6 +401,16 @@ impl DanteInput {
                 cfg.rx_port_base,
                 cfg.subscribe.len(),
                 cfg.state_file.as_deref().unwrap_or(Path::new("")).display(),
+            ),
+        );
+        let split = cfg
+            .split(obs_rate)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        log(
+            LOG_INFO,
+            &format!(
+                "dante-input start: latency split dante_latency_ns={} rx_path_ns={} tx_path_ns={}",
+                split.latency_ns, split.rx_path_ns, split.tx_path_ns,
             ),
         );
         let n = cfg.rx.len();

@@ -7,7 +7,7 @@ name = "strih-obs"                # the device name Dante Controller lists
 iface = "enp7s0.70"               # the interface that faces the Dante network
 network_rate = 96000              # the network's rate; dlink's 2:1 step gives OBS its own rate
 # sample_rate = 48000             # OBS's audio rate unless set
-latency_ms = 10                   # 4..=100
+latency_ms = 10                   # each direction's whole path; dlink splits it (at least 9 at 96k/48k)
 rx = ["Master L", "Master R", "Click", "Guide"]   # 1-6 or 8 channels; OBS gets them in this order
 arc_port = 4440                   # arc/cmc/flows: all three or none
 cmc_port = 8800
