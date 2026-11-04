@@ -38,7 +38,12 @@ tempfile = "3"
 lto = true
 codegen-units = 1
 
-# dstack v0.6.25: a converting dlink device (96 kHz network, 48 kHz OBS) needs rubato optimised in
-# debug builds, or the converter misses its blocks in `cargo test`.
+# dstack v0.6.25 (dlink's "Debug builds with a rate converter"): a converting device (96 kHz
+# network, 48 kHz OBS) runs dstack-resample over rubato inside the pump's block; unoptimised it
+# overruns every block in a debug build or `cargo test`. Cargo takes profiles only from this,
+# the top workspace.
 [profile.dev.package.rubato]
+opt-level = 3
+
+[profile.dev.package.dstack-resample]
 opt-level = 3
