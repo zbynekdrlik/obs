@@ -62,6 +62,22 @@ int main(void)
 	      "a long error is kept truncated, never past its buffer");
 	CHECK(!cb_jxs_out_error_new(small, sizeof small, "a long error text"), "and the same long error is not logged twice");
 
+	/* a LIVE sender that died (deep review of v0.4.14): a panic poisons it (every frame -2), a
+	 * panicked send thread or a source-IP change sends no frame whole while frames are offered. A
+	 * receiver that is off still sends whole frames (only send_errors), so it is no death. */
+	uint32_t dead = 0;
+	CHECK(!cb_jxs_out_window_dead(&dead, 150, 150, false), "a window that sent frames is alive");
+	CHECK(!cb_jxs_out_window_dead(&dead, 0, 0, false), "a window with nothing offered is no death");
+	CHECK(!cb_jxs_out_window_dead(&dead, 150, 0, false), "one window with nothing sent is not yet a death");
+	CHECK(cb_jxs_out_window_dead(&dead, 150, 0, false), "two windows in a row with nothing sent is");
+	dead = 0;
+	CHECK(!cb_jxs_out_window_dead(&dead, 150, 0, false), "a fresh count after a restart");
+	CHECK(!cb_jxs_out_window_dead(&dead, 150, 3, false), "a window that sent again resets it");
+	CHECK(!cb_jxs_out_window_dead(&dead, 150, 0, false), "so a later stall counts from one again");
+	dead = 0;
+	CHECK(cb_jxs_out_window_dead(&dead, 1, 1, true), "a poisoned sender is dead at once");
+	CHECK(CB_JXS_OUT_DEAD_WINDOWS == 2, "two 5 s windows (10 s) without a frame sent restart the sender");
+
 	printf("%s\n", failures ? "jxs-output-retry: FAILED" : "jxs-output-retry: all checks passed");
 	return failures ? 1 : 0;
 }
