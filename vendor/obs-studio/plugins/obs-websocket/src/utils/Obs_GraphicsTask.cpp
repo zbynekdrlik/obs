@@ -22,11 +22,36 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "Obs_GraphicsTask.h"
 
-static void RunGraphicsTask(void (*task)(void *), void *param)
+/* camera-box#1387: a request thread does not enter graphics. Requests run on obs-websocket's Qt
+ * pool, whose threads end after 30 s idle, so a request every few minutes always ran on a fresh
+ * thread. Its first GL MakeCurrent (~60 ms) ran under the graphics lock while the render thread
+ * waited, and the tick lost a frame. The GL work runs on the graphics thread instead, after its
+ * render (libobs runs a waiting graphics task on its caller when there is no graphics thread). A
+ * caller that already holds graphics runs it where it is: waiting on the graphics thread would
+ * wait on the lock it holds. */
+struct GraphicsWork {
+	void (*work)(void *);
+	void *param;
+};
+
+/* On the graphics thread the context is already current, so entering it is cheap. With no
+ * graphics thread it runs on its caller, as before. */
+static void GraphicsTaskEntry(void *param)
 {
+	auto *w = static_cast<GraphicsWork *>(param);
 	obs_enter_graphics();
-	task(param);
+	w->work(w->param);
 	obs_leave_graphics();
+}
+
+static void RunGraphicsTask(void (*work)(void *), void *param)
+{
+	if (gs_get_context()) {
+		work(param);
+		return;
+	}
+	GraphicsWork w = {work, param};
+	obs_queue_task(OBS_TASK_GRAPHICS, GraphicsTaskEntry, &w, true);
 }
 
 struct RenderData {
