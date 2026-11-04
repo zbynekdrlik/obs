@@ -78,6 +78,12 @@ int main(void)
 	CHECK(cb_jxs_out_window_dead(&dead, 1, 1, true), "a poisoned sender is dead at once");
 	CHECK(CB_JXS_OUT_DEAD_WINDOWS == 2, "two 5 s windows (10 s) without a frame sent restart the sender");
 
+	/* a sender whose threads are gone hands out no status window at all */
+	CHECK(!cb_jxs_out_stats_stale(100 * S, 114 * S, 50), "no window for 14 s is not yet stale");
+	CHECK(cb_jxs_out_stats_stale(100 * S, 115 * S, 50), "no window for 15 s while frames are offered is");
+	CHECK(!cb_jxs_out_stats_stale(100 * S, 200 * S, 0), "nothing offered is never stale");
+	CHECK(!cb_jxs_out_stats_stale(0, 200 * S, 50), "no start time yet is never stale");
+
 	printf("%s\n", failures ? "jxs-output-retry: FAILED" : "jxs-output-retry: all checks passed");
 	return failures ? 1 : 0;
 }
