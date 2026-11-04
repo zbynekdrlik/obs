@@ -243,12 +243,16 @@ static void *gpu_encode_thread(void *data)
 
 		/* -------------- */
 
-		os_event_signal(video->gpu_encode_inactive);
-
+		/* camera-box#1387: the references go before the signal, so a returned stop_gpu_encode
+		 * leaves this thread holding no encoder. The thread now outlives recordings and is
+		 * joined when its mix is freed (under mixes_mutex, maybe on the graphics thread); a last
+		 * release there would destroy the encoder (obs-nvenc waits for the graphics thread). */
 		for (size_t i = 0; i < encoders.num; i++)
 			obs_encoder_release(encoders.array[i]);
 
 		da_resize(encoders, 0);
+
+		os_event_signal(video->gpu_encode_inactive);
 
 		profile_end(gpu_encode_thread_name);
 		profile_reenable_thread();

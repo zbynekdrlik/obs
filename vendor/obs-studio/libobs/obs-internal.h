@@ -478,6 +478,9 @@ struct obs_core_video_mix {
 	/* camera-box#1387: the thread and its textures live until the mix is freed; each start after
 	 * a pause bumps this, and the thread returns frames of an earlier session unencoded. */
 	uint64_t gpu_encode_session;
+	/* camera-box#1387: held across start_gpu_encode / stop_gpu_encode, so a start never reuses a
+	 * thread a stop is ending (GPU rescale mix) */
+	pthread_mutex_t gpu_encode_lifecycle_mutex;
 
 	video_t *video;
 	struct obs_video_info ovi;
