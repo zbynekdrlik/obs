@@ -19,6 +19,9 @@ pub const DEFAULT_LATENCY_MS: u32 = (dlink::BUDGET_NS / 1_000_000) as u32;
 pub const MIN_LATENCY_MS: u32 = 4;
 /// Past this the program audio is too late to be any use.
 pub const MAX_LATENCY_MS: u32 = 100;
+// dlink's default budget is the file's default, so it must be one the file check takes; a dlink
+// bump past 100 ms would otherwise refuse every file without latency_ms.
+const _: () = assert!(DEFAULT_LATENCY_MS >= MIN_LATENCY_MS && DEFAULT_LATENCY_MS <= MAX_LATENCY_MS);
 /// The most RX channels the source takes: OBS's widest speaker layout (7.1).
 pub const MAX_CHANNELS: usize = 8;
 
