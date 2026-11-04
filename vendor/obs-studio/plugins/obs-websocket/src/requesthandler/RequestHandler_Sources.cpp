@@ -24,6 +24,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QDir>
 
 #include "RequestHandler.h"
+#include "../utils/Obs_GraphicsTask.h"
 
 QImage TakeSourceScreenshot(obs_source_t *source, bool &success, uint32_t requestedWidth = 0, uint32_t requestedHeight = 0)
 {
@@ -55,50 +56,9 @@ QImage TakeSourceScreenshot(obs_source_t *source, bool &success, uint32_t reques
 	QImage ret(imgWidth, imgHeight, QImage::Format::Format_RGBA8888);
 	ret.fill(0);
 
-	// Video image buffer
-	uint8_t *videoData = nullptr;
-	uint32_t videoLinesize = 0;
-
-	// Enter graphics context
-	obs_enter_graphics();
-
-	gs_texrender_t *texRender = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-	gs_stagesurf_t *stageSurface = gs_stagesurface_create(imgWidth, imgHeight, GS_RGBA);
-
-	success = false;
-	gs_texrender_reset(texRender);
-	if (gs_texrender_begin(texRender, imgWidth, imgHeight)) {
-		vec4 background;
-		vec4_zero(&background);
-
-		gs_clear(GS_CLEAR_COLOR, &background, 0.0f, 0);
-		gs_ortho(0.0f, (float)sourceWidth, 0.0f, (float)sourceHeight, -100.0f, 100.0f);
-
-		gs_blend_state_push();
-		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
-
-		obs_source_inc_showing(source);
-		obs_source_video_render(source);
-		obs_source_dec_showing(source);
-
-		gs_blend_state_pop();
-		gs_texrender_end(texRender);
-
-		gs_stage_texture(stageSurface, gs_texrender_get_texture(texRender));
-		if (gs_stagesurface_map(stageSurface, &videoData, &videoLinesize)) {
-			int lineSize = ret.bytesPerLine();
-			for (uint y = 0; y < imgHeight; y++) {
-				memcpy(ret.scanLine(y), videoData + (y * videoLinesize), lineSize);
-			}
-			gs_stagesurface_unmap(stageSurface);
-			success = true;
-		}
-	}
-
-	gs_stagesurface_destroy(stageSurface);
-	gs_texrender_destroy(texRender);
-
-	obs_leave_graphics();
+	// camera-box#1387: the GL work runs on the graphics thread, not on this request thread
+	success = Utils::Obs::GraphicsTask::RenderSourceRGBA(source, imgWidth, imgHeight, ret.bits(),
+							     (size_t)ret.bytesPerLine());
 
 	return ret;
 }
