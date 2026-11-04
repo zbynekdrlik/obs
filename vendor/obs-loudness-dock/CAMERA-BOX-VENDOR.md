@@ -22,7 +22,7 @@ short-term and integrated loudness, LRA and true peak.
 | file | change |
 |---|---|
 | `src/loudness-mode.h` | NEW. `LOUDNESS_DOCK_EBUR128_MODE` is upstream's mode plus `EBUR128_MODE_HISTOGRAM`, shared with `tests/loudness-ebur128`. |
-| `src/loudness.c` | `init_state` meters with `LOUDNESS_DOCK_EBUR128_MODE`, which adds `EBUR128_MODE_HISTOGRAM`. Without it, libebur128 keeps every 100 ms block since start, and the integrated/LRA read walks the whole list. That read runs every 48 ms under the mutex that `audio_cb` takes on OBS's audio thread, so the hold grows with uptime: about 3 ms at 8 h and 9 ms at 24 h, against a 21.3 ms audio tick (v0.4.12 deep review). Histogram mode makes the read constant-time, at 0.1 LU resolution: the EBU reference sits on a bin edge and reads within ±0.1 of -23 LUFS. |
+| `src/loudness.c` | `init_state` passes `LOUDNESS_DOCK_EBUR128_MODE` straight to `ebur128_init`; the mode adds `EBUR128_MODE_HISTOGRAM`. CI checks that it is the dock's only `ebur128_init` call. Without it, libebur128 keeps every 100 ms block since start, and the integrated/LRA read walks the whole list. That read runs every 48 ms under the mutex that `audio_cb` takes on OBS's audio thread, so the hold grows with uptime: about 3 ms at 8 h and 9 ms at 24 h, against a 21.3 ms audio tick (v0.4.12 deep review). Histogram mode makes the read constant-time, at 0.1 LU resolution: the EBU reference sits on a bin edge and reads within ±0.1 of -23 LUFS. |
 
 The camera-box build settings live in `.github/workflows/linux-genlock.yml`:
 

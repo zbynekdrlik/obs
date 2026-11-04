@@ -1,7 +1,7 @@
 /* camera-box#1436: the loudness the stream operator reads off obs-loudness-dock comes from the
  * vendored libebur128 (vendor/obs-loudness-dock/deps/libebur128). This feeds it EBU Tech 3341
  * test case 1 -- a 1 kHz sine at -23 dBFS on both channels of a 48 kHz stereo signal -- the way
- * the dock does (EBUR128_MODE_M | S | I | LRA | TRUE_PEAK, float frames in blocks), and checks
+ * the dock does (its LOUDNESS_DOCK_EBUR128_MODE, float frames in blocks), and checks
  * the meter reads -23 LUFS momentary, short-term and integrated, and the true peak near -23 dBTP.
  * A silent signal must read no loudness (-inf), so a meter stuck at a value fails too.
  *

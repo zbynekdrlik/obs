@@ -45,8 +45,7 @@ static bool init_state(loudness_t *loudness)
 		return false;
 	}
 
-	int mode = LOUDNESS_DOCK_EBUR128_MODE;
-	loudness->state = ebur128_init(get_audio_channels(oai.speakers), oai.samples_per_sec, mode);
+	loudness->state = ebur128_init(get_audio_channels(oai.speakers), oai.samples_per_sec, LOUDNESS_DOCK_EBUR128_MODE);
 	if (!loudness->state) {
 		blog(LOG_ERROR, "Failed to initialize libebur128");
 		return false;

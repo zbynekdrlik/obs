@@ -583,6 +583,10 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build
           build/ebur128-reference
+          # The dock's only ebur128_init call (a code line, not a comment) passes the shared mode the test ran.
+          calls="$(grep -v '^[[:space:]]*\(//\|/\*\|\*\)' ../../vendor/obs-loudness-dock/src/*.c ../../vendor/obs-loudness-dock/src/*.cpp | grep -c 'ebur128_init(' || true)"
+          good="$(grep -v '^[[:space:]]*\(//\|/\*\|\*\)' ../../vendor/obs-loudness-dock/src/loudness.c | grep -c 'ebur128_init(.*LOUDNESS_DOCK_EBUR128_MODE)' || true)"
+          if [ "$calls" != 1 ] || [ "$good" != 1 ]; then echo "ERROR: want one ebur128_init in the dock, passing LOUDNESS_DOCK_EBUR128_MODE (calls=$calls good=$good, camera-box#1436)"; exit 1; fi
 
       # obs#1 / camera-box#1485: the dante_input source. Its Rust device (dlink, pinned dstack tag in
       # plugins/dante-input/ffi/Cargo.toml) is a static library; rustc names its native libraries.
