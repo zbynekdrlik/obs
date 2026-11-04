@@ -27,11 +27,14 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
     let (iface, ip) = iface_ip();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dante-input.toml");
+    // Every port sits below Linux's ephemeral range (32768-60999). RX flow ports go up from
+    // rx_port_base; 47200 put them where any outbound socket on the CI runner can hold one
+    // (v0.4.7 tag run: "RX flow port 47214: Address already in use").
     std::fs::write(
         &path,
         format!(
             "name = \"obs-e2e\"\niface = \"{iface}\"\nrx = [\"Master L\", \"Master R\"]\n\
-             network_rate = 96000\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 47200\n\
+             network_rate = 96000\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 22200\n\
              [[subscribe]]\nrx = 1\ntx_channel = \"L\"\ntx_device = \"nobody\"\n"
         ),
     )
@@ -41,7 +44,7 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         .expect("the device starts");
     assert_eq!(d.channels(), 2);
     assert_eq!(d.rate(), 48_000);
-    for port in [24440, 28800, 24455, 47200] {
+    for port in [24440, 28800, 24455, 22200] {
         assert!(
             UdpSocket::bind((ip.as_str(), port)).is_err(),
             "UDP {ip}:{port} should be the device's while it runs"
@@ -89,7 +92,7 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         "app: {app}"
     );
     d.stop();
-    for port in [24440, 28800, 24455, 47200] {
+    for port in [24440, 28800, 24455, 22200] {
         UdpSocket::bind((ip.as_str(), port))
             .unwrap_or_else(|e| panic!("UDP {ip}:{port} still held after stop: {e}"));
     }
