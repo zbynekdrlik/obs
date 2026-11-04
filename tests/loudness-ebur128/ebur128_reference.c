@@ -3,7 +3,14 @@
  * test case 1 -- a 1 kHz sine at -23 dBFS on both channels of a 48 kHz stereo signal -- the way
  * the dock does (EBUR128_MODE_M | S | I | LRA | TRUE_PEAK, float frames in blocks), and checks
  * the meter reads -23 LUFS momentary, short-term and integrated, and the true peak near -23 dBTP.
- * A silent signal must read no loudness (-inf), so a meter stuck at a value fails too. */
+ * A silent signal must read no loudness (-inf), so a meter stuck at a value fails too.
+ *
+ * The dock reads integrated loudness and LRA every 48 ms under the mutex its audio callback takes
+ * on OBS's audio thread. Without EBUR128_MODE_HISTOGRAM libebur128 walks every 100 ms block since
+ * start, so the hold grows with uptime (deep review of v0.4.12: ~3 ms at 8 h, ~9 ms at 24 h,
+ * against a 21.3 ms audio tick). The dock must run histogram mode (constant read cost), and the
+ * reference must still read -23 LUFS in it. */
+#include <string.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,7 +35,7 @@ static ebur128_state *meter(void)
 {
 	ebur128_state *st = ebur128_init(CHANNELS, RATE,
 					  EBUR128_MODE_M | EBUR128_MODE_S | EBUR128_MODE_I | EBUR128_MODE_LRA |
-						  EBUR128_MODE_TRUE_PEAK);
+						  EBUR128_MODE_TRUE_PEAK | EBUR128_MODE_HISTOGRAM);
 	if (!st) {
 		fprintf(stderr, "FAIL ebur128_init\n");
 		exit(1);
@@ -56,8 +63,34 @@ static void feed_sine(ebur128_state *st, double dbfs, int seconds)
 	}
 }
 
+/* The dock's init_state mode line (src/loudness.c) names EBUR128_MODE_HISTOGRAM. */
+static void expect_dock_histogram(void)
+{
+	FILE *f = fopen(LOUDNESS_C, "r");
+	if (!f) {
+		fprintf(stderr, "FAIL cannot open %s\n", LOUDNESS_C);
+		exit(1);
+	}
+	char line[512];
+	int mode_line = 0, histogram = 0;
+	while (fgets(line, sizeof(line), f)) {
+		if (strstr(line, "int mode = EBUR128_MODE_M")) {
+			mode_line = 1;
+			histogram = strstr(line, "EBUR128_MODE_HISTOGRAM") != NULL;
+		}
+	}
+	fclose(f);
+	int ok = mode_line && histogram;
+	printf("%s dock meter mode has EBUR128_MODE_HISTOGRAM (%s)\n", ok ? "ok  " : "FAIL",
+	       mode_line ? "mode line found" : "mode line NOT found");
+	if (!ok)
+		failures++;
+}
+
 int main(void)
 {
+	expect_dock_histogram();
+
 	ebur128_state *st = meter();
 	feed_sine(st, -23.0, 20);
 	double m, s, i, peak0, peak1;
