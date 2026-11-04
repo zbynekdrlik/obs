@@ -1,0 +1,53 @@
+#define MyAppName "@PROJECT_NAME@"
+#define MyAppVersion "@PROJECT_VERSION@"
+#define MyAppPublisher "@PLUGIN_AUTHOR@"
+#define MyAppURL "@PLUGIN_URL@"
+
+[Setup]
+AppId={{@WIN_INSTALLER_UUID@}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
+DefaultDirName={commonappdata}\obs-studio\plugins\{#MyAppName}
+DefaultGroupName={#MyAppName}
+OutputBaseFilename={#MyAppName}-{#MyAppVersion}-Windows-Installer
+Compression=lzma
+SolidCompression=yes
+; Set UsePreviousAppDir=no and DirExistsWarning=no if you have already released an old installer that installs to "Program Files/obs-studio".
+UsePreviousAppDir=no
+DirExistsWarning=no
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Files]
+Source: "..\release\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; NOTE: Don't use "Flags: ignoreversion" on any shared system files
+
+[Tasks]
+Name: removeold0; Description: "Remove old plugin '{code:GetLegacyDLLPath|{#MyAppName}.dll}'"; Flags: checkedonce; Check: LegacyDLLExists(ExpandConstant('{#MyAppName}.dll'))
+Name: removeold1; Description: "Remove old plugin '{code:GetLegacyDLLPath|obs-{#MyAppName}.dll}'"; Flags: checkedonce; Check: LegacyDLLExists(ExpandConstant('obs-{#MyAppName}.dll'))
+
+[InstallDelete]
+Type: files; Name: "{code:GetLegacyDLLPath|{#MyAppName}.dll}"; Tasks: removeold0
+Type: files; Name: "{code:GetLegacyDLLPath|obs-{#MyAppName}.dll}"; Tasks: removeold1
+
+[Code]
+function GetLegacyDLLPath(Value: String): string;
+var
+  OBSPath: string;
+  InstallPath: string;
+begin
+  if RegQueryStringValue(HKLM32, 'SOFTWARE\OBS Studio', '', InstallPath) then
+    OBSPath := InstallPath
+  else
+    OBSPath := ExpandConstant('{pf}\obs-studio'); // the default
+  Result := OBSPath + '\obs-plugins\64bit\' + Value;
+end;
+function LegacyDLLExists(Value: String): Boolean;
+begin
+  Result := FileExists(GetLegacyDLLPath(Value));
+end;
