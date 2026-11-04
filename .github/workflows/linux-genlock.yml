@@ -576,6 +576,17 @@ jobs:
 
       # camera-box#1436: the vendored libebur128 the dock meters with reads the EBU Tech 3341 reference
       # (1 kHz, -23 dBFS stereo) as -23 LUFS momentary / short-term / integrated and ~-23 dBTP.
+      # camera-box#1387 (strih-snv reboot 4.11.2026): the JPEG XS program output retries a wanted start
+      # every 2 s (OBS before the network: "Network is unreachable", never tried again) -- its pure
+      # decisions (vendor/distroav/src/jxs-output-decide.h).
+      - name: Test the JPEG XS output start retry (camera-box#1387)
+        working-directory: tests/jxs-output-retry
+        run: |
+          set -euo pipefail
+          cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+          build/jxs-output-retry
+
       - name: Test the loudness meter against the EBU reference (camera-box#1436)
         working-directory: tests/loudness-ebur128
         run: |
