@@ -32,9 +32,12 @@
 	exit). A supervisor thread looks twice a second and starts a wanted output that is not active,
 	2 s after its last failed try (jxs-output-decide.h); a start error is logged once per outage,
 	the start after one names its tries. A LIVE sender that died (a panic poisoned it, its threads
-	are gone, or no frame went out whole for two 5 s windows -- a source-IP change) is stopped by
-	the supervisor, keeping `wanted`, and started again by the retry. A receiver that is off is no
-	death: frames still go out whole.
+	are gone, or no frame handed to it went out whole for two 5 s windows) is stopped by the
+	supervisor, keeping `wanted`, and started again by the retry. A send error is no death: vstack
+	counts a frame with failed sends as sent whole, so a receiver that is off restarts nothing (and
+	a source-IP change is not seen either; strih runs a static IP). An operator's StopOutput that
+	lands while a restart stops the output is a no-op in libobs (the output is stopping), so it
+	may come back 2 s later -- the one narrow window.
 
 	Built only where the strih Linux build sets CAMERA_BOX_JXS_SOURCE (linux-genlock.yml, the
 	strih variant), like the source: the sender is Linux-only (UDP GSO).
@@ -89,14 +92,18 @@ struct jxs_output {
 	std::atomic<bool> wanted{false};
 	/* the live sender died (cb_jxs_out_window_dead / _stats_stale): the supervisor restarts it */
 	std::atomic<bool> dead{false};
-	/* the supervisor's own stop of a dead sender: the stop keeps `wanted` */
+	/* the supervisor's own stop of a dead sender: the stop it makes ON ITS THREAD keeps `wanted`
+	 * (an operator's StopOutput racing it, on another thread, still clears it) */
 	std::atomic<bool> restarting{false};
+	std::thread::id restarting_by;
 	/* raw_video's health counters (tx_mutex held) */
 	uint32_t dead_windows = 0;
 	bool poisoned = false;
 	uint64_t last_window_ns = 0;
 	/* a start() in flight: the supervisor and obs-websocket StartOutput may both call it, and
-	 * libobs does not serialise two starts of an inactive output -- the second returns at once */
+	 * libobs does not serialise two starts of an inactive output -- the second returns at once, so
+	 * no two senders exist. (libobs' own last-error handling in obs_output_actual_start can still
+	 * race between two such callers; that predates the retry.) */
 	std::atomic<bool> starting{false};
 	/* the last start error logged (cb_jxs_out_error_new), start() only */
 	char last_error[CB_JXS_OUT_ERROR_LEN] = "";
@@ -370,16 +377,16 @@ static void jxs_output_rawvideo(void *data, struct video_data *frame)
 	const char *why = nullptr;
 	if (cbjxs_send_get_stats(o->tx, &st) == 1) {
 		o->last_window_ns = now;
-		if (cb_jxs_out_window_dead(&o->dead_windows, o->offered, st.frames, o->poisoned)) {
+		if (cb_jxs_out_window_dead(&o->dead_windows, o->taken + o->not_taken, st.frames, o->poisoned)) {
 			dead = true;
 			why = o->poisoned ? "the sender is poisoned (a panic in the library)"
-					  : "two 5 s windows with frames offered and none sent whole";
+					  : "two 5 s windows with frames handed to the sender and none sent whole";
 		}
 		jxs_output_log_status(o, st);
 	} else if (o->poisoned) {
 		dead = true;
 		why = "the sender is poisoned (a panic in the library)";
-	} else if (cb_jxs_out_stats_stale(o->last_window_ns, now, o->offered)) {
+	} else if (cb_jxs_out_stats_stale(o->last_window_ns, now, o->taken + o->not_taken)) {
 		dead = true;
 		why = "no status window from the sender for 15 s (its threads are gone)";
 	}
@@ -393,7 +400,7 @@ static void jxs_output_stop(void *data, uint64_t)
 	auto o = static_cast<jxs_output *>(data);
 	/* camera-box#1387: a stop (StopOutput, the profile change, exit) ends the retry; the
 	 * supervisor's own stop of a dead sender keeps it */
-	if (!o->restarting.load())
+	if (!(o->restarting.load() && o->restarting_by == std::this_thread::get_id()))
 		o->wanted = false;
 	if (!o->started.exchange(false))
 		return;
@@ -482,10 +489,11 @@ static void jxs_output_retry_loop(obs_output_t *output)
 		const bool active = obs_output_active(output);
 		if (o && active && wanted && o->dead.load()) {
 			/* the live sender died: stop it (keeping `wanted`), the retry starts it again */
+			o->restarting_by = std::this_thread::get_id();
 			o->restarting = true;
 			obs_output_stop(output);
 			o->restarting = false;
-			cb_jxs_out_retry_note(&g_retry, false, now);
+			cb_jxs_out_retry_restart(&g_retry, now);
 			continue;
 		}
 		if (cb_jxs_out_retry_due(&g_retry, wanted, active, now))
