@@ -28,12 +28,14 @@ fn write(text: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 #[test]
-fn a_full_file_reads_with_10_ms_and_the_state_file_next_to_it() {
+fn a_full_file_reads_with_dlink_s_default_budget_and_the_state_file_next_to_it() {
     let (_d, path) = write(GOOD);
     let cfg = InputConfig::load(&path).unwrap();
     assert_eq!(cfg.name, "strih-obs");
     assert_eq!(cfg.iface, "enp7s0.70");
-    assert_eq!(cfg.latency_ms, 10);
+    // dlink v0.6.28: the default budget is 15 ms (owner 4.11.2026, dstack#1); the file follows it.
+    assert_eq!(cfg.latency_ms, 15);
+    assert_eq!(u64::from(cfg.latency_ms) * 1_000_000, dlink::BUDGET_NS);
     assert_eq!(cfg.rx, ["Master L", "Master R"]);
     assert_eq!(
         cfg.state_file,
@@ -51,9 +53,9 @@ fn the_dlink_device_takes_ports_subscriptions_latency_and_no_tx() {
         .device()
         .unwrap();
     assert_eq!(dev.name, "strih-obs");
-    // dstack #68: 10 ms is the whole path. At 48 kHz, block 128 (2.67 ms) leaves 7.33 ms of
-    // Dante latency, in whole samples (352).
-    assert_eq!(dev.latency_ns, 352 * 1_000_000_000 / 48_000);
+    // dstack #68: the budget (15 ms by default) is the whole path. At 48 kHz, block 128 (2.67 ms)
+    // leaves 12.33 ms of Dante latency, in whole samples (592).
+    assert_eq!(dev.latency_ns, 592 * 1_000_000_000 / 48_000);
     assert_eq!(
         (dev.arc_port, dev.cmc_port, dev.flows_port),
         (4440, 8800, 4455)
@@ -216,22 +218,39 @@ fn the_example_config_reads_and_subscribes_from_two_transmitters() {
 
 #[test]
 fn a_budget_the_work_leaves_under_4_ms_of_is_refused_by_its_key() {
-    // dlink v0.6.24: an RX-only device's work is the RX side alone. At a 96 kHz network with OBS
-    // at 48 kHz that is the 1.33 ms block and the converter's 1.33 ms RX delay, so 6 ms leaves
-    // 3.33 ms and 7 ms leaves 4.33 ms; the RX path is the whole budget.
+    // dlink v0.6.28: an RX-only device's work is the RX side alone. At a 96 kHz network with OBS
+    // at 48 kHz that is the 1.33 ms block and the half-band converter's 0.625 ms RX delay, so 5 ms
+    // leaves 3.04 ms and 6 ms leaves 4.04 ms; the RX path is the whole budget.
     let net = |ms: u32| {
         GOOD.replace(
             "rx_port_base = 47200",
             &format!("rx_port_base = 47200\nnetwork_rate = 96000\nlatency_ms = {ms}"),
         )
     };
-    let (_d, path) = write(&net(6));
+    let (_d, path) = write(&net(5));
     let e = InputConfig::load(&path).unwrap().split(48_000).unwrap_err();
-    assert!(e.starts_with("latency_ms: 6 is too small here: "), "{e}");
-    let (_d, path) = write(&net(7));
+    assert!(e.starts_with("latency_ms: 5 is too small here: "), "{e}");
+    let (_d, path) = write(&net(6));
     let split = InputConfig::load(&path).unwrap().split(48_000).unwrap();
     assert!(split.latency_ns >= 4_000_000, "{split:?}");
-    assert!(split.rx_path_ns <= 7_000_000, "{split:?}");
+    assert!(split.rx_path_ns <= 6_000_000, "{split:?}");
+}
+
+#[test]
+fn strih_snv_s_default_split_is_the_one_dstack_publishes() {
+    // camera-box#1485: strih-snv runs a 96 kHz network with OBS at 48 kHz and no latency_ms. The
+    // dstack v0.6.28 CHANGELOG gives this RX-only pair P 13041666 ns at the 15 ms default; the
+    // start line prints it as dante_latency_ns, and the RX path is the whole budget.
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\nnetwork_rate = 96000",
+    ));
+    let split = InputConfig::load(&path).unwrap().split(48_000).unwrap();
+    assert_eq!(split.latency_ns, 13_041_666);
+    assert!(
+        (14_990_000..=15_000_000).contains(&split.rx_path_ns),
+        "{split:?}"
+    );
 }
 
 #[test]
@@ -247,14 +266,16 @@ fn a_zero_rate_is_refused_on_load_by_its_key() {
 }
 
 #[test]
-fn the_floor_is_7_ms_at_the_tested_rate_pairs() {
-    for rates in [
-        "",
-        "network_rate = 88200",
-        "network_rate = 96000",
-        "network_rate = 96000\nsample_rate = 44100",
-        "network_rate = 96000\nsample_rate = 32000",
-        "sample_rate = 44100",
+fn the_floor_at_the_tested_rate_pairs() {
+    // (network/app rates, the least whole-ms budget that leaves 4 ms): dlink v0.6.28's half-band
+    // converter makes 96/48 the one pair at 6 ms.
+    for (rates, floor) in [
+        ("", 7),
+        ("network_rate = 88200", 7),
+        ("network_rate = 96000", 6),
+        ("network_rate = 96000\nsample_rate = 44100", 7),
+        ("network_rate = 96000\nsample_rate = 32000", 7),
+        ("sample_rate = 44100", 7),
     ] {
         let cfg = |ms: u32| {
             let (_d, path) = write(&GOOD.replace(
@@ -263,12 +284,13 @@ fn the_floor_is_7_ms_at_the_tested_rate_pairs() {
             ));
             InputConfig::load(&path).unwrap().split(48_000)
         };
+        let below = floor - 1;
         assert!(
-            cfg(6)
+            cfg(below)
                 .unwrap_err()
-                .starts_with("latency_ms: 6 is too small here: "),
+                .starts_with(&format!("latency_ms: {below} is too small here: ")),
             "{rates}"
         );
-        assert!(cfg(7).unwrap().latency_ns >= 4_000_000, "{rates}");
+        assert!(cfg(floor).unwrap().latency_ns >= 4_000_000, "{rates}");
     }
 }
