@@ -13,8 +13,8 @@ use serde::Deserialize;
 pub const DEFAULT_LATENCY_MS: u32 = 10;
 /// dlink's least Dante latency, so no budget below it can work. The real floor depends on the
 /// rates and the block: [`InputConfig::split`] refuses a budget that leaves under 4 ms after
-/// the work (v0.6.24, RX only: under 7 ms at 48/48, 88.2/48, 96/48, 96/44.1, 96/32 and 44.1 kHz,
-/// the rate pairs the tests check).
+/// the work (v0.6.24, RX only: the floor is 7 ms at the network/app rate pairs 48/48, 88.2/48,
+/// 96/48, 96/44.1, 96/32 and 44.1/44.1 kHz, which the tests check).
 pub const MIN_LATENCY_MS: u32 = 4;
 /// Past this the program audio is too late to be any use.
 pub const MAX_LATENCY_MS: u32 = 100;

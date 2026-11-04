@@ -247,7 +247,7 @@ fn a_zero_rate_is_refused_on_load_by_its_key() {
 }
 
 #[test]
-fn the_floor_is_7_ms_at_every_rate_pair_obs_runs() {
+fn the_floor_is_7_ms_at_the_tested_rate_pairs() {
     for rates in [
         "",
         "network_rate = 88200",
