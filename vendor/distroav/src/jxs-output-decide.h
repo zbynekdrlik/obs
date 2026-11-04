@@ -192,7 +192,8 @@ static inline void cb_jxs_out_error_clear(char *last)
  *
  * vstack's sender never stops on a send error, but it can die: a panic inside the library poisons
  * it (every frame -2), a panicked send thread leaves every frame not taken, a dead feeder sends
- * nothing. Each shows as frames handed to the sender (taken or not taken; a refused frame or a
+ * nothing. Each shows as frames handed to the sender (taken or not taken -- not taken also counts
+ * an off-grid frame the sender never saw, harmless: on-grid frames are still taken; a refused frame or a
  * duplicate stamp is not counted, so a failure every frame repeats is no restart loop) and none
  * sent whole. A send error does NOT: vstack counts a frame with failed sends as sent whole
  * (send_errors only), so a receiver that is off is no death -- and neither is a source-IP change

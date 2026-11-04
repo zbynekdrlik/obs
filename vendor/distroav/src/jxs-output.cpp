@@ -35,9 +35,11 @@
 	are gone, or no frame handed to it went out whole for two 5 s windows) is stopped by the
 	supervisor, keeping `wanted`, and started again by the retry. A send error is no death: vstack
 	counts a frame with failed sends as sent whole, so a receiver that is off restarts nothing (and
-	a source-IP change is not seen either; strih runs a static IP). An operator's StopOutput that
-	lands while a restart stops the output is a no-op in libobs (the output is stopping), so it
-	may come back 2 s later -- the one narrow window.
+	a source-IP change is not seen either; strih runs a static IP). A sender that REFUSES every
+	frame (a geometry the codec cannot take) is not restarted: a restart would refuse it again.
+	libobs ignores a stop while the output is stopping or inactive, so an operator's StopOutput
+	during a restart's stop or its 2 s gap before the next start does nothing, and the output comes
+	back: after a restart, stop it once it runs again.
 
 	Built only where the strih Linux build sets CAMERA_BOX_JXS_SOURCE (linux-genlock.yml, the
 	strih variant), like the source: the sender is Linux-only (UDP GSO).
@@ -73,6 +75,11 @@
 #define PROP_JXS_CORES "jxs_cores"
 #define PROP_JXS_PACE_MBPS "jxs_pace_mbps"
 
+/* camera-box#1387: true only on the supervisor's thread while it stops a dead sender. libobs runs
+ * info.stop synchronously on the stopping thread for this raw output, so jxs_output_stop reads it
+ * as "the supervisor's own restart: keep `wanted`". Per thread, so nothing is shared. */
+static thread_local bool t_supervisor_stop = false;
+
 struct jxs_output {
 	obs_output_t *output = nullptr;
 	/* settings (update() may run on any thread; start() reads them) */
@@ -92,10 +99,7 @@ struct jxs_output {
 	std::atomic<bool> wanted{false};
 	/* the live sender died (cb_jxs_out_window_dead / _stats_stale): the supervisor restarts it */
 	std::atomic<bool> dead{false};
-	/* the supervisor's own stop of a dead sender: the stop it makes ON ITS THREAD keeps `wanted`
-	 * (an operator's StopOutput racing it, on another thread, still clears it) */
-	std::atomic<bool> restarting{false};
-	std::thread::id restarting_by;
+
 	/* raw_video's health counters (tx_mutex held) */
 	uint32_t dead_windows = 0;
 	bool poisoned = false;
@@ -400,7 +404,7 @@ static void jxs_output_stop(void *data, uint64_t)
 	auto o = static_cast<jxs_output *>(data);
 	/* camera-box#1387: a stop (StopOutput, the profile change, exit) ends the retry; the
 	 * supervisor's own stop of a dead sender keeps it */
-	if (!(o->restarting.load() && o->restarting_by == std::this_thread::get_id()))
+	if (!t_supervisor_stop)
 		o->wanted = false;
 	if (!o->started.exchange(false))
 		return;
@@ -489,10 +493,9 @@ static void jxs_output_retry_loop(obs_output_t *output)
 		const bool active = obs_output_active(output);
 		if (o && active && wanted && o->dead.load()) {
 			/* the live sender died: stop it (keeping `wanted`), the retry starts it again */
-			o->restarting_by = std::this_thread::get_id();
-			o->restarting = true;
+			t_supervisor_stop = true;
 			obs_output_stop(output);
-			o->restarting = false;
+			t_supervisor_stop = false;
 			cb_jxs_out_retry_restart(&g_retry, now);
 			continue;
 		}
