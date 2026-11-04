@@ -5,16 +5,17 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// The latency budget unless the file sets one (owner, camera-box#1485: 10 ms). Since dlink
+/// The latency budget unless the file sets one: dlink's own default, 15 ms since dlink v0.6.28
+/// (owner ROZHODNUTÉ 4.11.2026, dstack#1; it was 10 ms, camera-box#1485). Since dlink
 /// v0.6.22 (dstack #68, owner 3.11.2026) it is each direction's whole path, the Dante latency
 /// and the work together; dlink gives the Dante latency what the work of the directions the
 /// device uses leaves (v0.6.24: RX only here, so dlink's RX path is the whole budget).
 /// Before v0.4.9 the same `latency_ms` was the Dante latency alone.
-pub const DEFAULT_LATENCY_MS: u32 = 10;
+pub const DEFAULT_LATENCY_MS: u32 = (dlink::BUDGET_NS / 1_000_000) as u32;
 /// dlink's least Dante latency, so no budget below it can work. The real floor depends on the
 /// rates and the block: [`InputConfig::split`] refuses a budget that leaves under 4 ms after
-/// the work (v0.6.24, RX only: the floor is 7 ms at the network/app rate pairs 48/48, 88.2/48,
-/// 96/48, 96/44.1, 96/32 and 44.1/44.1 kHz, which the tests check).
+/// the work (dlink v0.6.28, RX only: 6 ms at 96/48 kHz network/app, 7 ms at 48/48, 88.2/48,
+/// 96/44.1, 96/32 and 44.1/44.1 kHz, which the tests check).
 pub const MIN_LATENCY_MS: u32 = 4;
 /// Past this the program audio is too late to be any use.
 pub const MAX_LATENCY_MS: u32 = 100;
