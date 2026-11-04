@@ -21,7 +21,8 @@ short-term and integrated loudness, LRA and true peak.
 
 | file | change |
 |---|---|
-| `src/loudness.c` | `init_state` adds `EBUR128_MODE_HISTOGRAM` to the meter mode. Without it, libebur128 keeps every 100 ms block since start, and the integrated/LRA read walks the whole list. That read runs every 48 ms under the mutex that `audio_cb` takes on OBS's audio thread, so the hold grows with uptime: about 3 ms at 8 h and 9 ms at 24 h, against a 21.3 ms audio tick (v0.4.12 deep review). Histogram mode makes the read constant-time, at 0.1 LU resolution; the EBU reference reads -22.95 LUFS integrated. |
+| `src/loudness-mode.h` | NEW. `LOUDNESS_DOCK_EBUR128_MODE` is upstream's mode plus `EBUR128_MODE_HISTOGRAM`, shared with `tests/loudness-ebur128`. |
+| `src/loudness.c` | `init_state` meters with `LOUDNESS_DOCK_EBUR128_MODE`, which adds `EBUR128_MODE_HISTOGRAM`. Without it, libebur128 keeps every 100 ms block since start, and the integrated/LRA read walks the whole list. That read runs every 48 ms under the mutex that `audio_cb` takes on OBS's audio thread, so the hold grows with uptime: about 3 ms at 8 h and 9 ms at 24 h, against a 21.3 ms audio tick (v0.4.12 deep review). Histogram mode makes the read constant-time, at 0.1 LU resolution: the EBU reference sits on a bin edge and reads within ±0.1 of -23 LUFS. |
 
 The camera-box build settings live in `.github/workflows/linux-genlock.yml`:
 
@@ -41,7 +42,7 @@ and `src/plugin-main.c` appends `.main`. OBS uses it as the dock's Qt objectName
 
 - `tests/loudness-ebur128` feeds the vendored libebur128 the EBU Tech 3341 reference signal: a 1 kHz
   sine at -23 dBFS stereo at 48 kHz. Momentary, short-term and integrated loudness must read
-  -23.0 ± 0.1 LUFS, the true peak -23 ± 0.5 dBTP, and silence -inf. The test meters in histogram mode, as the
-  dock does, and fails if the dock's `init_state` mode line loses `EBUR128_MODE_HISTOGRAM`.
+  -23.0 ± 0.1 LUFS, the true peak -23 ± 0.5 dBTP, and silence -inf. It meters with the dock's own mode
+  (`src/loudness-mode.h`), checks that mode has `EBUR128_MODE_HISTOGRAM`, and checks LRA reads 0 LU.
 - The staging step checks that the dock exports `obs_module_load`, that its locale is staged, and that it
   carries the dock id.

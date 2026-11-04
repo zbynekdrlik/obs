@@ -20,6 +20,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <obs-module.h>
 #include <util/threading.h>
 #include "loudness.h"
+#include "loudness-mode.h"
 #include "ebur128.h"
 #include "plugin-macros.generated.h"
 
@@ -44,7 +45,7 @@ static bool init_state(loudness_t *loudness)
 		return false;
 	}
 
-	int mode = EBUR128_MODE_M | EBUR128_MODE_S | EBUR128_MODE_I | EBUR128_MODE_LRA | EBUR128_MODE_TRUE_PEAK | EBUR128_MODE_HISTOGRAM;
+	int mode = LOUDNESS_DOCK_EBUR128_MODE;
 	loudness->state = ebur128_init(get_audio_channels(oai.speakers), oai.samples_per_sec, mode);
 	if (!loudness->state) {
 		blog(LOG_ERROR, "Failed to initialize libebur128");

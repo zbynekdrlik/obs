@@ -8,14 +8,14 @@
  * The dock reads integrated loudness and LRA every 48 ms under the mutex its audio callback takes
  * on OBS's audio thread. Without EBUR128_MODE_HISTOGRAM libebur128 walks every 100 ms block since
  * start, so the hold grows with uptime (deep review of v0.4.12: ~3 ms at 8 h, ~9 ms at 24 h,
- * against a 21.3 ms audio tick). The dock must run histogram mode (constant read cost), and the
- * reference must still read -23 LUFS in it. */
-#include <string.h>
+ * against a 21.3 ms audio tick). The test meters with the dock's own mode (src/loudness-mode.h),
+ * checks it has histogram mode, and that the reference still reads -23 LUFS and LRA 0 in it. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "ebur128.h"
+#include "loudness-mode.h"
 
 #define RATE 48000
 #define CHANNELS 2
@@ -33,9 +33,7 @@ static void expect_near(const char *what, double got, double want, double tol)
 
 static ebur128_state *meter(void)
 {
-	ebur128_state *st = ebur128_init(CHANNELS, RATE,
-					  EBUR128_MODE_M | EBUR128_MODE_S | EBUR128_MODE_I | EBUR128_MODE_LRA |
-						  EBUR128_MODE_TRUE_PEAK | EBUR128_MODE_HISTOGRAM);
+	ebur128_state *st = ebur128_init(CHANNELS, RATE, LOUDNESS_DOCK_EBUR128_MODE);
 	if (!st) {
 		fprintf(stderr, "FAIL ebur128_init\n");
 		exit(1);
@@ -63,39 +61,19 @@ static void feed_sine(ebur128_state *st, double dbfs, int seconds)
 	}
 }
 
-/* The dock's init_state mode line (src/loudness.c) names EBUR128_MODE_HISTOGRAM. */
-static void expect_dock_histogram(void)
-{
-	FILE *f = fopen(LOUDNESS_C, "r");
-	if (!f) {
-		fprintf(stderr, "FAIL cannot open %s\n", LOUDNESS_C);
-		exit(1);
-	}
-	char line[512];
-	int mode_line = 0, histogram = 0;
-	while (fgets(line, sizeof(line), f)) {
-		if (strstr(line, "int mode = EBUR128_MODE_M")) {
-			mode_line = 1;
-			histogram = strstr(line, "EBUR128_MODE_HISTOGRAM") != NULL;
-		}
-	}
-	fclose(f);
-	int ok = mode_line && histogram;
-	printf("%s dock meter mode has EBUR128_MODE_HISTOGRAM (%s)\n", ok ? "ok  " : "FAIL",
-	       mode_line ? "mode line found" : "mode line NOT found");
-	if (!ok)
-		failures++;
-}
-
 int main(void)
 {
-	expect_dock_histogram();
 
 	ebur128_state *st = meter();
 	feed_sine(st, -23.0, 20);
-	double m, s, i, peak0, peak1;
+	int histogram = (LOUDNESS_DOCK_EBUR128_MODE & EBUR128_MODE_HISTOGRAM) == EBUR128_MODE_HISTOGRAM;
+	printf("%s dock meter mode has EBUR128_MODE_HISTOGRAM\n", histogram ? "ok  " : "FAIL");
+	if (!histogram)
+		failures++;
+	double m, s, i, lra, peak0, peak1;
 	if (ebur128_loudness_momentary(st, &m) || ebur128_loudness_shortterm(st, &s) ||
-	    ebur128_loudness_global(st, &i) || ebur128_true_peak(st, 0, &peak0) ||
+	    ebur128_loudness_global(st, &i) || ebur128_loudness_range(st, &lra) ||
+	    ebur128_true_peak(st, 0, &peak0) ||
 	    ebur128_true_peak(st, 1, &peak1)) {
 		fprintf(stderr, "FAIL a loudness read returned an error\n");
 		return 1;
@@ -103,6 +81,7 @@ int main(void)
 	expect_near("momentary LUFS", m, -23.0, 0.1);
 	expect_near("short-term LUFS", s, -23.0, 0.1);
 	expect_near("integrated LUFS", i, -23.0, 0.1);
+	expect_near("loudness range LU", lra, 0.0, 0.1);
 	expect_near("true peak L dBTP", 20.0 * log10(peak0), -23.0, 0.5);
 	expect_near("true peak R dBTP", 20.0 * log10(peak1), -23.0, 0.5);
 	ebur128_destroy(&st);
