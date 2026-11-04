@@ -13,8 +13,8 @@ use serde::Deserialize;
 pub const DEFAULT_LATENCY_MS: u32 = 10;
 /// dlink's least Dante latency, so no budget below it can work. The real floor depends on the
 /// rates and the block: [`InputConfig::split`] refuses a budget that leaves under 4 ms after
-/// the work (v0.6.24, RX only, 48 kHz OBS on a 48 or 96 kHz network: anything under 7 ms).
-/// No rate pair starts at 4 ms; it stays the file's hard lower limit.
+/// the work (v0.6.24, RX only: under 7 ms at 48/48, 88.2/48, 96/48, 96/44.1, 96/32 and 44.1 kHz,
+/// the rate pairs the tests check).
 pub const MIN_LATENCY_MS: u32 = 4;
 /// Past this the program audio is too late to be any use.
 pub const MAX_LATENCY_MS: u32 = 100;
@@ -83,6 +83,14 @@ impl InputConfig {
         if self.iface.is_empty() {
             problems.push("iface: empty".to_string());
         }
+        for (key, rate) in [
+            ("network_rate", self.network_rate),
+            ("sample_rate", self.sample_rate),
+        ] {
+            if rate == Some(0) {
+                problems.push(format!("{key}: 0 Hz"));
+            }
+        }
         if !(MIN_LATENCY_MS..=MAX_LATENCY_MS).contains(&self.latency_ms) {
             problems.push(format!(
                 "latency_ms: {} is not one of {MIN_LATENCY_MS}..={MAX_LATENCY_MS}",
@@ -120,7 +128,8 @@ impl InputConfig {
 
     /// How dlink splits this file's budget for OBS at `obs_rate`. A budget that leaves under
     /// 4 ms of Dante latency is refused, named by its key in the file (dlink names it
-    /// `budget_ns`); any other refusal (a rate dlink does not take) passes through as dlink's.
+    /// `budget_ns`); any other refusal passes through as dlink's (a 0 Hz rate, which
+    /// [`InputConfig::load`] already refuses by its key).
     pub fn split(&self, obs_rate: u32) -> Result<dlink::Split, String> {
         self.dlink(obs_rate).split().map_err(|e| {
             if e.starts_with("budget_ns:") {

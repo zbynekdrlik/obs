@@ -235,12 +235,40 @@ fn a_budget_the_work_leaves_under_4_ms_of_is_refused_by_its_key() {
 }
 
 #[test]
-fn a_rate_refusal_is_not_blamed_on_the_latency() {
-    let (_d, path) = write(&GOOD.replace(
-        "rx_port_base = 47200",
-        "rx_port_base = 47200\nnetwork_rate = 0",
-    ));
-    let e = InputConfig::load(&path).unwrap().split(48_000).unwrap_err();
-    assert!(!e.contains("latency_ms"), "{e}");
-    assert!(e.contains("0 Hz"), "{e}");
+fn a_zero_rate_is_refused_on_load_by_its_key() {
+    for key in ["network_rate", "sample_rate"] {
+        let (_d, path) = write(&GOOD.replace(
+            "rx_port_base = 47200",
+            &format!("rx_port_base = 47200\n{key} = 0"),
+        ));
+        let e = InputConfig::load(&path).unwrap_err();
+        assert!(e.contains(&format!("{key}: 0 Hz")), "{e}");
+    }
+}
+
+#[test]
+fn the_floor_is_7_ms_at_every_rate_pair_obs_runs() {
+    for rates in [
+        "",
+        "network_rate = 88200",
+        "network_rate = 96000",
+        "network_rate = 96000\nsample_rate = 44100",
+        "network_rate = 96000\nsample_rate = 32000",
+        "sample_rate = 44100",
+    ] {
+        let cfg = |ms: u32| {
+            let (_d, path) = write(&GOOD.replace(
+                "rx_port_base = 47200",
+                &format!("rx_port_base = 47200\n{rates}\nlatency_ms = {ms}"),
+            ));
+            InputConfig::load(&path).unwrap().split(48_000)
+        };
+        assert!(
+            cfg(6)
+                .unwrap_err()
+                .starts_with("latency_ms: 6 is too small here: "),
+            "{rates}"
+        );
+        assert!(cfg(7).unwrap().latency_ns >= 4_000_000, "{rates}");
+    }
 }
