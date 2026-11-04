@@ -10,7 +10,9 @@
  *   - a screenshot render runs on the graphics thread, not on the requesting thread, and its
  *     pixels come back;
  *   - a caller that already holds graphics gets its screenshot (no wait on itself);
- *   - a scene item add runs on the graphics thread and returns a referenced item.
+ *   - a scene item add runs on the graphics thread and returns a referenced item;
+ *   - while a screenshot task waits for the graphics lock on the graphics thread, the lock's holder
+ *     can still queue a graphics task (tasks used to run under the task queue's lock: a deadlock).
  *
  *   ws-graphics-test <libobs data dir>   (the SDK's share/obs/libobs/, which holds the effects)
  *
@@ -167,6 +169,40 @@ static void add_item(Call *c)
 	c->item = Utils::Obs::GraphicsTask::AddSceneItem(c->scene, c->source, true, nullptr, nullptr);
 }
 
+/* ---- lock order: graphics holder queues a task while a task waits for graphics ---- */
+
+static void nop_task(void *) {}
+
+struct Order {
+	os_event_t *gate_running; /* the first task runs on the graphics thread */
+	os_event_t *gate_open;    /* the first task may return */
+	os_event_t *holding;      /* the holder has the graphics lock */
+	os_event_t *queued;       /* the holder's task is queued */
+};
+
+/* The first task in the queue: holds the task loop until the graphics lock has a holder. */
+static void gate_task(void *param)
+{
+	auto *o = static_cast<Order *>(param);
+	os_event_signal(o->gate_running);
+	os_event_wait(o->gate_open);
+}
+
+/* Takes graphics while the task loop runs, then queues a graphics task while the screenshot
+ * task, next in the queue, waits for the lock. */
+static void *holder_thread(void *param)
+{
+	auto *o = static_cast<Order *>(param);
+	os_event_wait(o->gate_running);
+	obs_enter_graphics();
+	os_event_signal(o->holding);
+	os_sleep_ms(300); /* the gate returned; the screenshot task now waits for the lock */
+	obs_queue_task(OBS_TASK_GRAPHICS, nop_task, nullptr, false);
+	os_event_signal(o->queued);
+	obs_leave_graphics();
+	return nullptr;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
@@ -273,6 +309,55 @@ int main(int argc, char **argv)
 	}
 	signal_handler_disconnect(obs_source_get_signal_handler(obs_scene_get_source(scene)), "item_add", on_item_add,
 				  nullptr);
+
+	/* Queue order on the graphics thread: a gate task, then a waiting screenshot task. While the
+	 * gate runs, another thread takes the graphics lock; the screenshot task then waits for it, and
+	 * the holder queues a graphics task before it lets go. Tasks used to run under the task queue's
+	 * lock, so the holder waited for that lock and the screenshot task for the holder: a deadlock. */
+	{
+		Order *o = new Order();
+		os_event_init(&o->gate_running, OS_EVENT_TYPE_MANUAL);
+		os_event_init(&o->gate_open, OS_EVENT_TYPE_MANUAL);
+		os_event_init(&o->holding, OS_EVENT_TYPE_MANUAL);
+		os_event_init(&o->queued, OS_EVENT_TYPE_MANUAL);
+
+		/* Both tasks go in while the graphics thread waits for the lock this thread holds. */
+		obs_enter_graphics();
+		obs_queue_task(OBS_TASK_GRAPHICS, gate_task, o, false);
+		Call *blocked = new Call();
+		blocked->fn = screenshot;
+		blocked->source = source;
+		pthread_t shooter;
+		os_event_init(&blocked->done, OS_EVENT_TYPE_MANUAL);
+		pthread_create(&shooter, nullptr, call_thread, blocked);
+		os_sleep_ms(200); /* the shooter queued its waiting task */
+		pthread_t holder;
+		pthread_create(&holder, nullptr, holder_thread, o);
+		obs_leave_graphics();
+
+		bool held = os_event_timedwait(o->holding, 3000) == 0;
+		expect(held, "the holder takes graphics while the task loop runs");
+		os_event_signal(o->gate_open);
+
+		bool queued = held && os_event_timedwait(o->queued, 3000) == 0;
+		expect(queued, "a graphics holder queues a task while a graphics task waits for the lock");
+		bool shot_done = queued && os_event_timedwait(blocked->done, 3000) == 0;
+		expect(shot_done && blocked->success, "the waiting screenshot completes after the holder lets go");
+		if (!queued || !shot_done) {
+			/* deadlocked: the threads keep their state (leaked); no clean shutdown possible */
+			fprintf(stderr, "%d check(s) failed\n", failures);
+			_exit(1);
+		}
+		pthread_join(holder, nullptr);
+		pthread_join(shooter, nullptr);
+		os_event_destroy(blocked->done);
+		delete blocked;
+		os_event_destroy(o->gate_running);
+		os_event_destroy(o->gate_open);
+		os_event_destroy(o->holding);
+		os_event_destroy(o->queued);
+		delete o;
+	}
 
 	obs_scene_release(scene);
 	obs_source_release(source);
