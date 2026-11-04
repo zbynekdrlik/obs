@@ -129,3 +129,61 @@ static inline bool cb_jxs_out_forward_line(const char *message)
 		return false;
 	return strncmp(message, CB_JXS_OUT_STATUS_PREFIX, strlen(CB_JXS_OUT_STATUS_PREFIX)) != 0;
 }
+
+/* ---- camera-box#1387 (strih-snv reboot 4.11.2026): the start retry ----
+ *
+ * OBS started before the network: the sender's connect failed ("Network is unreachable"), the
+ * output logged "did not start" once and stayed off for good. The output's supervisor thread now
+ * looks twice a second and starts a WANTED output (a start was asked: jxs-output.json enabled=true,
+ * or obs-websocket StartOutput; a stop clears it) that is not active, 2 s after its last failed try.
+ * A start error is logged once per outage (its text changes or it follows a success). */
+
+#define CB_JXS_OUT_RETRY_NS 2000000000ULL
+#define CB_JXS_OUT_ERROR_LEN 256
+
+struct cb_jxs_out_retry {
+	uint32_t fails;   /* failed starts since the last success */
+	uint64_t next_ns; /* the earliest next try (0 = at once) */
+};
+
+/* Whether the supervisor starts the output now. */
+static inline bool cb_jxs_out_retry_due(const struct cb_jxs_out_retry *r, bool wanted, bool active,
+					uint64_t now_ns)
+{
+	return wanted && !active && now_ns >= r->next_ns;
+}
+
+/* One start's outcome at `now_ns`: a success resets, a failure schedules the next try 2 s on. */
+static inline void cb_jxs_out_retry_note(struct cb_jxs_out_retry *r, bool ok, uint64_t now_ns)
+{
+	if (ok) {
+		r->fails = 0;
+		r->next_ns = 0;
+	} else {
+		r->fails++;
+		r->next_ns = now_ns + CB_JXS_OUT_RETRY_NS;
+	}
+}
+
+/* Whether a start error is logged: only when its text differs from the last one logged (`last`,
+ * `len` bytes, kept truncated). */
+static inline bool cb_jxs_out_error_new(char *last, size_t len, const char *err)
+{
+	if (!last || len == 0)
+		return true;
+	if (!err)
+		err = "";
+	/* `last` holds at most len - 1 bytes of the logged error: equal there = the same error */
+	if (strncmp(last, err, len - 1) == 0)
+		return false;
+	strncpy(last, err, len - 1);
+	last[len - 1] = '\0';
+	return true;
+}
+
+/* A success: the next outage's first error is logged again. */
+static inline void cb_jxs_out_error_clear(char *last)
+{
+	if (last)
+		last[0] = '\0';
+}

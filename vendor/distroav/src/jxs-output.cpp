@@ -22,6 +22,16 @@
 	started only when that file says "enabled": true. It is stopped before a profile change
 	(a video reset refuses active outputs) and at exit.
 
+	camera-box#1387 (strih-snv reboot 4.11.2026 20:49): a start is RETRIED. OBS came up before the
+	network, the sender could not connect ("Network is unreachable"), the output logged "did not
+	start" once and the stream program stayed black for 30 min. Every start marks the output
+	WANTED (enabled=true at load, or obs-websocket StartOutput), every stop clears it (StopOutput,
+	the profile change, exit). A supervisor thread looks twice a second and starts a wanted output
+	that is not active, 2 s after its last failed try (jxs-output-decide.h); a start error is
+	logged once per outage, the start after one names its tries. A live sender never stops on a
+	send error (vstack: send errors are counted, the connected socket resumes when the route
+	returns), so only a start needs the retry.
+
 	Built only where the strih Linux build sets CAMERA_BOX_JXS_SOURCE (linux-genlock.yml, the
 	strih variant), like the source: the sender is Linux-only (UDP GSO).
 ******************************************************************************/
@@ -29,12 +39,16 @@
 #include <obs-module.h>
 #include <util/bmem.h>
 #include <util/platform.h>
+#include <util/threading.h>
 
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
+#include <condition_variable>
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include "plugin-support.h"
 #include "camera_box_jxs_send.h"
@@ -66,6 +80,10 @@ struct jxs_output {
 	std::mutex tx_mutex;
 	cbjxs_sender *tx = nullptr;
 	std::atomic<bool> started{false};
+	/* camera-box#1387: a start was asked and no stop since -- the supervisor retries it */
+	std::atomic<bool> wanted{false};
+	/* the last start error logged (cb_jxs_out_error_new), start() only */
+	char last_error[CB_JXS_OUT_ERROR_LEN] = "";
 	uint32_t send_format = 0;
 	double framerate = 0.0;
 	/* raw_video's own counters of the current status window */
@@ -157,37 +175,46 @@ static void *jxs_output_create(obs_data_t *settings, obs_output_t *output)
 	return o;
 }
 
+/* A start's failure: the output's last error, logged only when it differs from the last one logged
+ * (camera-box#1387: the supervisor retries every 2 s, an outage logs once). */
+static bool jxs_output_start_failed(jxs_output *o, const std::string &msg, const char *last_error)
+{
+	if (cb_jxs_out_error_new(o->last_error, sizeof o->last_error, msg.c_str()))
+		obs_log(LOG_ERROR, "jxs-output '%s': %s -- retried every 2 s while it is wanted (issue 1387)",
+			obs_output_get_name(o->output), msg.c_str());
+	obs_output_set_last_error(o->output, last_error);
+	return false;
+}
+
 static bool jxs_output_start(void *data)
 {
 	auto o = static_cast<jxs_output *>(data);
 	const char *name = obs_output_get_name(o->output);
 	if (o->started.load())
 		return false;
+	o->wanted = true;
 	obs_output_set_last_error(o->output, "");
 	video_t *video = obs_output_video(o->output);
-	if (!video) {
-		obs_output_set_last_error(o->output, "no program video");
-		return false;
-	}
+	if (!video)
+		return jxs_output_start_failed(o, "no program video -- not started", "no program video");
 	const uint32_t send_format = jxs_output_send_format(video_output_get_format(video));
-	if (send_format == 0) {
-		obs_log(LOG_ERROR,
-			"jxs-output '%s': the canvas pixel format %d is not one JPEG XS codes (NV12, I420, I422, I444) -- not started (issue 1387)",
-			name, (int)video_output_get_format(video));
-		obs_output_set_last_error(o->output, "the canvas pixel format is not NV12/I420/I422/I444");
-		return false;
-	}
+	if (send_format == 0)
+		return jxs_output_start_failed(
+			o,
+			"the canvas pixel format " + std::to_string((int)video_output_get_format(video)) +
+				" is not one JPEG XS codes (NV12, I420, I422, I444) -- not started",
+			"the canvas pixel format is not NV12/I420/I422/I444");
 	const struct video_output_info *vinfo = video_output_get_info(video);
 	/* an sRGB canvas is converted to YUV with the same BT.709 matrix */
 	const bool cs_709 = vinfo && (vinfo->colorspace == VIDEO_CS_709 || vinfo->colorspace == VIDEO_CS_SRGB);
 	const bool range_partial = vinfo && vinfo->range != VIDEO_RANGE_FULL;
-	if (!cb_jxs_out_colour_ok(cs_709, range_partial)) {
-		obs_log(LOG_ERROR,
-			"jxs-output '%s': the canvas is colour space %d range %d, the receiving source shows BT.709 limited range -- not started (issue 1387)",
-			name, vinfo ? (int)vinfo->colorspace : -1, vinfo ? (int)vinfo->range : -1);
-		obs_output_set_last_error(o->output, "the canvas is not BT.709 limited range");
-		return false;
-	}
+	if (!cb_jxs_out_colour_ok(cs_709, range_partial))
+		return jxs_output_start_failed(
+			o,
+			"the canvas is colour space " + std::to_string(vinfo ? (int)vinfo->colorspace : -1) + " range " +
+				std::to_string(vinfo ? (int)vinfo->range : -1) +
+				", the receiving source shows BT.709 limited range -- not started",
+			"the canvas is not BT.709 limited range");
 	const double framerate = video_output_get_frame_rate(video);
 	std::string target, cores;
 	cbjxs_send_config cfg = {};
@@ -205,12 +232,8 @@ static bool jxs_output_start(void *data)
 	cfg.emit_fps = cb_jxs_out_fps(framerate);
 	char err[256] = "";
 	cbjxs_sender *tx = cbjxs_send_open(&cfg, err, sizeof err);
-	if (!tx) {
-		obs_log(LOG_ERROR, "jxs-output '%s': cannot start the sender to '%s': %s (issue 1387)", name,
-			target.c_str(), err);
-		obs_output_set_last_error(o->output, err);
-		return false;
-	}
+	if (!tx)
+		return jxs_output_start_failed(o, "cannot start the sender to '" + target + "': " + err, err);
 	{
 		std::lock_guard<std::mutex> lock(o->tx_mutex);
 		o->tx = tx;
@@ -227,10 +250,9 @@ static bool jxs_output_start(void *data)
 			o->tx = nullptr;
 		}
 		cbjxs_send_close(tx);
-		obs_log(LOG_ERROR, "jxs-output '%s': the program capture did not start (issue 1387)", name);
-		obs_output_set_last_error(o->output, "the program capture did not start");
-		return false;
+		return jxs_output_start_failed(o, "the program capture did not start", "the program capture did not start");
 	}
+	cb_jxs_out_error_clear(o->last_error);
 	/* every frame carries the genlock wall stamp: the LOCK indicator counts it as a sender */
 	obs_output_set_genlock_wall_stamping(o->output, true);
 	/* the JPEG XS indicator's row (issue 1387): published only while the output runs */
@@ -324,6 +346,8 @@ static void jxs_output_rawvideo(void *data, struct video_data *frame)
 static void jxs_output_stop(void *data, uint64_t)
 {
 	auto o = static_cast<jxs_output *>(data);
+	/* camera-box#1387: a stop (StopOutput, the profile change, exit) ends the retry */
+	o->wanted = false;
 	if (!o->started.exchange(false))
 		return;
 	obs_output_set_genlock_wall_stamping(o->output, false);
@@ -374,6 +398,40 @@ struct obs_output_info create_jxs_output_info()
 /* The one program output, created at FINISHED_LOADING. */
 static obs_output_t *g_jxs_output = nullptr;
 
+/* camera-box#1387: the start retry supervisor (one thread while the output exists). */
+static std::mutex g_retry_mutex;
+static std::condition_variable g_retry_cv;
+static bool g_retry_quit = false;
+static std::thread g_retry_thread;
+static struct cb_jxs_out_retry g_retry = {};
+
+/* One start, its outcome noted; logs the tries a start after failures took. */
+static void jxs_output_try_start(obs_output_t *output, uint64_t now_ns)
+{
+	const uint32_t fails = g_retry.fails;
+	const bool ok = obs_output_start(output);
+	cb_jxs_out_retry_note(&g_retry, ok, now_ns);
+	if (ok && fails > 0)
+		obs_log(LOG_INFO, "jxs-output: '%s' started after %u failed tries, 2 s apart (issue 1387)",
+			JXS_OUTPUT_NAME, (unsigned)fails);
+}
+
+static void jxs_output_retry_loop(obs_output_t *output)
+{
+	os_set_thread_name("jxs-output-retry");
+	std::unique_lock<std::mutex> lock(g_retry_mutex);
+	while (!g_retry_quit) {
+		g_retry_cv.wait_for(lock, std::chrono::milliseconds(500));
+		if (g_retry_quit)
+			break;
+		auto o = static_cast<jxs_output *>(obs_obj_get_data(output));
+		const bool wanted = o && o->wanted.load();
+		const uint64_t now = os_gettime_ns();
+		if (cb_jxs_out_retry_due(&g_retry, wanted, obs_output_active(output), now))
+			jxs_output_try_start(output, now);
+	}
+}
+
 void camera_box_jxs_output_init()
 {
 	if (g_jxs_output)
@@ -389,11 +447,14 @@ void camera_box_jxs_output_init()
 		"jxs-output: '%s' created from %s (%s; enabled=%s, target '%s') -- obs-websocket StartOutput / StopOutput / SetOutputSettings drive it (issue 1387)",
 		JXS_OUTPUT_NAME, path ? path : "(no config path)", file ? "read" : "absent: defaults",
 		enabled ? "true" : "false", obs_data_get_string(settings, PROP_JXS_TARGET));
-	if (enabled && g_jxs_output) {
-		if (!obs_output_start(g_jxs_output))
-			obs_log(LOG_ERROR, "jxs-output: '%s' did not start: %s (issue 1387)", JXS_OUTPUT_NAME,
-				obs_output_get_last_error(g_jxs_output) ? obs_output_get_last_error(g_jxs_output)
-									: "?");
+	if (g_jxs_output) {
+		std::lock_guard<std::mutex> lock(g_retry_mutex);
+		g_retry = {};
+		g_retry_quit = false;
+		/* a failed first start (the network not up yet) is the supervisor's to retry */
+		if (enabled)
+			jxs_output_try_start(g_jxs_output, os_gettime_ns());
+		g_retry_thread = std::thread(jxs_output_retry_loop, g_jxs_output);
 	}
 	obs_data_release(settings);
 	obs_data_release(file);
@@ -404,6 +465,14 @@ void camera_box_jxs_output_deinit()
 {
 	if (!g_jxs_output)
 		return;
+	/* the supervisor first: no start may race the stop and release below */
+	{
+		std::lock_guard<std::mutex> lock(g_retry_mutex);
+		g_retry_quit = true;
+	}
+	g_retry_cv.notify_all();
+	if (g_retry_thread.joinable())
+		g_retry_thread.join();
 	obs_output_stop(g_jxs_output);
 	obs_output_release(g_jxs_output);
 	g_jxs_output = nullptr;
