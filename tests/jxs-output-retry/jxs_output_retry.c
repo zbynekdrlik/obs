@@ -63,11 +63,12 @@ int main(void)
 	CHECK(!cb_jxs_out_error_new(small, sizeof small, "a long error text"), "and the same long error is not logged twice");
 
 	/* a LIVE sender that died (deep review of v0.4.14): a panic poisons it (every frame -2), a
-	 * panicked send thread or a source-IP change sends no frame whole while frames are offered. A
-	 * receiver that is off still sends whole frames (only send_errors), so it is no death. */
+	 * panicked send thread or feeder sends no frame whole while frames are handed to it. A send
+	 * error is no death: vstack counts a frame with failed sends as sent whole (send_errors only),
+	 * so a receiver that is off restarts nothing. */
 	uint32_t dead = 0;
 	CHECK(!cb_jxs_out_window_dead(&dead, 150, 150, false), "a window that sent frames is alive");
-	CHECK(!cb_jxs_out_window_dead(&dead, 0, 0, false), "a window with nothing offered is no death");
+	CHECK(!cb_jxs_out_window_dead(&dead, 0, 0, false), "a window with nothing handed to the sender is no death");
 	CHECK(!cb_jxs_out_window_dead(&dead, 150, 0, false), "one window with nothing sent is not yet a death");
 	CHECK(cb_jxs_out_window_dead(&dead, 150, 0, false), "two windows in a row with nothing sent is");
 	dead = 0;
@@ -80,9 +81,16 @@ int main(void)
 
 	/* a sender whose threads are gone hands out no status window at all */
 	CHECK(!cb_jxs_out_stats_stale(100 * S, 114 * S, 50), "no window for 14 s is not yet stale");
-	CHECK(cb_jxs_out_stats_stale(100 * S, 115 * S, 50), "no window for 15 s while frames are offered is");
-	CHECK(!cb_jxs_out_stats_stale(100 * S, 200 * S, 0), "nothing offered is never stale");
+	CHECK(cb_jxs_out_stats_stale(100 * S, 115 * S, 50), "no window for 15 s while frames are handed to the sender is");
+	CHECK(!cb_jxs_out_stats_stale(100 * S, 200 * S, 0), "nothing handed is never stale");
 	CHECK(!cb_jxs_out_stats_stale(0, 200 * S, 50), "no start time yet is never stale");
+
+	/* the supervisor's restart of a dead sender is no failed try */
+	struct cb_jxs_out_retry rs = {0};
+	cb_jxs_out_retry_restart(&rs, 50 * S);
+	CHECK(rs.fails == 0, "a restart counts no failed try");
+	CHECK(!cb_jxs_out_retry_due(&rs, true, false, 51 * S) && cb_jxs_out_retry_due(&rs, true, false, 52 * S),
+	      "and starts the sender again 2 s later");
 
 	printf("%s\n", failures ? "jxs-output-retry: FAILED" : "jxs-output-retry: all checks passed");
 	return failures ? 1 : 0;
