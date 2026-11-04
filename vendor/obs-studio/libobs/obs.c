@@ -3380,8 +3380,9 @@ bool start_gpu_encode(obs_encoder_t *encoder)
 		obs_leave_graphics();
 
 		if (success)
-			blog(LOG_INFO, "gpu-encode: '%s' starts the encode thread, kept until video reset (camera-box#1387)",
-			     obs_encoder_get_name(encoder));
+			blog(LOG_INFO, "gpu-encode: '%s' starts the encode thread, kept until %s (camera-box#1387)",
+			     obs_encoder_get_name(encoder),
+			     video->encoder_only_mix ? "its last encoder stops (GPU rescale mix)" : "video reset");
 		else
 			blog(LOG_ERROR, "gpu-encode: '%s' could not start the encode thread", obs_encoder_get_name(encoder));
 	}
@@ -3397,18 +3398,34 @@ bool start_gpu_encode(obs_encoder_t *encoder)
 void stop_gpu_encode(obs_encoder_t *encoder)
 {
 	struct obs_core_video_mix *video = get_mix_for_video(encoder->media);
+	bool call_free = false;
 
 	os_atomic_dec_long(&video->gpu_encoder_active);
 	video_output_dec_texture_encoders(video->video);
 
 	pthread_mutex_lock(&video->gpu_encoder_mutex);
 	da_erase_item(video->gpu_encoders, &encoder);
+	/* camera-box#1387: a canvas mix keeps the thread and its textures for the next start (freed
+	 * with the mix), so the stop takes no graphics: entering it from the per-stop thread stalled
+	 * the render tick 52-60 ms at every StopRecord. An encoder-only (GPU rescale) mix is freed
+	 * under mixes_mutex when its last encoder goes (maybe_clear_encoder_core_video_mix), where
+	 * joining a live thread could deadlock; it ends the thread here, as before. */
+	if (!video->gpu_encoders.num && video->encoder_only_mix)
+		call_free = true;
 	pthread_mutex_unlock(&video->gpu_encoder_mutex);
 
-	/* camera-box#1387: the thread and its textures stay for the next start (freed with the mix),
-	 * so the stop takes no graphics: entering it from the per-stop thread stalled the render tick
-	 * 52-60 ms at every StopRecord. */
 	os_event_wait(video->gpu_encode_inactive);
+
+	if (call_free) {
+		stop_gpu_encoding_thread(video);
+
+		obs_enter_graphics();
+		pthread_mutex_lock(&video->gpu_encoder_mutex);
+		free_gpu_encoding(video);
+		pthread_mutex_unlock(&video->gpu_encoder_mutex);
+		obs_leave_graphics();
+		blog(LOG_INFO, "gpu-encode: encoder-only mix, encode thread ended at stop (camera-box#1387)");
+	}
 }
 
 bool obs_video_active(void)

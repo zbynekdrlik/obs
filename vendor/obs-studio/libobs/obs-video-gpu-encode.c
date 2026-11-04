@@ -79,7 +79,8 @@ static void *gpu_encode_thread(void *data)
 		pthread_mutex_lock(&video->gpu_encoder_mutex);
 
 		/* camera-box#1387: the thread outlives a recording. Frames of an earlier session go
-		 * back to the free pool unencoded, and this wake encodes nothing: the new session
+		 * back to the free pool unencoded, and this wake encodes nothing. A session that
+		 * queued frames always leaves one (the wake it skipped first), so the next session
 		 * starts one frame behind, as a fresh thread did (NUM_ENCODE_TEXTURE_FRAMES_TO_WAIT). */
 		if (drop_earlier_sessions(video) || !video->gpu_encoder_queue.size) {
 			pthread_mutex_unlock(&video->gpu_encoder_mutex);

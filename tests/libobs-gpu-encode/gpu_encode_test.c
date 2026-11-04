@@ -11,7 +11,9 @@
  *   - a stop completes while another thread holds the graphics lock (it takes no graphics);
  *   - the second recording's first packet is a new frame, not one left from the first;
  *   - a waiting graphics task runs on the graphics thread, and on its caller when there is no
- *     graphics thread (it used to wait forever).
+ *     graphics thread (it used to wait forever);
+ *   - with GPU rescale (an encoder-only mix, freed under mixes_mutex when its last encoder goes)
+ *     two recordings run and stop, each on a thread of its own, and shutdown does not hang.
  *
  *   gpu-encode-test <libobs data dir>   (the SDK's share/obs/libobs/, which holds the effects)
  *
@@ -248,20 +250,20 @@ static void *queue_waiting_task(void *param)
 /* Runs a waiting graphics task from a thread of its own; false when it did not return in `ms`. */
 static bool run_waiting_task(struct task_seen *seen, unsigned long ms)
 {
-	struct waiting_task w = {0};
+	/* on the heap: a thread that never returns keeps it (leaked, the test fails) */
+	struct waiting_task *w = bzalloc(sizeof(*w));
 	pthread_t thread;
 
-	os_event_init(&w.done, OS_EVENT_TYPE_MANUAL);
-	pthread_create(&thread, NULL, queue_waiting_task, &w);
-	bool returned = os_event_timedwait(w.done, ms) == 0;
-	if (!returned) {
-		/* the thread waits forever; leave it, the test fails */
+	os_event_init(&w->done, OS_EVENT_TYPE_MANUAL);
+	pthread_create(&thread, NULL, queue_waiting_task, w);
+	if (os_event_timedwait(w->done, ms) != 0) {
 		pthread_detach(thread);
 		return false;
 	}
 	pthread_join(thread, NULL);
-	os_event_destroy(w.done);
-	*seen = w.seen;
+	*seen = w->seen;
+	os_event_destroy(w->done);
+	bfree(w);
 	return true;
 }
 
@@ -374,6 +376,23 @@ int main(int argc, char **argv)
 	expect(stopped_held, "recording 2's encoders stop within 3 s while another thread holds graphics");
 	if (!stopped_held)
 		os_event_timedwait(stopped, 5000);
+
+	/* GPU rescale: the encoder gets a mix of its own, freed when it stops. */
+	obs_encoder_set_scaled_size(encoder, 32, 32);
+	obs_encoder_set_gpu_scale_type(encoder, OBS_SCALE_BICUBIC);
+	long scaled_threads[2] = {0, 0};
+	for (int r = 0; r < 2; r++) {
+		reset_seen();
+		expect(obs_output_start(output), "a GPU-rescaled recording starts");
+		expect(wait_packets(10, 5000), "the GPU-rescaled recording sends 10 packets within 5 s");
+		pthread_mutex_lock(&seen_mutex);
+		scaled_threads[r] = encode_thread_set ? encode_thread : 0;
+		pthread_mutex_unlock(&seen_mutex);
+		obs_output_stop(output);
+		expect(os_event_timedwait(stopped, 5000) == 0, "the GPU-rescaled recording's encoders stop within 5 s");
+	}
+	expect(scaled_threads[0] && scaled_threads[1] && scaled_threads[0] != second_thread,
+	       "a GPU-rescaled recording encodes on its own mix's thread");
 
 	obs_output_release(output);
 	obs_encoder_release(encoder);

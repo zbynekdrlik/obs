@@ -464,14 +464,22 @@ static inline void stage_output_texture(struct obs_core_video_mix *video, int cu
 
 static inline bool queue_frame(struct obs_core_video_mix *video, bool raw_active, struct obs_vframe_info *vframe_info)
 {
-	bool duplicate = !video->gpu_encoder_avail_queue.size ||
-			 (video->gpu_encoder_queue.size && vframe_info->count > 1);
+	struct obs_tex_frame *back =
+		video->gpu_encoder_queue.size
+			? deque_data(&video->gpu_encoder_queue, video->gpu_encoder_queue.size - sizeof(*back))
+			: NULL;
+	/* camera-box#1387: a frame of an earlier recording session is never this one's to repeat; the
+	 * encode thread returns it unencoded, with any count added to it. */
+	if (back && back->session != video->gpu_encode_session)
+		back = NULL;
+
+	bool duplicate = !video->gpu_encoder_avail_queue.size || (back && vframe_info->count > 1);
 
 	if (duplicate) {
-		struct obs_tex_frame *tf =
-			deque_data(&video->gpu_encoder_queue, video->gpu_encoder_queue.size - sizeof(*tf));
+		struct obs_tex_frame *tf = back;
 
-		/* texture-based encoding is stopping */
+		/* texture-based encoding is stopping, or every texture still holds an earlier session's
+		 * frame: this frame is not encoded */
 		if (!tf) {
 			return false;
 		}
