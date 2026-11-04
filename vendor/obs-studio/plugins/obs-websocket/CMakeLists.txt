@@ -117,6 +117,8 @@ target_sources(
           src/utils/Obs.h
           src/utils/Obs_ActionHelper.cpp
           src/utils/Obs_ArrayHelper.cpp
+          src/utils/Obs_GraphicsTask.cpp
+          src/utils/Obs_GraphicsTask.h
           src/utils/Obs_NumberHelper.cpp
           src/utils/Obs_ObjectHelper.cpp
           src/utils/Obs_SearchHelper.cpp

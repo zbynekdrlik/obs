@@ -47,6 +47,8 @@ on:
       - 'vstack.pin'
       # obs#1 / camera-box#1485: the dante_input source (C) and its Rust device (dlink).
       - 'plugins/**'
+      # camera-box#1387: the libobs and obs-websocket tests the strih job builds and runs.
+      - 'tests/**'
       - '.github/workflows/linux-genlock.yml'
 
 permissions:
@@ -636,6 +638,22 @@ jobs:
           cmake --build build
           export LD_LIBRARY_PATH="$(dirname "$libobs")"
           xvfb-run -a build/gpu-encode-test "$data/"
+
+      # camera-box#1387 (obs#1): obs-websocket's GL work (GetSourceScreenshot, CreateSceneItem) runs
+      # on the graphics thread, not on the plugin's Qt pool thread (a fresh pool thread's first GL
+      # MakeCurrent under the graphics lock cost a JPEG XS frame).
+      - name: Test obs-websocket graphics on the graphics thread (camera-box#1387)
+        working-directory: tests/obs-websocket-graphics
+        run: |
+          set -euo pipefail
+          libobs="$(find "$GITHUB_WORKSPACE/obs-sdk" -name 'libobs.so*' -type f | head -1)"
+          if [ -z "$libobs" ]; then echo "ERROR: no libobs.so in obs-sdk"; exit 1; fi
+          data="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs"
+          if [ ! -f "$data/default.effect" ]; then echo "ERROR: no libobs effects in $data"; exit 1; fi
+          cmake -B build -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk" -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+          export LD_LIBRARY_PATH="$(dirname "$libobs")"
+          xvfb-run -a build/ws-graphics-test "$data/"
 
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
         run: |
