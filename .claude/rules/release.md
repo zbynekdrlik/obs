@@ -8,6 +8,7 @@ paths:
 # Release
 
 - A merge to `main` does NOT build or publish anything. `linux-genlock.yml` runs on a push to `dev`, on `workflow_dispatch`, and on a `v*` tag.
+- A version bump touches `VERSION`, `plugins/dante-input/ffi/Cargo.toml` and its `Cargo.lock`. The publish step refuses a tag that differs from `VERSION` (v0.4.15 was lost that way); the FFI job checks VERSION against Cargo.toml.
 - Release = an annotated tag on the main merge commit, then push the tag:
   `git tag -a vX.Y.Z <merge-sha> -m "vX.Y.Z: <what>" && git push origin vX.Y.Z`
 - The tag run builds the strih bundle and runs the job "Publish the release (tag vX.Y.Z on main)". Find it with `gh run list --json headBranch` where `headBranch == "vX.Y.Z"`.
