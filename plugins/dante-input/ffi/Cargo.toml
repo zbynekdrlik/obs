@@ -1,6 +1,6 @@
 [package]
 name = "dante-input-ffi"
-version = "0.4.16"
+version = "0.4.17"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false
@@ -24,7 +24,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.28: the default budget is 15 ms (owner 4.11.2026, dstack#1); a half-band 2:1 converter (RX 0.625 ms at 96/48); no CPU pinning API.
 # v0.6.31: no latency change; the switch to the in-process PTP follower is seamless, a sub-sample re-anchor is absorbed (camera-box).
 # v0.6.32: an RX-only device gets W = the whole budget (15 ms = 1440 samples at 96 kHz), so a 6 ms preemption no longer restarts the pump; P unchanged (camera-box#1485).
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.32" }
+# v0.6.33: dsync-ptp v1.27.4 fixes the 0.48 ms follower offset on strih; no API or latency change (camera-box).
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.33" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

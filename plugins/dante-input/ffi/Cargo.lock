@@ -76,7 +76,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "dante-input-ffi"
-version = "0.4.16"
+version = "0.4.17"
 dependencies = [
  "dlink",
  "rtrb",
@@ -90,8 +90,8 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.32"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.32#b6f945b80f86e085dbe72361301aa533d4ef6cbd"
+version = "0.6.33"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.33#0652988630e17106c226359fe52da5dda41c1502"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -102,8 +102,8 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.6.32"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.32#b6f945b80f86e085dbe72361301aa533d4ef6cbd"
+version = "0.6.33"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.33#0652988630e17106c226359fe52da5dda41c1502"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -125,21 +125,21 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.32"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.32#b6f945b80f86e085dbe72361301aa533d4ef6cbd"
+version = "0.6.33"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.33#0652988630e17106c226359fe52da5dda41c1502"
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.32"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.32#b6f945b80f86e085dbe72361301aa533d4ef6cbd"
+version = "0.6.33"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.33#0652988630e17106c226359fe52da5dda41c1502"
 dependencies = [
  "rubato",
 ]
 
 [[package]]
 name = "dsync-ptp"
-version = "1.27.3"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.27.3#90760550c1839f1df659013b0bff7b19810f6e17"
+version = "1.27.4"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.27.4#cdbaf87db2d57274eb93948ce04b21cf4e3c4241"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -281,7 +281,7 @@ dependencies = [
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.32#b6f945b80f86e085dbe72361301aa533d4ef6cbd"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.33#0652988630e17106c226359fe52da5dda41c1502"
 dependencies = [
  "fastrand",
  "flume",
