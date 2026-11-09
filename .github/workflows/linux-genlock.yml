@@ -708,6 +708,20 @@ jobs:
           export LD_LIBRARY_PATH="$(dirname "$libobs")"
           xvfb-run -a build/ws-graphics-test "$data/"
 
+      # camera-box issue 1495 (stream-snv 9.11.2026): the A/V-sync dock let go of a removed `mbc`
+      # neither at its 5 s lookup nor at the removal, so it was never destroyed and CreateInput refused
+      # the name until OBS restarted. The dock's hold (camera-box-measure-hold.hpp) through real libobs.
+      - name: Test the A/V-sync dock lets go of a removed source (camera-box issue 1495)
+        working-directory: tests/av-sync-measure-hold
+        run: |
+          set -euo pipefail
+          libobs="$(find "$GITHUB_WORKSPACE/obs-sdk" -name 'libobs.so*' -type f | head -1)"
+          if [ -z "$libobs" ]; then echo "ERROR: no libobs.so in obs-sdk"; exit 1; fi
+          cmake -B build -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk" -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+          export LD_LIBRARY_PATH="$(dirname "$libobs")"
+          xvfb-run -a build/measure-hold-test
+
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
         run: |
           set -euo pipefail
