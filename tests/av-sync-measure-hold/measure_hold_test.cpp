@@ -3,7 +3,9 @@
  * it and it was never destroyed: still in GetInputList, its name refused by CreateInput until OBS
  * restarted. This runs the dock's hold (camera-box-measure-hold.hpp) through real libobs. */
 #include <obs.h>
+#include <util/platform.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -50,7 +52,20 @@ static void on_source_remove(void *param, calldata_t *cd)
 
 static void on_destroy(void *param, calldata_t *)
 {
-	(*static_cast<int *>(param))++;
+	static_cast<std::atomic<int> *>(param)->fetch_add(1);
+}
+
+/* libobs destroys a released source on its own destruction thread (obs_source_destroy_defer), and
+ * obs_wait_for_destroy_queue is a no-op without video and audio threads: wait for the "destroy"
+ * signal, at most 5 s. */
+static bool destroyed_within_5s(const std::atomic<int> *destroyed)
+{
+	for (int i = 0; i < 500; i++) {
+		if (destroyed->load() == 1)
+			return true;
+		os_sleep_ms(10);
+	}
+	return false;
 }
 
 /* The dock's refresh: look the name up, a removed source counts as absent, keep the result. */
@@ -66,7 +81,7 @@ static void refresh(Hold &h, const char *name)
 	obs_source_release(old);
 }
 
-static obs_source_t *create_mbc(int *destroyed)
+static obs_source_t *create_mbc(std::atomic<int> *destroyed)
 {
 	obs_source_t *src = obs_source_create("cb_measure_hold_test", "mbc", nullptr, nullptr);
 	signal_handler_connect(obs_source_get_signal_handler(src), "destroy", on_destroy, destroyed);
@@ -92,7 +107,7 @@ int main()
 	signal_handler_connect(obs_get_signal_handler(), "source_remove", on_source_remove, &h);
 
 	/* 1. The dock holds `mbc`; the operator removes it: the dock lets go at once, it is destroyed. */
-	int destroyed1 = 0;
+	std::atomic<int> destroyed1{0};
 	obs_source_t *mbc = create_mbc(&destroyed1);
 	check(mbc != nullptr, "mbc created");
 	refresh(h, "mbc");
@@ -100,15 +115,14 @@ int main()
 	obs_source_remove(mbc);
 	check(h.src == nullptr && h.dropped == 1, "removing mbc drops the dock's reference at once");
 	obs_source_release(mbc);
-	obs_wait_for_destroy_queue();
-	check(destroyed1 == 1, "the removed mbc is destroyed");
+	check(destroyed_within_5s(&destroyed1), "the removed mbc is destroyed");
 	obs_source_t *gone = obs_get_source_by_name("mbc");
 	check(gone == nullptr, "the removed mbc is no longer listed");
 	obs_source_release(gone);
 
 	/* 2. A removed mbc still alive through another holder: the dock's refresh says absent and holds
 	 * nothing, and a new mbc can be created and is the one found. */
-	int destroyed2 = 0;
+	std::atomic<int> destroyed2{0};
 	obs_source_t *old_mbc = create_mbc(&destroyed2);
 	obs_source_t *other_holder = obs_source_get_ref(old_mbc);
 	obs_source_remove(old_mbc);
@@ -116,10 +130,9 @@ int main()
 	refresh(h, "mbc");
 	check(h.src == nullptr, "a removed mbc is absent to the dock's refresh");
 	obs_source_release(other_holder);
-	obs_wait_for_destroy_queue();
-	check(destroyed2 == 1, "the removed mbc is destroyed when its last other holder lets go");
+	check(destroyed_within_5s(&destroyed2), "the removed mbc is destroyed when its last other holder lets go");
 
-	int destroyed3 = 0;
+	std::atomic<int> destroyed3{0};
 	obs_source_t *new_mbc = create_mbc(&destroyed3);
 	refresh(h, "mbc");
 	check(h.src == new_mbc, "a new mbc is found and held");
@@ -134,8 +147,7 @@ int main()
 	check(h.src == nullptr, "a missing name holds nothing");
 	obs_source_remove(new_mbc);
 	obs_source_release(new_mbc);
-	obs_wait_for_destroy_queue();
-	check(destroyed3 == 1, "the new mbc is destroyed after removal");
+	check(destroyed_within_5s(&destroyed3), "the new mbc is destroyed after removal");
 
 	signal_handler_disconnect(obs_get_signal_handler(), "source_remove", on_source_remove, &h);
 	obs_shutdown();
