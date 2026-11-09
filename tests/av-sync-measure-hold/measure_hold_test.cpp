@@ -126,6 +126,18 @@ int main()
 	obs_source_release(other_holder);
 	check(destroyed_within_5s(&destroyed2), "the removed mbc is destroyed when its last other holder lets go");
 
+	/* 2b. The refresh's lookup raced the removal: it got mbc just before obs_source_remove, whose
+	 * signal found nothing held yet, then it swaps the removed mbc in. The hold stays empty. */
+	std::atomic<int> destroyed4{0};
+	obs_source_t *raced = create_mbc(&destroyed4);
+	obs_source_t *looked_up = camerabox::cb_measure_source_if_live(obs_get_source_by_name("mbc"));
+	check(looked_up == raced, "the lookup finds mbc before the removal");
+	obs_source_remove(raced);
+	obs_source_release(raced);
+	camerabox::cb_measure_hold_swap(h.mutex, h.src, looked_up);
+	check(h.src == nullptr, "a lookup that raced the removal holds nothing");
+	check(destroyed_within_5s(&destroyed4), "the raced mbc is destroyed");
+
 	std::atomic<int> destroyed3{0};
 	obs_source_t *new_mbc = create_mbc(&destroyed3);
 	refresh(h, "mbc");
