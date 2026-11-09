@@ -721,6 +721,15 @@ jobs:
           cmake --build build
           export LD_LIBRARY_PATH="$(dirname "$libobs")"
           xvfb-run -a build/measure-hold-test
+          # The dock uses it: the refresh filters its lookup, and the remove handler is connected in
+          # st_create and disconnected in st_destroy (code lines, not comments).
+          src=../../vendor/av-sync-dock/src
+          code() { grep -v '^[[:space:]]*\(//\|/\*\|\*\)' "$@"; }
+          need() { if [ "$(code "$1" | grep -cF "$2" || true)" != 1 ]; then echo "ERROR: want one '$2' in $1 (camera-box issue 1495)"; exit 1; fi; }
+          need "$src/sync-test-output-video.cpp" 'src = camerabox::cb_measure_source_if_live(src);'
+          need "$src/sync-test-output.cpp" 'signal_handler_connect(obs_get_signal_handler(), "source_remove", cb_measure_source_removed, st);'
+          need "$src/sync-test-output.cpp" 'signal_handler_disconnect(obs_get_signal_handler(), "source_remove", cb_measure_source_removed, st);'
+          need "$src/sync-test-output-measure.cpp" 'camerabox::cb_measure_hold_drop_removed(st->cb_measure_src_mutex, st->cb_measure_src, removed)'
 
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
         run: |

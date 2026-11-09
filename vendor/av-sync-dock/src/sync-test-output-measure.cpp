@@ -85,6 +85,20 @@ void cb_measure_source_hold(struct sync_test_output *st, obs_source_t *src)
 	obs_source_release(old);
 }
 
+/* camera-box issue 1495: libobs's global "source_remove" signal, connected st_create .. st_destroy.
+ * The held measurement source is released the moment it is removed, so it is destroyed then (no
+ * wait for the next lookup, which runs only while QRs decode). cb_measure_source_present is the
+ * decode worker's; its next lookup finds the source absent and logs the change. */
+void cb_measure_source_removed(void *param, calldata_t *cd)
+{
+	auto *st = (struct sync_test_output *)param;
+	auto *removed = (obs_source_t *)calldata_ptr(cd, "source");
+	if (camerabox::cb_measure_hold_drop_removed(st->cb_measure_src_mutex, st->cb_measure_src, removed))
+		blog(LOG_INFO,
+		     "av-sync-dock: measurement source '%s' removed -- the dock released it (camera-box issue 1495)",
+		     CAMERA_BOX_MEASURE_SOURCE_NAME);
+}
+
 /* issue 1470: libobs's audio thread, right after the mix of one tick (`mix->timestamp` = its start).
  * In camera-box mode it builds the tick's block from the measurement source's own share and hands it
  * to the gate + FIFO copy. The mix samples this callback receives are never read. Its whole cost (the

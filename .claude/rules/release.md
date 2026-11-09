@@ -20,3 +20,9 @@ paths:
 - `tests/libobs-gpu-encode` builds against the obs-sdk prefix. Run it as `xvfb-run -a build/gpu-encode-test <libobs data dir>/`. The data dir is needed because the SDK prefix does not find the libobs effects.
 - Use the kernel TID (`syscall(SYS_gettid)`), not `pthread_self()`: pthread_t values are reused once a thread is joined.
 - Wait on the output's "deactivate" signal. "stop" fires before the encoders stop.
+
+# libobs source tests (no video)
+
+- `obs_startup` needs an X display: run under `xvfb-run -a`, as the texture-encode test does.
+- Without `obs_reset_video`/audio, `obs_wait_for_destroy_queue` returns at once and does nothing. A released source is destroyed later on libobs's destruction thread. Wait for the source's "destroy" signal, with a bound (`tests/av-sync-measure-hold`).
+- libobs lists a removed source until it is destroyed. `obs_get_source_by_name` returns it, and a new source with that name gets renamed ("mbc 2"). Check `obs_source_removed`.

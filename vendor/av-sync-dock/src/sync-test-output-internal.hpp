@@ -57,6 +57,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "camera-box-decode-mailbox.hpp"
 #include "camera-box-audio-worker.hpp"
 #include "camera-box-measure-share.hpp"
+#include "camera-box-measure-hold.hpp"
 
 #define N_CORNERS 4
 
@@ -420,6 +421,7 @@ void st_audio_worker_thread_setup();
 /* sync-test-output-measure.cpp */
 void st_cb_mix_tick(void *, size_t, struct audio_data *);
 void cb_measure_source_hold(struct sync_test_output *, obs_source_t *);
+void cb_measure_source_removed(void *param, calldata_t *cd);
 void cb_measure_share_connect(struct sync_test_output *);
 void cb_measure_share_disconnect(struct sync_test_output *);
 

@@ -21,17 +21,29 @@ namespace camerabox {
 /* A lookup's result (a strong reference or nullptr), with a removed source counted as absent. */
 inline obs_source_t *cb_measure_source_if_live(obs_source_t *src)
 {
+	if (src && obs_source_removed(src)) {
+		obs_source_release(src);
+		return nullptr;
+	}
 	return src;
 }
 
 /* libobs's global "source_remove" signal: when `removed` is the held source, drop and release the
- * held reference. Returns whether it was dropped. */
+ * held reference. Returns whether it was dropped. The release is after the lock (the audio thread
+ * reads the source under it), and never the last one: obs_source_remove holds its own reference
+ * across the signal. Runs on the thread that removes the source. */
 inline bool cb_measure_hold_drop_removed(std::mutex &mutex, obs_source_t *&held, obs_source_t *removed)
 {
-	(void)mutex;
-	(void)held;
-	(void)removed;
-	return false;
+	if (!removed)
+		return false;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (held != removed)
+			return false;
+		held = nullptr;
+	}
+	obs_source_release(removed);
+	return true;
 }
 
 } // namespace camerabox
