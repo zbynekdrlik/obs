@@ -76,13 +76,7 @@ static void cb_audio_gate_and_publish(struct sync_test_output *st, const struct 
  * release (the source deleted meanwhile) never runs while the audio thread waits on that lock. */
 void cb_measure_source_hold(struct sync_test_output *st, obs_source_t *src)
 {
-	obs_source_t *old;
-	{
-		std::lock_guard<std::mutex> lock(st->cb_measure_src_mutex);
-		old = st->cb_measure_src;
-		st->cb_measure_src = src;
-	}
-	obs_source_release(old);
+	camerabox::cb_measure_hold_swap(st->cb_measure_src_mutex, st->cb_measure_src, src);
 }
 
 /* camera-box issue 1495: libobs's global "source_remove" signal, connected st_create .. st_destroy.

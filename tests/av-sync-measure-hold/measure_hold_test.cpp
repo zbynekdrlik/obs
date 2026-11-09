@@ -72,13 +72,7 @@ static bool destroyed_within_5s(const std::atomic<int> *destroyed)
 static void refresh(Hold &h, const char *name)
 {
 	obs_source_t *src = camerabox::cb_measure_source_if_live(obs_get_source_by_name(name));
-	obs_source_t *old;
-	{
-		std::lock_guard<std::mutex> lock(h.mutex);
-		old = h.src;
-		h.src = src;
-	}
-	obs_source_release(old);
+	camerabox::cb_measure_hold_swap(h.mutex, h.src, src);
 }
 
 static obs_source_t *create_mbc(std::atomic<int> *destroyed)

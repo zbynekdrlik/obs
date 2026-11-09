@@ -28,6 +28,19 @@ inline obs_source_t *cb_measure_source_if_live(obs_source_t *src)
 	return src;
 }
 
+/* The decode worker's swap: hold `src` (a strong reference or nullptr) and release the old one after
+ * the lock, so a last release never runs while the audio thread waits on it (issue 1470). */
+inline void cb_measure_hold_swap(std::mutex &mutex, obs_source_t *&held, obs_source_t *src)
+{
+	obs_source_t *old;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		old = held;
+		held = src;
+	}
+	obs_source_release(old);
+}
+
 /* libobs's global "source_remove" signal: when `removed` is the held source, drop and release the
  * held reference. Returns whether it was dropped. The release is after the lock (the audio thread
  * reads the source under it), and never the last one: obs_source_remove holds its own reference
