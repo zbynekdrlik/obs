@@ -1203,8 +1203,8 @@ jobs:
             Write-Error "dock output sources: the measurement source must be looked up once and held for the audio thread (issue 1470)"; exit 1
           }
           $hold = Get-DockBody $output 'void cb_measure_source_hold(struct sync_test_output *st, obs_source_t *src)'
-          if (-not $hold.Contains('obs_source_t *old; { std::lock_guard<std::mutex> lock(st->cb_measure_src_mutex); old = st->cb_measure_src; st->cb_measure_src = src; } obs_source_release(old);')) {
-            Write-Error "dock output sources: cb_measure_source_hold must swap under the lock and release after it (issue 1470)"; exit 1
+          if (-not $hold.Contains('camerabox::cb_measure_hold_swap(st->cb_measure_src_mutex, st->cb_measure_src, src);')) {
+            Write-Error "dock output sources: cb_measure_source_hold must swap under the lock and release after it (issue 1470, camera-box-measure-hold.hpp since issue 1495)"; exit 1
           }
           $connect = Get-DockBody $output 'void cb_measure_share_connect(struct sync_test_output *st)'
           Assert-InOrder $connect 'cb_measure_share_connect' @('st->cb_share_planes[c].assign(AUDIO_OUTPUT_FRAMES, 0.0f);', 'st->cb_share_tracker = camerabox::CbMeasureShareTracker();', 'st->cb_share_src_seen = nullptr;', 'st->cb_share_mix_idx = obs_output_get_mixer(st->context);', 'obs_add_raw_audio_callback(st->cb_share_mix_idx, nullptr, st_cb_mix_tick, st);', 'st->cb_share_connected = true;')

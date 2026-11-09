@@ -54,6 +54,8 @@ static void *st_create(obs_data_t *, obs_output_t *output)
 
 	auto *st = new sync_test_output;
 	st->context = output;
+	/* camera-box issue 1495: let go of the measurement source the moment it is removed. */
+	signal_handler_connect(obs_get_signal_handler(), "source_remove", cb_measure_source_removed, st);
 
 	return st;
 }
@@ -61,6 +63,8 @@ static void *st_create(obs_data_t *, obs_output_t *output)
 static void st_destroy(void *data)
 {
 	auto *st = (struct sync_test_output *)data;
+	/* camera-box issue 1495: waits for an in-flight call (libobs runs it under the signal's lock). */
+	signal_handler_disconnect(obs_get_signal_handler(), "source_remove", cb_measure_source_removed, st);
 	/* issue 1470: the mix-tick callback is the dock's own audio connection, not the output's. */
 	cb_measure_share_disconnect(st);
 	/* issue 1367: libobs has disconnected the raw callbacks by now (obs_output_destroy joins its
