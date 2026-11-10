@@ -90,8 +90,8 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.67"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.67#3c14d28e860bec3800c31f865114663538130240"
+version = "0.6.78"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -102,8 +102,8 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.6.67"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.67#3c14d28e860bec3800c31f865114663538130240"
+version = "0.6.78"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -125,21 +125,21 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.67"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.67#3c14d28e860bec3800c31f865114663538130240"
+version = "0.6.78"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.67"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.67#3c14d28e860bec3800c31f865114663538130240"
+version = "0.6.78"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
 dependencies = [
  "rubato",
 ]
 
 [[package]]
 name = "dsync-ptp"
-version = "1.28.0"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.28.0#98f8b35d7a14102f5ae3aa4366f0c7320c50d11b"
+version = "1.29.0"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.29.0#f3c34bccfd14c3ce9e5a5ee672763b849893e10c"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -281,7 +281,7 @@ dependencies = [
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.67#3c14d28e860bec3800c31f865114663538130240"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
 dependencies = [
  "fastrand",
  "flume",
