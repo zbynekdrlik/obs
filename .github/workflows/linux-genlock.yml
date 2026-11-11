@@ -53,6 +53,7 @@ on:
       # camera-box#1387: the libobs and obs-websocket tests the strih job builds and runs.
       - 'tests/**'
       - '.github/workflows/linux-genlock.yml'
+      - '.github/actions/**'
 
 permissions:
   contents: read
@@ -362,6 +363,50 @@ jobs:
           DANTE_INPUT_TEST_IP: 10.99.0.1
         run: cargo llvm-cov --locked --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }} -- --nocapture
 
+  # obs#1 (section C point 6): the vendored-source regression guards moved from camera-box. A Rust
+  # test crate (tests/vendored) of std-only integration tests: source anchors on vendor/**, and
+  # harnesses that lift vendored C into tests/c programs and compile them with cc/g++.
+  # jxs_strih_build_1387 reads the pinned vstack crates, so vstack is checked out like the strih job.
+  vendored-tests:
+    name: Vendored-source tests (tests/vendored)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the harness dependencies (apt)
+        # libjansson-dev: drm_output_outputs_1424 links the lifted config grammar against jansson.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libjansson-dev
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check out vstack at the pin
+        uses: ./.github/actions/vstack-checkout
+      - name: Format
+        working-directory: tests/vendored
+        run: cargo fmt --check
+      - name: Clippy
+        working-directory: tests/vendored
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        # tests/support/vstack.rs checks that VSTACK_SRC is the commit vstack.pin names.
+        working-directory: tests/vendored
+        env:
+          VSTACK_SRC: ${{ github.workspace }}/vstack
+        run: |
+          set -euo pipefail
+          cargo test --locked --no-fail-fast 2>&1 | tee vendored-tests.log
+          # a test camera-box ran must run here: none ignored, none filtered, no empty test binary
+          if grep -E '^test result: .* [1-9][0-9]* (ignored|filtered out)' vendored-tests.log; then
+            echo "ERROR: a vendored test was ignored or filtered out"; exit 1
+          fi
+          if grep -E '^running 0 tests' vendored-tests.log; then
+            echo "ERROR: a vendored test binary ran no test"; exit 1
+          fi
+
   linux-genlock-build-strih:
     name: Full Linux genlock bundle -- strih variant (issue 1317)
     needs: [linux-distroav-compile-check, dante-input-ffi]
@@ -406,30 +451,10 @@ jobs:
       - name: Install the Rust toolchain (issue 1387)
         uses: dtolnay/rust-toolchain@stable
 
-      # camera-box#1487: the JPEG XS crates live in zbynekdrlik/vstack. vstack.pin names the tag AND
-      # its commit; the checkout must land on that commit, so a moved tag fails here, not at link.
-      - name: Read the vstack pin
-        run: |
-          set -euo pipefail
-          tag="$(sed -n 's/^tag=//p' vstack.pin)"
-          commit="$(sed -n 's/^commit=//p' vstack.pin)"
-          if [ -z "$tag" ] || [ -z "$commit" ]; then echo "ERROR: vstack.pin needs tag= and commit="; exit 1; fi
-          echo "VSTACK_TAG=$tag" >> "$GITHUB_ENV"
-          echo "VSTACK_COMMIT=$commit" >> "$GITHUB_ENV"
-
-      - name: Check out vstack at the pinned tag
-        uses: actions/checkout@v4
-        with:
-          repository: zbynekdrlik/vstack
-          ref: ${{ env.VSTACK_TAG }}
-          path: vstack
-
-      - name: Verify the vstack checkout is the pinned commit
-        run: |
-          set -euo pipefail
-          got="$(git -C vstack rev-parse HEAD)"
-          if [ "$got" != "$VSTACK_COMMIT" ]; then echo "ERROR: vstack $VSTACK_TAG is $got, vstack.pin says $VSTACK_COMMIT"; exit 1; fi
-          echo "vstack $VSTACK_TAG at $got"
+      # camera-box#1487: the JPEG XS crates live in zbynekdrlik/vstack, checked out at vstack.pin's
+      # tag and verified against its commit (sets VSTACK_TAG / VSTACK_COMMIT).
+      - name: Check out vstack at the pin
+        uses: ./.github/actions/vstack-checkout
 
       - name: Build the jxs-recv-ffi static library (issue 1387)
         # rustc prints the native-libs note in colour on the runner (run 40909341652), which the
@@ -896,7 +921,8 @@ jobs:
   # obs#1 point 1: a release per tag vX.Y.Z from main. camera-box pins the tag + sha256.
   publish-release:
     name: Publish the release (tag vX.Y.Z on main)
-    needs: [linux-genlock-build-strih]
+    # a release also needs the vendored-source guards green (dante-input-ffi gates it via strih)
+    needs: [linux-genlock-build-strih, vendored-tests]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:

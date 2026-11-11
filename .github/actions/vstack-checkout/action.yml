@@ -1,0 +1,34 @@
+name: Check out vstack at the pin
+description: >-
+  camera-box#1487: the JPEG XS crates live in zbynekdrlik/vstack. vstack.pin names the tag AND its
+  commit; the checkout lands in ./vstack and must be that commit, so a moved tag fails here, not at
+  link. Exports VSTACK_TAG and VSTACK_COMMIT to the job environment.
+runs:
+  using: composite
+  steps:
+    - name: Read the vstack pin
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        tag="$(sed -n 's/^tag=//p' vstack.pin)"
+        commit="$(sed -n 's/^commit=//p' vstack.pin)"
+        if [ -z "$tag" ] || [ -z "$commit" ]; then echo "ERROR: vstack.pin needs tag= and commit="; exit 1; fi
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        echo "VSTACK_TAG=$tag" >> "$GITHUB_ENV"
+        echo "VSTACK_COMMIT=$commit" >> "$GITHUB_ENV"
+
+    - name: Check out vstack at the pinned tag
+      uses: actions/checkout@v4
+      with:
+        repository: zbynekdrlik/vstack
+        ref: ${{ steps.pin.outputs.tag }}
+        path: vstack
+
+    - name: Verify the vstack checkout is the pinned commit
+      shell: bash
+      run: |
+        set -euo pipefail
+        got="$(git -C vstack rev-parse HEAD)"
+        if [ "$got" != "$VSTACK_COMMIT" ]; then echo "ERROR: vstack $VSTACK_TAG is $got, vstack.pin says $VSTACK_COMMIT"; exit 1; fi
+        echo "vstack $VSTACK_TAG at $got"
