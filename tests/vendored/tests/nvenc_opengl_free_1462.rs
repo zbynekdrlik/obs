@@ -9,6 +9,11 @@
 //! symbols and assert that every unregister runs inside the graphics context and that a failing
 //! unregister is reported through the plugin's own `cuda_error_check`.
 //!
+//! camera-box#1387 (obs PR #10) moved the unregister body into `cuda_opengl_free_task`, which
+//! `cuda_opengl_free` queues on the graphics thread (`obs_queue_task(OBS_TASK_GRAPHICS, ..., true)`)
+//! or runs inline when the caller already holds graphics (`gs_get_context()`). Both functions are
+//! lifted; the queue stub runs the task synchronously, as the graphics thread does with `wait`.
+//!
 //! Runs under `cargo test` (scratch dir via the `tempfile` dev-dependency, issue 1409).
 //! Fails loudly when no C compiler is present.
 
@@ -18,6 +23,7 @@ use std::process::Command;
 
 const NVENC_OPENGL: &str = "vendor/obs-studio/plugins/obs-nvenc/nvenc-opengl.c";
 const FREE_SIG: &str = "void cuda_opengl_free(struct nvenc_data *enc)";
+const TASK_SIG: &str = "static void cuda_opengl_free_task(void *param)";
 
 fn repo() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
@@ -66,6 +72,7 @@ static int ctx_depth;
 static int fail_unregister_of = -1; /* index of the resource whose unregister fails */
 
 static int fail_push;
+static int caller_holds_graphics; /* gs_get_context() non-NULL: the caller is inside graphics */
 
 static void obs_enter_graphics(void) { printf("SEQ enter\n"); gfx_depth++; }
 static void obs_leave_graphics(void) { printf("SEQ leave\n"); gfx_depth--; }
@@ -94,6 +101,18 @@ struct cu_fns {
 };
 static struct cu_fns fns = {stub_push, stub_pop, stub_unregister};
 static struct cu_fns *cu = &fns;
+
+typedef struct graphics_subsystem graphics_t;
+static graphics_t *gs_get_context(void) { return caller_holds_graphics ? (graphics_t *)&fns : NULL; }
+
+enum obs_task_type { OBS_TASK_UI, OBS_TASK_GRAPHICS, OBS_TASK_AUDIO, OBS_TASK_DESTROY };
+typedef void (*obs_task_t)(void *param);
+/* the graphics thread runs the task; with wait, the caller returns after it */
+static void obs_queue_task(enum obs_task_type type, obs_task_t task, void *param, bool wait)
+{
+	printf("QUEUE graphics=%d wait=%d\n", type == OBS_TASK_GRAPHICS, wait);
+	task(param);
+}
 
 static bool cuda_error_check(struct nvenc_data *enc, CUresult res, const char *func, const char *call)
 {
@@ -137,6 +156,12 @@ int main(void)
 	int before = gfx_depth;
 	cuda_opengl_free(&none);
 	printf("NOCTX gfx_touched=%d\n", gfx_depth != before);
+
+	printf("CASE holder\n");
+	caller_holds_graphics = 1;
+	cuda_opengl_free(&enc);
+	printf("DEPTH gfx=%d ctx=%d\n", gfx_depth, ctx_depth);
+	caller_holds_graphics = 0;
 	return 0;
 }
 "#;
@@ -144,8 +169,9 @@ int main(void)
 fn run_harness() -> Vec<String> {
     let src =
         fs::read_to_string(repo().join(NVENC_OPENGL)).expect("issue 1462: read nvenc-opengl.c");
+    let task = lift_fn(&src, TASK_SIG);
     let body = lift_fn(&src, FREE_SIG);
-    let program = format!("{HARNESS_HEAD}\n{body}\n{HARNESS_MAIN}");
+    let program = format!("{HARNESS_HEAD}\n{task}\n{body}\n{HARNESS_MAIN}");
     let scratch = tempfile::tempdir().expect("issue 1462: scratch dir");
     let dir = scratch.path();
     let c = dir.join("harness.c");
@@ -295,4 +321,41 @@ fn no_registered_texture_takes_no_context_1462() {
         notex.iter().all(|l| !l.starts_with("SEQ ")),
         "issue 1462: nothing to unregister must take no context: {notex:?}"
     );
+}
+
+/// camera-box#1387: from a thread that does not hold graphics, the unregister is queued on the
+/// graphics thread and the caller waits for it (a free that returned early would race the
+/// encoder teardown).
+#[test]
+fn the_unregister_is_queued_on_the_graphics_thread_and_waited_for_1387() {
+    let lines = run_harness();
+    let ok = case(&lines, "ok");
+    assert_eq!(
+        ok.iter().filter(|l| l.starts_with("QUEUE ")).collect::<Vec<_>>(),
+        ["QUEUE graphics=1 wait=1"],
+        "camera-box#1387: one waited graphics-thread task: {ok:?}"
+    );
+    let notex = case(&lines, "notex");
+    assert!(
+        notex.iter().all(|l| !l.starts_with("QUEUE ")),
+        "camera-box#1387: nothing to unregister queues nothing: {notex:?}"
+    );
+}
+
+/// camera-box#1387: a caller already inside graphics runs the task inline (queueing it would wait
+/// on a graphics thread that cannot take the lock), still with both contexts and balanced.
+#[test]
+fn a_caller_holding_graphics_runs_the_unregister_inline_1387() {
+    let lines = run_harness();
+    let holder = case(&lines, "holder");
+    assert!(
+        holder.iter().all(|l| !l.starts_with("QUEUE ")),
+        "camera-box#1387: a graphics holder must not queue: {holder:?}"
+    );
+    let unregs: Vec<&String> = holder.iter().filter(|l| l.starts_with("UNREG ")).collect();
+    assert_eq!(unregs.len(), 4, "{holder:?}");
+    assert!(unregs
+        .iter()
+        .all(|l| l.contains("in_graphics=1") && l.contains("in_ctx=1")));
+    assert!(holder.contains(&"DEPTH gfx=0 ctx=0".to_string()), "{holder:?}");
 }
