@@ -115,10 +115,10 @@ pub const PRELUDE: &str = "#include <stdint.h>\n#include <stddef.h>\n#include <s
                        #include <string.h>\n#include <stdio.h>\n\
                        typedef struct { const char *p_ndi_name; const char *p_url_address; } NDIlib_source_t;\n";
 
-/// Each compile gets its own file names: several tests build the SAME tag (the six replays all
-/// build "sequence"), and a parallel runner (CI's nextest, `cargo test` threads) would otherwise run
-/// one test's binary while another rewrites it (ETXTBSY, "Text file busy"). The pid separates
-/// processes, the counter separates threads of one process.
+/// Each compile gets its own private scratch directory: several tests build the SAME tag (the six
+/// replays all build "sequence"), and a parallel runner (CI's nextest, `cargo test` threads) would
+/// otherwise run one test's binary while another rewrites it (ETXTBSY, "Text file busy"). The
+/// pid + counter stem only keeps the file names readable in a compiler error.
 pub fn compile_and_run(c: &str, tag: &str) -> Vec<String> {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -166,9 +166,7 @@ pub fn compile_and_run(c: &str, tag: &str) -> Vec<String> {
     let run = Command::new(&bin)
         .output()
         .expect("issue 1367: the compiled harness failed to execute");
-    // This call's own files only; a failed removal leaves a uniquely named scratch file behind.
-    fs::remove_file(&cfile).ok();
-    fs::remove_file(&bin).ok();
+    // the scratch TempDir removes this call's files when it drops
     assert!(
         run.status.success(),
         "issue 1367: the {tag} harness exited non-zero: {}",
