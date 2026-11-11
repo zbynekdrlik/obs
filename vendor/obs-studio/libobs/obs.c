@@ -3343,6 +3343,38 @@ obs_data_t *obs_get_private_data(void)
 
 extern bool init_gpu_encoding(struct obs_core_video_mix *video);
 
+extern void wait_gpu_encode_warm(struct obs_core_video_mix *video);
+
+/* obs#29: the main canvas's mix, when it renders NV12/P010 textures, starts its gpu-encode thread
+ * and textures when it is created, so the first texture-encoder start reuses them and takes no
+ * graphics (it stalled the render tick ~49 ms at the first recording after an OBS start). The
+ * thread lives as long as the mix (obs_free_video_mix joins it). Costs NUM_ENCODE_TEXTURES
+ * shared textures from start-up (~31 MB at 1080p NV12), so other canvases, views and GPU-rescale
+ * mixes start it at the first encoder start, as upstream does. */
+void obs_video_mix_start_gpu_encoding(struct obs_core_video_mix *video)
+{
+	bool success;
+
+	if (!video->using_nv12_tex && !video->using_p010_tex)
+		return;
+
+	obs_enter_graphics();
+	pthread_mutex_lock(&video->gpu_encoder_mutex);
+	success = video->gpu_encode_thread_initialized || init_gpu_encoding(video);
+	if (!success)
+		free_gpu_encoding(video);
+	pthread_mutex_unlock(&video->gpu_encoder_mutex);
+	obs_leave_graphics();
+	if (success)
+		wait_gpu_encode_warm(video);
+
+	if (success)
+		blog(LOG_INFO, "gpu-encode: canvas mix %ux%u starts its encode thread with the mix (obs#29)",
+		     video->ovi.output_width, video->ovi.output_height);
+	else
+		blog(LOG_WARNING, "gpu-encode: canvas mix could not start its encode thread; the first encoder start will (obs#29)");
+}
+
 bool start_gpu_encode(obs_encoder_t *encoder)
 {
 	struct obs_core_video_mix *video = get_mix_for_video(encoder->media);
@@ -3387,6 +3419,8 @@ bool start_gpu_encode(obs_encoder_t *encoder)
 
 		pthread_mutex_unlock(&video->gpu_encoder_mutex);
 		obs_leave_graphics();
+		if (success)
+			wait_gpu_encode_warm(video);
 
 		if (success)
 			blog(LOG_INFO, "gpu-encode: '%s' starts the encode thread, kept until %s (camera-box#1387)",

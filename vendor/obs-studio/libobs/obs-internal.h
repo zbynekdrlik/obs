@@ -472,6 +472,9 @@ struct obs_core_video_mix {
 	DARRAY(obs_encoder_t *) gpu_encoders;
 	os_sem_t *gpu_encode_semaphore;
 	os_event_t *gpu_encode_inactive;
+	/* obs#29: signalled once the encode thread took and left graphics at its start; until then
+	 * a join from a thread holding graphics would wait on it forever */
+	os_event_t *gpu_encode_warm;
 	pthread_t gpu_encode_thread;
 	bool gpu_encode_thread_initialized;
 	volatile bool gpu_encode_stop;
@@ -498,6 +501,7 @@ struct obs_core_video_mix {
 
 extern struct obs_core_video_mix *obs_create_video_mix(struct obs_video_info *ovi);
 extern void obs_free_video_mix(struct obs_core_video_mix *video);
+extern void obs_video_mix_start_gpu_encoding(struct obs_core_video_mix *video);
 
 struct obs_core_video {
 	graphics_t *graphics;
