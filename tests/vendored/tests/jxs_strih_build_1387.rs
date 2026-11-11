@@ -3,6 +3,9 @@
 //! rustc's native-library list to DistroAV's CMake, and refuses a distroav.so without the source
 //! or with an executable stack; no other DistroAV build turns the source on; a new vstack pin
 //! re-runs the strih build.
+//!
+//! In obs the strih job checks vstack out at `vstack.pin` into `$GITHUB_WORKSPACE/vstack`
+//! (camera-box#1487); camera-box built it from cargo's git checkout of `scripts/vstack-release.pin`.
 
 #[path = "support/vstack.rs"]
 mod vstack;
@@ -78,8 +81,9 @@ fn the_strih_build_makes_the_static_library_and_hands_it_to_distroav() {
     let cfg = step(strih, "Configure DistroAV against the genlocked OBS SDK");
     for needle in [
         "-DCAMERA_BOX_JXS_SOURCE=ON",
-        "-DCAMERA_BOX_JXS_FFI_LIB=\"$VSTACK_SRC/target/release/libjxs_recv_ffi.a\"",
-        "-DCAMERA_BOX_JXS_FFI_INCLUDE=\"$VSTACK_SRC/jxs/recv-ffi/include\"",
+        "-DCAMERA_BOX_JXS_FFI_LIB=\"$GITHUB_WORKSPACE/vstack/target/release/libjxs_recv_ffi.a\"",
+        "-DCAMERA_BOX_JXS_FFI_INCLUDE=\"$GITHUB_WORKSPACE/vstack/jxs/recv-ffi/include\"",
+        "-DCAMERA_BOX_JXS_SEND_FFI_INCLUDE=\"$GITHUB_WORKSPACE/vstack/jxs/send-ffi/include\"",
         "-DCAMERA_BOX_JXS_FFI_NATIVE_LIBS=\"$JXS_FFI_NATIVE_LIBS\"",
     ] {
         assert!(
@@ -120,7 +124,8 @@ fn no_other_distroav_build_turns_the_source_on() {
 fn a_receiver_change_reruns_the_strih_build() {
     let wf = read(WF);
     let paths = &wf[wf.find("    paths:").unwrap()..wf.find("\npermissions:").unwrap()];
-    for p in ["'scripts/vstack-release.pin'", "'Cargo.toml'"] {
+    // obs has no root Cargo.toml: the vstack crates come from the checkout vstack.pin names.
+    for p in ["'vstack.pin'"] {
         assert!(paths.contains(p), "trigger path {p}");
     }
 }

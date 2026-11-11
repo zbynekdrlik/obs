@@ -1,19 +1,21 @@
-//! Issue 1487: the pinned vstack source, read from cargo's git checkout of the tag (root Cargo.toml
-//! depends on its crates, so the whole tag is on disk). `tests/python/vstack_src.py` is the same
-//! lookup for pytest. Use with `#[path = "support/vstack.rs"] mod vstack;`.
+//! Issue 1487: the pinned vstack source. In obs, `vstack.pin` (`tag=`, `commit=`) names the tag and
+//! the CI job checks it out (as the strih build does) and hands its path in `VSTACK_SRC`. The
+//! checkout must be the pinned commit. A missing or wrong checkout FAILS, never skips.
+//! Use with `#[path = "support/vstack.rs"] mod vstack;`.
 
 #![allow(dead_code)] // each test binary uses part of this file
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// The repo root of this checkout.
 fn repo() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
-/// The pin file's value of KEY.
+/// The pin file's value of KEY (`tag` or `commit`).
 pub fn pin(key: &str) -> String {
-    let p = repo().join("scripts/vstack-release.pin");
+    let p = repo().join("vstack.pin");
     let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
     text.lines()
         .find_map(|l| l.strip_prefix(&format!("{key}=")))
@@ -21,35 +23,36 @@ pub fn pin(key: &str) -> String {
         .to_string()
 }
 
-/// `<cargo home>/git/checkouts/vstack-<hash>/<short commit>/`, the checkout of the pinned commit.
+/// The vstack checkout in `VSTACK_SRC`, verified to be the pinned commit.
 pub fn root() -> PathBuf {
-    let commit = pin("VSTACK_RELEASE_COMMIT");
-    let home = std::env::var("CARGO_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".cargo"));
-    let checkouts = home.join("git/checkouts");
-    for db in std::fs::read_dir(&checkouts).expect("the cargo git checkouts") {
-        let db = db.unwrap().path();
-        if !db
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("vstack-")
-        {
-            continue;
-        }
-        for co in std::fs::read_dir(&db).unwrap() {
-            let dir = co.unwrap().path();
-            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-            if commit.starts_with(&name) && dir.join("rig/core/Cargo.toml").exists() {
-                return dir;
-            }
-        }
-    }
-    panic!(
-        "no checkout of vstack {commit} under {}",
-        checkouts.display()
+    let commit = pin("commit");
+    let dir = PathBuf::from(std::env::var("VSTACK_SRC").unwrap_or_else(|_| {
+        panic!(
+            "VSTACK_SRC is not set: check out zbynekdrlik/vstack at {} ({commit}) and point \
+             VSTACK_SRC at it (linux-genlock.yml's vendored-tests job does)",
+            pin("tag")
+        )
+    }));
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap_or_else(|e| panic!("git rev-parse in {}: {e}", dir.display()));
+    assert!(
+        out.status.success(),
+        "VSTACK_SRC={} is not a git checkout: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
     );
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_eq!(
+        head,
+        commit,
+        "VSTACK_SRC={} is at {head}, vstack.pin says {commit}",
+        dir.display()
+    );
+    dir
 }
 
 /// A path inside the pinned tag.
