@@ -13,7 +13,10 @@
  *   - a waiting graphics task runs on the graphics thread, and on its caller when there is no
  *     graphics thread (it used to wait forever);
  *   - with GPU rescale (an encoder-only mix, freed under mixes_mutex when its last encoder goes)
- *     two recordings run and stop, each on a thread of its own, and shutdown does not hang.
+ *     two recordings run and stop, each on a thread of its own, and shutdown does not hang;
+ *   - obs#31: an encode error stops the recording and the next recording encodes again, on the
+ *     canvas mix and on a GPU-rescale mix (the error path used to wait on the encode thread from
+ *     the encode thread itself, a hang).
  *
  *   gpu-encode-test <libobs data dir>   (the SDK's share/obs/libobs/, which holds the effects)
  *
@@ -56,6 +59,8 @@ static bool encode_thread_set;
 static long frames_encoded;
 static long packets_out;
 static int64_t first_packet_sys_dts_usec;
+/* obs#31: from this frame of a recording on, the encoder fails (-1 = never) */
+static long fail_from_frame = -1;
 
 static void reset_seen(void)
 {
@@ -126,8 +131,13 @@ static bool tex_encode_texture2(void *data, struct encoder_texture *texture, int
 		encode_thread = (long)syscall(SYS_gettid);
 		encode_thread_set = true;
 	}
+	bool fail = fail_from_frame >= 0 && frames_encoded >= fail_from_frame;
 	frames_encoded++;
 	pthread_mutex_unlock(&seen_mutex);
+	if (fail) {
+		*received_packet = false;
+		return false;
+	}
 
 	packet->data = packet_bytes;
 	packet->size = sizeof(packet_bytes);
@@ -267,6 +277,57 @@ static bool run_waiting_task(struct task_seen *seen, unsigned long ms)
 	return true;
 }
 
+static void set_fail_from(long frame)
+{
+	pthread_mutex_lock(&seen_mutex);
+	fail_from_frame = frame;
+	pthread_mutex_unlock(&seen_mutex);
+}
+
+/* A hung encode thread also hangs obs_shutdown: report and leave without it. */
+static void bail_if_hung(bool hung)
+{
+	if (!hung)
+		return;
+	fprintf(stderr, "FAIL: %d check(s) failed; the encode thread hangs, leaving without obs_shutdown\n",
+		failures);
+	fflush(stderr);
+	_exit(1);
+}
+
+/* obs#31: a recording whose encoder fails from frame 5 on stops by itself, and the next
+ * recording encodes again. */
+static void encode_error_round(obs_output_t *output, const char *which)
+{
+	char what[256];
+
+	reset_seen();
+	set_fail_from(5);
+	snprintf(what, sizeof(what), "%s recording with an encode error starts", which);
+	expect(obs_output_start(output), what);
+	bool stopped_by_error = os_event_timedwait(stopped, 5000) == 0;
+	snprintf(what, sizeof(what), "%s recording stops by itself within 5 s after an encode error", which);
+	expect(stopped_by_error, what);
+	if (!stopped_by_error) {
+		obs_output_stop(output);
+		os_event_timedwait(stopped, 5000);
+	}
+	set_fail_from(-1);
+	os_sleep_ms(200);
+
+	reset_seen();
+	snprintf(what, sizeof(what), "%s recording after the encode error starts", which);
+	expect(obs_output_start(output), what);
+	bool encodes = wait_packets(10, 5000);
+	snprintf(what, sizeof(what), "%s recording after the encode error sends 10 packets within 5 s", which);
+	expect(encodes, what);
+	obs_output_stop(output);
+	bool stopped_after = os_event_timedwait(stopped, 5000) == 0;
+	snprintf(what, sizeof(what), "%s recording after the encode error stops within 5 s", which);
+	expect(stopped_after, what);
+	bail_if_hung(!stopped_by_error || !encodes || !stopped_after);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
@@ -377,6 +438,8 @@ int main(int argc, char **argv)
 	if (!stopped_held)
 		os_event_timedwait(stopped, 5000);
 
+	encode_error_round(output, "a canvas-mix");
+
 	/* GPU rescale: the encoder gets a mix of its own, freed when it stops. */
 	obs_encoder_set_scaled_size(encoder, 32, 32);
 	obs_encoder_set_gpu_scale_type(encoder, OBS_SCALE_BICUBIC);
@@ -393,6 +456,8 @@ int main(int argc, char **argv)
 	}
 	expect(scaled_threads[0] && scaled_threads[1] && scaled_threads[0] != second_thread,
 	       "a GPU-rescaled recording encodes on its own mix's thread");
+
+	encode_error_round(output, "a GPU-rescaled");
 
 	obs_output_release(output);
 	obs_encoder_release(encoder);
