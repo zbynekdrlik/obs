@@ -43,12 +43,20 @@ static void expect(bool ok, const char *what)
 		failures++;
 }
 
+/* obs#31: libobs log lines the encode-error checks wait for */
+static volatile long errors_logged;
+static volatile long stale_stops_logged;
+
 static void log_line(int level, const char *fmt, va_list args, void *param)
 {
 	(void)param;
 	char line[4096];
 	vsnprintf(line, sizeof(line), fmt, args);
 	fprintf(stderr, "[%d] %s\n", level, line);
+	if (strstr(line, "Error encoding with encoder"))
+		os_atomic_inc_long(&errors_logged);
+	if (strstr(line, "was stopped or restarted before its encode-error stop ran"))
+		os_atomic_inc_long(&stale_stops_logged);
 }
 
 /* ---- what the encoder and the output saw, per recording ---- */
@@ -356,16 +364,18 @@ static void stale_error_stop_round(obs_output_t *output)
 	expect(os_event_timedwait(destroy_held, 3000) == 0, "the destruction thread is held");
 
 	reset_seen();
+	long errors_before = os_atomic_load_long(&errors_logged);
+	long stale_before = os_atomic_load_long(&stale_stops_logged);
 	set_fail_from(5);
 	expect(obs_output_start(output), "a recording whose error stop is held starts");
+	/* the error is logged right before its stop is queued, on the encode thread */
 	bool failed = false;
 	for (int waited = 0; waited < 5000 && !failed; waited += 10) {
-		pthread_mutex_lock(&seen_mutex);
-		failed = frames_encoded > 5;
-		pthread_mutex_unlock(&seen_mutex);
+		failed = os_atomic_load_long(&errors_logged) > errors_before;
 		os_sleep_ms(10);
 	}
-	expect(failed, "its encoder failed");
+	expect(failed, "its encoder failed and its stop was queued");
+	os_sleep_ms(100);
 	set_fail_from(-1);
 	obs_output_stop(output);
 	expect(os_event_timedwait(stopped, 5000) == 0, "the user's stop ends it while the error stop is held");
@@ -375,7 +385,13 @@ static void stale_error_stop_round(obs_output_t *output)
 	expect(wait_packets(5, 5000), "the next recording sends packets");
 
 	os_event_signal(destroy_hold);
-	obs_wait_for_destroy_queue();
+	bool stale_ran = false;
+	for (int waited = 0; waited < 5000 && !stale_ran; waited += 10) {
+		stale_ran = os_atomic_load_long(&stale_stops_logged) > stale_before;
+		os_sleep_ms(10);
+	}
+	expect(stale_ran && os_atomic_load_long(&stale_stops_logged) == stale_before + 1,
+	       "the queued error stop ran within 5 s and stopped nothing (it was for the earlier recording)");
 	long before = seen_packets();
 	bool still = wait_packets(before + 10, 5000);
 	expect(still, "the next recording keeps encoding after the stale error stop ran");
