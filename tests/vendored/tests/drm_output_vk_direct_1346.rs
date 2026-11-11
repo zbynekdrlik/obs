@@ -40,7 +40,6 @@ const VK_SETUP_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c";
 const VK_REMODE_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-remode.c";
 const LIBOBS_LINUX_CMAKE: &str = "vendor/obs-studio/libobs/cmake/os-linux.cmake";
 const LINUX_GENLOCK_YML: &str = ".github/workflows/linux-genlock.yml";
-const VERIFY_STRIH: &str = "scripts/verify-strih.sh";
 const RIG_HARNESS: &str = "tests/c/drm_output_vk_rig_harness.c";
 const PARITY_TSV: &str = "tests/fixtures/drm_output_backend_parity.tsv";
 /// issue 1424 part 2: the instance registry routes each output to its backend's ops (the routing that
@@ -443,10 +442,10 @@ fn the_obs_side_stops_in_order_and_fails_open() {
 
 #[test]
 fn the_log_family_is_shared_with_verify_strih() {
-    let v = file(VERIFY_STRIH);
+    // obs#1 split: camera-box's scripts/verify-strih.sh greps this marker; that half of the check
+    // (the script side) stays in camera-box, the emitting side is checked here.
     let core = file(VK_C);
     let marker = "drm-output: program scanout LIVE";
-    assert!(v.contains(marker), "verify-strih greps `{marker}`");
     assert!(
         core.contains(marker),
         "issue 1346: the vk-direct backend must emit `{marker}` so verify-strih's drm-output item \
