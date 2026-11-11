@@ -1,6 +1,6 @@
 [package]
 name = "dante-input-ffi"
-version = "0.4.21"
+version = "0.4.22"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false
@@ -28,7 +28,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.45: the fixed Dante RX flow ports bind before the TX sockets, so a restart no longer fails with "RX flow port 47217: Address already in use"; no API or latency change (camera-box).
 # v0.6.56: a subscription is resolved by direct mDNS queries, no whole-service browse (dstack #141); for stream-obs subscribing mbc-snv (camera-box issue 1495). No latency change.
 # v0.6.67: an unanswered Dante flow request is retried 6 s after it instead of after the full backoff (dstack #20); on stream-snv 10.11.2026 dante_input came back ~10 s after mbc following a NIC restart (camera-box). No API or latency change.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.67" }
+# v0.6.78: dsync-ptp v1.29.0 measures the PTP phase on the delay floor, so one-sided late receive stamps under OBS load no longer move it; on strih-snv 10.11.2026 dsync lost its phase lock every 2-15 min with OBS at ~600 % CPU (camera-box). No API or latency change.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.78" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
