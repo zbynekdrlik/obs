@@ -331,7 +331,9 @@ fn the_unregister_is_queued_on_the_graphics_thread_and_waited_for_1387() {
     let lines = run_harness();
     let ok = case(&lines, "ok");
     assert_eq!(
-        ok.iter().filter(|l| l.starts_with("QUEUE ")).collect::<Vec<_>>(),
+        ok.iter()
+            .filter(|l| l.starts_with("QUEUE "))
+            .collect::<Vec<_>>(),
         ["QUEUE graphics=1 wait=1"],
         "camera-box#1387: one waited graphics-thread task: {ok:?}"
     );
@@ -357,5 +359,8 @@ fn a_caller_holding_graphics_runs_the_unregister_inline_1387() {
     assert!(unregs
         .iter()
         .all(|l| l.contains("in_graphics=1") && l.contains("in_ctx=1")));
-    assert!(holder.contains(&"DEPTH gfx=0 ctx=0".to_string()), "{holder:?}");
+    assert!(
+        holder.contains(&"DEPTH gfx=0 ctx=0".to_string()),
+        "{holder:?}"
+    );
 }

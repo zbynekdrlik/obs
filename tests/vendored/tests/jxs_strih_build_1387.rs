@@ -125,9 +125,7 @@ fn a_receiver_change_reruns_the_strih_build() {
     let wf = read(WF);
     let paths = &wf[wf.find("    paths:").unwrap()..wf.find("\npermissions:").unwrap()];
     // obs has no root Cargo.toml: the vstack crates come from the checkout vstack.pin names.
-    for p in ["'vstack.pin'"] {
-        assert!(paths.contains(p), "trigger path {p}");
-    }
+    assert!(paths.contains("'vstack.pin'"), "trigger path 'vstack.pin'");
 }
 
 /// Issue 1487: the crates the OBS build links never depend on the appliance, or OBS needs

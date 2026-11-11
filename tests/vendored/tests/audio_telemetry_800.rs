@@ -11,7 +11,10 @@ const OBS_AUDIO: &str = "vendor/obs-studio/libobs/obs-audio.c";
 
 #[test]
 fn audio_telemetry_dump_is_pinned_in_the_audio_tick_800() {
-    let src = fs::read_to_string(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(OBS_AUDIO)).expect("read vendored obs-audio.c");
+    let src = fs::read_to_string(
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(OBS_AUDIO),
+    )
+    .expect("read vendored obs-audio.c");
 
     // Subsystem line: total buffering + which source forced it.
     assert!(
@@ -50,7 +53,10 @@ fn audio_telemetry_dump_is_pinned_in_the_audio_tick_800() {
 /// on their own line (a marker no other audio/genlock line contains).
 #[test]
 fn audio_thread_stall_probe_is_logged_every_window_1367() {
-    let src = fs::read_to_string(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(OBS_AUDIO)).expect("read vendored obs-audio.c");
+    let src = fs::read_to_string(
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(OBS_AUDIO),
+    )
+    .expect("read vendored obs-audio.c");
     for token in [
         "audio-stall #1367: tick_gap_max_ms=",
         "callback_max_ms=",

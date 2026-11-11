@@ -15,7 +15,9 @@
 use std::path::PathBuf;
 
 fn vendor_file(rel: &str) -> String {
-    let base = std::env::var("CARGO_MANIFEST_DIR").map(|d| format!("{d}/../..")).unwrap_or_else(|_| ".".to_string());
+    let base = std::env::var("CARGO_MANIFEST_DIR")
+        .map(|d| format!("{d}/../.."))
+        .unwrap_or_else(|_| ".".to_string());
     let path = PathBuf::from(base).join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }

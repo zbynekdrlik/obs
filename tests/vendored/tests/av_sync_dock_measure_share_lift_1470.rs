@@ -22,7 +22,9 @@ const OBS_AUDIO: &str = "vendor/obs-studio/libobs/obs-audio.c";
 const HARNESS: &str = "tests/c/measure_share_lift_1470_harness.cpp";
 
 fn manifest(rel: &str) -> PathBuf {
-    [concat!(env!("CARGO_MANIFEST_DIR"), "/../.."), rel].iter().collect()
+    [concat!(env!("CARGO_MANIFEST_DIR"), "/../.."), rel]
+        .iter()
+        .collect()
 }
 
 fn read(rel: &str) -> String {

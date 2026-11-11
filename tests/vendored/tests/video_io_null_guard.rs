@@ -42,7 +42,10 @@ fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
 
 #[test]
 fn skipped_and_total_frames_getters_are_null_safe_793() {
-    let src = fs::read_to_string(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(VIDEO_IO)).expect("read vendored video-io.c");
+    let src = fs::read_to_string(
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(VIDEO_IO),
+    )
+    .expect("read vendored video-io.c");
 
     for sig in [
         "uint32_t video_output_get_skipped_frames(const video_t *video)",
@@ -66,7 +69,10 @@ fn skipped_and_total_frames_getters_are_null_safe_793() {
 fn neighbour_getters_keep_their_upstream_null_guards() {
     // The fix follows the existing idiom — if upstream ever restructures these, the #793
     // guard style must be re-checked rather than blindly merged.
-    let src = fs::read_to_string(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(VIDEO_IO)).expect("read vendored video-io.c");
+    let src = fs::read_to_string(
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(VIDEO_IO),
+    )
+    .expect("read vendored video-io.c");
     let body = fn_body(
         &src,
         "double video_output_get_frame_rate(const video_t *video)",
@@ -82,8 +88,11 @@ fn canvas_mix_detaches_before_free_and_obs_get_video_is_null_safe_793() {
     // Second #793 flavor (garbage pointer, "segfault at 7e1"): obs_canvas_clear_mix used to
     // free the mix BEFORE nulling canvas->mix, so obs_get_video() on the obs-websocket pooled
     // thread could read freed memory. Pin the detach-before-free order + the NULL-safe getter.
-    let canvas =
-        fs::read_to_string(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("vendor/obs-studio/libobs/obs-canvas.c")).expect("read obs-canvas.c");
+    let canvas = fs::read_to_string(
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .join("vendor/obs-studio/libobs/obs-canvas.c"),
+    )
+    .expect("read obs-canvas.c");
     let body = fn_body(&canvas, "void obs_canvas_clear_mix(obs_canvas_t *canvas)");
     let detach = body
         .find("canvas->mix = NULL")
@@ -94,7 +103,11 @@ fn canvas_mix_detaches_before_free_and_obs_get_video_is_null_safe_793() {
         "#793 regression: obs_canvas_clear_mix must DETACH canvas->mix BEFORE obs_free_video_mix"
     );
 
-    let obs_c = fs::read_to_string(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("vendor/obs-studio/libobs/obs.c")).expect("read obs.c");
+    let obs_c = fs::read_to_string(
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .join("vendor/obs-studio/libobs/obs.c"),
+    )
+    .expect("read obs.c");
     let getter = fn_body(&obs_c, "video_t *obs_get_video(void)");
     assert!(
         getter.contains("mix ? mix->video : NULL"),
