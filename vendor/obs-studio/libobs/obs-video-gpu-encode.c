@@ -83,6 +83,11 @@ static void *gpu_encode_thread(void *data)
 		obs_get_profiler_name_store(), "obs_gpu_encode_thread(%g" NBSP "ms)", interval / 1000000.);
 	profile_register_root(gpu_encode_thread_name, interval);
 
+	/* obs#29: this thread's first GL MakeCurrent (an encoder's encode_texture enters graphics)
+	 * takes 49-60 ms on NVIDIA under the graphics lock; take it now, not in the first recording */
+	obs_enter_graphics();
+	obs_leave_graphics();
+
 	while (os_sem_wait(video->gpu_encode_semaphore) == 0) {
 		struct obs_tex_frame tf;
 		uint64_t timestamp;

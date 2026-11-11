@@ -166,6 +166,7 @@ static obs_canvas_t *obs_canvas_create_internal(const char *name, const char *uu
 		if (canvas->mix) {
 			canvas->mix->view = &canvas->view;
 			canvas->mix->mix_audio = (flags & MIX_AUDIO) != 0;
+			obs_video_mix_start_gpu_encoding(canvas->mix);
 
 			pthread_mutex_lock(&obs->video.mixes_mutex);
 			da_push_back(obs->video.mixes, &canvas->mix);
@@ -354,6 +355,7 @@ bool obs_canvas_reset_video_internal(obs_canvas_t *canvas, struct obs_video_info
 	if (canvas->mix) {
 		canvas->mix->view = &canvas->view;
 		canvas->mix->mix_audio = (canvas->flags & MIX_AUDIO) != 0;
+		obs_video_mix_start_gpu_encoding(canvas->mix);
 
 		pthread_mutex_lock(&obs->video.mixes_mutex);
 		da_push_back(obs->video.mixes, &canvas->mix);
