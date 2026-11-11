@@ -14,6 +14,8 @@
  *     graphics thread (it used to wait forever);
  *   - with GPU rescale (an encoder-only mix, freed under mixes_mutex when its last encoder goes)
  *     two recordings run and stop, each on a thread of its own, and shutdown does not hang;
+ *   - obs#29: the canvas mix's encode thread runs from obs_reset_video on, recording 1 encodes on
+ *     it and its start takes no graphics (the first recording after an OBS start stalled ~49 ms);
  *   - obs#31: an encode error stops the recording and the next recording encodes again, on the
  *     canvas mix and on a GPU-rescale mix (the error path used to wait on the encode thread from
  *     the encode thread itself, a hang); an error stop queued behind a user stop and restart
@@ -28,8 +30,10 @@
 #include <util/platform.h>
 #include <util/threading.h>
 
+#include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -343,6 +347,49 @@ static void encode_error_round(obs_output_t *output, const char *which)
 	bail_if_hung(!stopped_by_error || !inactive || !encodes || !stopped_after);
 }
 
+/* obs#29: the kernel TID of libobs's "obs gpu encode thread" (comm is cut to 15 bytes), 0 if none */
+static long gpu_encode_tid(void)
+{
+	long tid = 0;
+	DIR *dir = opendir("/proc/self/task");
+	struct dirent *ent;
+
+	if (!dir)
+		return 0;
+	while (!tid && (ent = readdir(dir))) {
+		char path[300], comm[32] = {0};
+		FILE *f;
+
+		if (ent->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path), "/proc/self/task/%s/comm", ent->d_name);
+		f = fopen(path, "r");
+		if (!f)
+			continue;
+		if (fgets(comm, sizeof(comm), f) && strncmp(comm, "obs gpu encode", 14) == 0)
+			tid = atol(ent->d_name);
+		fclose(f);
+	}
+	closedir(dir);
+	return tid;
+}
+
+/* obs#29: obs_output_start on a thread of its own, so this one can hold graphics meanwhile */
+struct start_call {
+	obs_output_t *output;
+	bool ok;
+	os_event_t *done;
+	pthread_t thread;
+};
+
+static void *start_output_thread(void *param)
+{
+	struct start_call *call = param;
+	call->ok = obs_output_start(call->output);
+	os_event_signal(call->done);
+	return NULL;
+}
+
 /* obs#31 review: the encode-error stop is queued on the destruction thread. Held there (a task
  * that waits), the user stops and restarts first; the queued stop must leave the new recording
  * alone, and the user's stop must not be repeated by it. */
@@ -473,14 +520,29 @@ int main(int argc, char **argv)
 	os_event_init(&stopped, OS_EVENT_TYPE_AUTO);
 	signal_handler_connect(obs_output_get_signal_handler(output), "deactivate", on_deactivate, NULL);
 
-	/* Recording 1. */
+	/* obs#29: the canvas mix runs its encode thread before any recording. */
+	long early_thread = gpu_encode_tid();
+	expect(early_thread != 0, "the canvas mix's encode thread runs before any recording (obs#29)");
+
+	/* Recording 1: its start takes no graphics (it completes while this thread holds them). */
 	reset_seen();
-	expect(obs_output_start(output), "recording 1 starts");
+	struct start_call call = {.output = output};
+	os_event_init(&call.done, OS_EVENT_TYPE_MANUAL);
+	obs_enter_graphics();
+	pthread_create(&call.thread, NULL, start_output_thread, &call);
+	bool started_held = os_event_timedwait(call.done, 3000) == 0;
+	obs_leave_graphics();
+	pthread_join(call.thread, NULL);
+	os_event_destroy(call.done);
+	expect(started_held, "recording 1 starts within 3 s while another thread holds graphics (obs#29)");
+	expect(call.ok, "recording 1 starts");
 	expect(wait_packets(10, 5000), "recording 1 sends 10 packets within 5 s");
 	pthread_mutex_lock(&seen_mutex);
 	long first_thread = encode_thread;
 	bool first_set = encode_thread_set;
 	pthread_mutex_unlock(&seen_mutex);
+	expect(first_set && first_thread == early_thread,
+	       "recording 1 encodes on the encode thread that ran before it (obs#29)");
 	obs_output_stop(output);
 	expect(os_event_timedwait(stopped, 5000) == 0, "recording 1's encoders stop within 5 s");
 	uint64_t stopped_1_ns = os_gettime_ns();
