@@ -3350,6 +3350,11 @@ bool start_gpu_encode(obs_encoder_t *encoder)
 	bool reused = false;
 	uint64_t session = 0;
 
+	/* obs#31: an encoder stopped by an encode error encodes again on this start, and a stop still
+	 * queued for its failed session does not reach this one (add_connection holds init_mutex) */
+	encoder->gpu_encode_generation++;
+	os_atomic_set_bool(&encoder->gpu_encode_failed, false);
+
 	/* camera-box#1387: the encode thread and its textures outlive a recording, so a later start
 	 * takes no graphics. A fresh thread's first GL MakeCurrent under the graphics lock stalled
 	 * the render tick 52-60 ms (NVIDIA) at every StartRecord. */

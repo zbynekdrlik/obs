@@ -40,6 +40,35 @@ static bool drop_earlier_sessions(struct obs_core_video_mix *video)
 	}
 	return dropped;
 }
+/* obs#31: the stop of a failed texture encoder runs on the destruction thread. On the encode thread
+ * it hung: stop_gpu_encode waits for gpu_encode_inactive, which this thread signals only at the end
+ * of the wake, and an encoder-only mix would join the thread from itself. The task owns a ref. */
+struct failed_gpu_encoder {
+	obs_encoder_t *encoder;
+	uint64_t generation;
+};
+
+static void stop_failed_gpu_encoder_task(void *param)
+{
+	struct failed_gpu_encoder *failed = param;
+
+	stop_failed_gpu_encoder(failed->encoder, failed->generation);
+	obs_encoder_release(failed->encoder);
+	bfree(failed);
+}
+
+static void queue_failed_gpu_encoder_stop(obs_encoder_t *encoder)
+{
+	struct failed_gpu_encoder *failed = bmalloc(sizeof(*failed));
+
+	failed->encoder = obs_encoder_get_ref(encoder);
+	/* written under init_mutex before start_gpu_encode puts the encoder in gpu_encoders under
+	 * gpu_encoder_mutex, which this thread took to collect it: no newer start can write it while
+	 * the encoder is in this wake (a restart first waits for gpu_encode_inactive) */
+	failed->generation = encoder->gpu_encode_generation;
+	obs_queue_task(OBS_TASK_DESTROY, stop_failed_gpu_encoder_task, failed, false);
+}
+
 static void *gpu_encode_thread(void *data)
 {
 	struct obs_core_video_mix *video = data;
@@ -115,6 +144,10 @@ static void *gpu_encode_thread(void *data)
 			obs_encoder_t *encoder = encoders.array[i];
 			obs_weak_encoder_t **paired = encoder->paired_encoders.array;
 			size_t num_paired = encoder->paired_encoders.num;
+
+			/* obs#31: a failed encoder waits for its stop on the destruction thread */
+			if (os_atomic_load_bool(&encoder->gpu_encode_failed))
+				continue;
 
 			pkt.timebase_num = encoder->timebase_num * encoder->frame_rate_divisor;
 			pkt.timebase_den = encoder->timebase_den;
@@ -217,7 +250,12 @@ static void *gpu_encode_thread(void *data)
 				ept->fer = fer_ts;
 			}
 
-			send_off_encoder_packet(encoder, success, received, &pkt);
+			if (success) {
+				send_off_encoder_packet(encoder, success, received, &pkt);
+			} else if (!os_atomic_exchange_bool(&encoder->gpu_encode_failed, true)) {
+				blog(LOG_ERROR, "Error encoding with encoder '%s'", encoder->context.name);
+				queue_failed_gpu_encoder_stop(encoder);
+			}
 
 			lock_key = next_key;
 

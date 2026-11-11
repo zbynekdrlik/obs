@@ -13,7 +13,11 @@
  *   - a waiting graphics task runs on the graphics thread, and on its caller when there is no
  *     graphics thread (it used to wait forever);
  *   - with GPU rescale (an encoder-only mix, freed under mixes_mutex when its last encoder goes)
- *     two recordings run and stop, each on a thread of its own, and shutdown does not hang.
+ *     two recordings run and stop, each on a thread of its own, and shutdown does not hang;
+ *   - obs#31: an encode error stops the recording and the next recording encodes again, on the
+ *     canvas mix and on a GPU-rescale mix (the error path used to wait on the encode thread from
+ *     the encode thread itself, a hang); an error stop queued behind a user stop and restart
+ *     leaves the new recording alone.
  *
  *   gpu-encode-test <libobs data dir>   (the SDK's share/obs/libobs/, which holds the effects)
  *
@@ -39,12 +43,20 @@ static void expect(bool ok, const char *what)
 		failures++;
 }
 
+/* obs#31: libobs log lines the encode-error checks wait for */
+static volatile long errors_logged;
+static volatile long stale_stops_logged;
+
 static void log_line(int level, const char *fmt, va_list args, void *param)
 {
 	(void)param;
 	char line[4096];
 	vsnprintf(line, sizeof(line), fmt, args);
 	fprintf(stderr, "[%d] %s\n", level, line);
+	if (strstr(line, "Error encoding with encoder"))
+		os_atomic_inc_long(&errors_logged);
+	if (strstr(line, "was stopped or restarted before its encode-error stop ran"))
+		os_atomic_inc_long(&stale_stops_logged);
 }
 
 /* ---- what the encoder and the output saw, per recording ---- */
@@ -56,6 +68,8 @@ static bool encode_thread_set;
 static long frames_encoded;
 static long packets_out;
 static int64_t first_packet_sys_dts_usec;
+/* obs#31: from this frame of a recording on, the encoder fails (-1 = never) */
+static long fail_from_frame = -1;
 
 static void reset_seen(void)
 {
@@ -126,8 +140,13 @@ static bool tex_encode_texture2(void *data, struct encoder_texture *texture, int
 		encode_thread = (long)syscall(SYS_gettid);
 		encode_thread_set = true;
 	}
+	bool fail = fail_from_frame >= 0 && frames_encoded >= fail_from_frame;
 	frames_encoded++;
 	pthread_mutex_unlock(&seen_mutex);
+	if (fail) {
+		*received_packet = false;
+		return false;
+	}
 
 	packet->data = packet_bytes;
 	packet->size = sizeof(packet_bytes);
@@ -267,6 +286,125 @@ static bool run_waiting_task(struct task_seen *seen, unsigned long ms)
 	return true;
 }
 
+static void set_fail_from(long frame)
+{
+	pthread_mutex_lock(&seen_mutex);
+	fail_from_frame = frame;
+	pthread_mutex_unlock(&seen_mutex);
+}
+
+/* A hung encode thread also hangs obs_shutdown: report and leave without it. */
+static void bail_if_hung(bool hung)
+{
+	if (!hung)
+		return;
+	fprintf(stderr, "FAIL: %d check(s) failed; the encode thread hangs, leaving without obs_shutdown\n",
+		failures);
+	fflush(stderr);
+	_exit(1);
+}
+
+/* obs#31: a recording whose encoder fails from frame 5 on stops by itself, and the next
+ * recording encodes again. */
+static void encode_error_round(obs_output_t *output, const char *which)
+{
+	char what[256];
+
+	reset_seen();
+	set_fail_from(5);
+	snprintf(what, sizeof(what), "%s recording with an encode error starts", which);
+	expect(obs_output_start(output), what);
+	bool stopped_by_error = os_event_timedwait(stopped, 5000) == 0;
+	snprintf(what, sizeof(what), "%s recording stops by itself within 5 s after an encode error", which);
+	expect(stopped_by_error, what);
+	if (!stopped_by_error) {
+		obs_output_stop(output);
+		os_event_timedwait(stopped, 5000);
+	}
+	set_fail_from(-1);
+	/* "deactivate" can come before the encoder's own stop on the destruction thread ends */
+	obs_encoder_t *encoder = obs_output_get_video_encoder(output);
+	bool inactive = false;
+	for (int waited = 0; waited < 5000 && !(inactive = !obs_encoder_active(encoder)); waited += 10)
+		os_sleep_ms(10);
+	snprintf(what, sizeof(what), "%s encoder is inactive within 5 s after the encode error", which);
+	expect(inactive, what);
+
+	reset_seen();
+	snprintf(what, sizeof(what), "%s recording after the encode error starts", which);
+	expect(obs_output_start(output), what);
+	bool encodes = wait_packets(10, 5000);
+	snprintf(what, sizeof(what), "%s recording after the encode error sends 10 packets within 5 s", which);
+	expect(encodes, what);
+	obs_output_stop(output);
+	bool stopped_after = os_event_timedwait(stopped, 5000) == 0;
+	snprintf(what, sizeof(what), "%s recording after the encode error stops within 5 s", which);
+	expect(stopped_after, what);
+	bail_if_hung(!stopped_by_error || !inactive || !encodes || !stopped_after);
+}
+
+/* obs#31 review: the encode-error stop is queued on the destruction thread. Held there (a task
+ * that waits), the user stops and restarts first; the queued stop must leave the new recording
+ * alone, and the user's stop must not be repeated by it. */
+static os_event_t *destroy_hold;
+static os_event_t *destroy_held;
+
+static void hold_destruction_thread(void *param)
+{
+	(void)param;
+	os_event_signal(destroy_held);
+	os_event_wait(destroy_hold);
+}
+
+static void stale_error_stop_round(obs_output_t *output)
+{
+	os_event_init(&destroy_hold, OS_EVENT_TYPE_MANUAL);
+	os_event_init(&destroy_held, OS_EVENT_TYPE_MANUAL);
+	obs_queue_task(OBS_TASK_DESTROY, hold_destruction_thread, NULL, false);
+	expect(os_event_timedwait(destroy_held, 3000) == 0, "the destruction thread is held");
+
+	reset_seen();
+	long errors_before = os_atomic_load_long(&errors_logged);
+	long stale_before = os_atomic_load_long(&stale_stops_logged);
+	set_fail_from(5);
+	expect(obs_output_start(output), "a recording whose error stop is held starts");
+	/* the error is logged right before its stop is queued, on the encode thread */
+	bool failed = false;
+	for (int waited = 0; waited < 5000 && !failed; waited += 10) {
+		failed = os_atomic_load_long(&errors_logged) > errors_before;
+		os_sleep_ms(10);
+	}
+	expect(failed, "its encoder failed and its stop was queued");
+	os_sleep_ms(100);
+	set_fail_from(-1);
+	obs_output_stop(output);
+	expect(os_event_timedwait(stopped, 5000) == 0, "the user's stop ends it while the error stop is held");
+
+	reset_seen();
+	expect(obs_output_start(output), "the next recording starts while the old error stop is held");
+	expect(wait_packets(5, 5000), "the next recording sends packets");
+
+	os_event_signal(destroy_hold);
+	bool stale_ran = false;
+	for (int waited = 0; waited < 5000 && !stale_ran; waited += 10) {
+		stale_ran = os_atomic_load_long(&stale_stops_logged) > stale_before;
+		os_sleep_ms(10);
+	}
+	expect(stale_ran && os_atomic_load_long(&stale_stops_logged) == stale_before + 1,
+	       "the queued error stop ran within 5 s and stopped nothing (it was for the earlier recording)");
+	long before = seen_packets();
+	bool still = wait_packets(before + 10, 5000);
+	expect(still, "the next recording keeps encoding after the stale error stop ran");
+	expect(obs_output_active(output), "the next recording is still active after the stale error stop ran");
+
+	obs_output_stop(output);
+	bool stopped_ok = os_event_timedwait(stopped, 5000) == 0;
+	expect(stopped_ok, "the next recording stops within 5 s");
+	os_event_destroy(destroy_hold);
+	os_event_destroy(destroy_held);
+	bail_if_hung(!still || !stopped_ok);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
@@ -377,6 +515,9 @@ int main(int argc, char **argv)
 	if (!stopped_held)
 		os_event_timedwait(stopped, 5000);
 
+	encode_error_round(output, "a canvas-mix");
+	stale_error_stop_round(output);
+
 	/* GPU rescale: the encoder gets a mix of its own, freed when it stops. */
 	obs_encoder_set_scaled_size(encoder, 32, 32);
 	obs_encoder_set_gpu_scale_type(encoder, OBS_SCALE_BICUBIC);
@@ -393,6 +534,8 @@ int main(int argc, char **argv)
 	}
 	expect(scaled_threads[0] && scaled_threads[1] && scaled_threads[0] != second_thread,
 	       "a GPU-rescaled recording encodes on its own mix's thread");
+
+	encode_error_round(output, "a GPU-rescaled");
 
 	obs_output_release(output);
 	obs_encoder_release(encoder);

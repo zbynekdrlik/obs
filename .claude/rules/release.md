@@ -20,6 +20,8 @@ paths:
 - `tests/libobs-gpu-encode` builds against the obs-sdk prefix. Run it as `xvfb-run -a build/gpu-encode-test <libobs data dir>/`. The data dir is needed because the SDK prefix does not find the libobs effects.
 - Use the kernel TID (`syscall(SYS_gettid)`), not `pthread_self()`: pthread_t values are reused once a thread is joined.
 - Wait on the output's "deactivate" signal. "stop" fires before the encoders stop.
+- Local libobs SDK for these tests (minutes with ccache): in `vendor/obs-studio`, `cmake -S . -B <b> -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DOBS_VERSION_OVERRIDE=32.2.0 -DENABLE_FRONTEND=OFF -DENABLE_PLUGINS=OFF -DENABLE_SCRIPTING=OFF -DENABLE_BROWSER=OFF -DENABLE_WAYLAND=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache`, build, `cmake --install <b> --prefix <sdk>` (+ `--component Development`). Keep `<b>` out of the scratchpad's lifetime assumptions: a reboot clears `/tmp`. `ENABLE_UI=OFF` or plugins off with the frontend on fail configure (`add_dependencies called with incorrect number of arguments`).
+- A test that can hang libobs (a stuck encode thread) must leave with `_exit` instead of `obs_shutdown`, which would join the stuck thread (`bail_if_hung`).
 
 # libobs source tests (no video)
 
