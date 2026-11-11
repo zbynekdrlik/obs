@@ -679,7 +679,8 @@ jobs:
       # camera-box#1387 (obs#1): texture encoding across recordings through real libobs and
       # libobs-opengl: one encode thread for both, a stop that takes no graphics, no stale frame in
       # the second recording, a waiting graphics task that never hangs without a graphics thread.
-      - name: Test libobs texture encoding across recordings (camera-box#1387)
+      # obs#31: an encode error stops the recording (no encode-thread self-wait) and the next one encodes.
+      - name: Test libobs texture encoding across recordings (camera-box#1387, obs#31)
         working-directory: tests/libobs-gpu-encode
         run: |
           set -euo pipefail

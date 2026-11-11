@@ -1801,6 +1801,9 @@ struct obs_encoder {
 	 * up at the specific timestamp.  if this is the audio encoder,
 	 * it waits until it's ready to sync up with video */
 	bool first_received;
+	/* obs#31: a texture encode failed on the gpu-encode thread; its stop runs on the destruction
+	 * thread and later wakes skip it. Cleared when the encoder starts on the thread again. */
+	volatile bool gpu_encode_failed;
 	DARRAY(struct obs_weak_encoder *) paired_encoders;
 	int64_t offset_usec;
 	uint64_t first_raw_ts;
@@ -1849,6 +1852,7 @@ extern void stop_gpu_encode(obs_encoder_t *encoder);
 
 extern bool do_encode(struct obs_encoder *encoder, struct encoder_frame *frame, const uint64_t *frame_cts);
 extern void send_off_encoder_packet(obs_encoder_t *encoder, bool success, bool received, struct encoder_packet *pkt);
+extern void full_stop(struct obs_encoder *encoder);
 
 void obs_encoder_destroy(obs_encoder_t *encoder);
 

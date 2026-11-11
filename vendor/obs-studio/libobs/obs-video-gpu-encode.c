@@ -40,6 +40,18 @@ static bool drop_earlier_sessions(struct obs_core_video_mix *video)
 	}
 	return dropped;
 }
+/* obs#31: full_stop of a failed texture encoder, on the destruction thread. On the encode thread it
+ * hung: stop_gpu_encode waits for gpu_encode_inactive, which this thread signals only at the end
+ * of the wake, and an encoder-only mix would join the thread from itself. The task owns a ref. */
+static void stop_failed_gpu_encoder(void *param)
+{
+	obs_encoder_t *encoder = param;
+
+	blog(LOG_INFO, "gpu-encode: '%s' stops after its encode error (obs#31)", obs_encoder_get_name(encoder));
+	full_stop(encoder);
+	obs_encoder_release(encoder);
+}
+
 static void *gpu_encode_thread(void *data)
 {
 	struct obs_core_video_mix *video = data;
@@ -115,6 +127,10 @@ static void *gpu_encode_thread(void *data)
 			obs_encoder_t *encoder = encoders.array[i];
 			obs_weak_encoder_t **paired = encoder->paired_encoders.array;
 			size_t num_paired = encoder->paired_encoders.num;
+
+			/* obs#31: a failed encoder waits for its stop on the destruction thread */
+			if (os_atomic_load_bool(&encoder->gpu_encode_failed))
+				continue;
 
 			pkt.timebase_num = encoder->timebase_num * encoder->frame_rate_divisor;
 			pkt.timebase_den = encoder->timebase_den;
@@ -217,7 +233,13 @@ static void *gpu_encode_thread(void *data)
 				ept->fer = fer_ts;
 			}
 
-			send_off_encoder_packet(encoder, success, received, &pkt);
+			if (success) {
+				send_off_encoder_packet(encoder, success, received, &pkt);
+			} else if (!os_atomic_exchange_bool(&encoder->gpu_encode_failed, true)) {
+				blog(LOG_ERROR, "Error encoding with encoder '%s'", encoder->context.name);
+				obs_queue_task(OBS_TASK_DESTROY, stop_failed_gpu_encoder, obs_encoder_get_ref(encoder),
+					       false);
+			}
 
 			lock_key = next_key;
 
