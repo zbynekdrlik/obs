@@ -1394,7 +1394,9 @@ void full_stop(struct obs_encoder *encoder)
 /* obs#31: full_stop for a texture encoder that failed on the gpu-encode thread, on the destruction
  * thread. The connection goes under init_mutex, as obs_encoder_stop's does: whichever of the two
  * comes second finds no callbacks and stops nothing (no double stop_gpu_encode). A stop queued for
- * an earlier session (generation) does nothing. The outputs stop after, outside init_mutex. */
+ * an earlier session (generation) does nothing. The outputs stop after, outside init_mutex. Like
+ * upstream's full_stop it does not shut the encoder down (the next start does) and stops every
+ * output on the encoder; unlike it, it ends a released encoder group as obs_encoder_stop does. */
 void stop_failed_gpu_encoder(obs_encoder_t *encoder, uint64_t generation)
 {
 	bool stop;
@@ -1415,6 +1417,15 @@ void stop_failed_gpu_encoder(obs_encoder_t *encoder, uint64_t generation)
 		return;
 	}
 	blog(LOG_INFO, "gpu-encode: '%s' stopped after its encode error (obs#31)", obs_encoder_get_name(encoder));
+
+	struct obs_encoder_group *group = encoder->encoder_group;
+	if (group) {
+		pthread_mutex_lock(&group->mutex);
+		if (group->destroy_on_stop && group->num_encoders_started == 0)
+			obs_encoder_group_actually_destroy(group);
+		else
+			pthread_mutex_unlock(&group->mutex);
+	}
 
 	pthread_mutex_lock(&encoder->outputs_mutex);
 	for (size_t i = 0; i < encoder->outputs.num; i++) {

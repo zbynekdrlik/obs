@@ -62,6 +62,9 @@ static void queue_failed_gpu_encoder_stop(obs_encoder_t *encoder)
 	struct failed_gpu_encoder *failed = bmalloc(sizeof(*failed));
 
 	failed->encoder = obs_encoder_get_ref(encoder);
+	/* written under init_mutex before start_gpu_encode puts the encoder in gpu_encoders under
+	 * gpu_encoder_mutex, which this thread took to collect it: no newer start can write it while
+	 * the encoder is in this wake (a restart first waits for gpu_encode_inactive) */
 	failed->generation = encoder->gpu_encode_generation;
 	obs_queue_task(OBS_TASK_DESTROY, stop_failed_gpu_encoder_task, failed, false);
 }
