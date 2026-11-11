@@ -122,8 +122,13 @@ pub const PRELUDE: &str = "#include <stdint.h>\n#include <stddef.h>\n#include <s
 pub fn compile_and_run(c: &str, tag: &str) -> Vec<String> {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join("distroav_stale_duplicate_retarget_1367");
-    fs::create_dir_all(&dir).expect("create the scratch dir");
+    // A private scratch dir per call: a fixed /tmp name belongs to whichever unix user made it
+    // first, so on a shared box the next user's write fails (EACCES).
+    let scratch = tempfile::Builder::new()
+        .prefix("distroav_stale_duplicate_retarget_1367-")
+        .tempdir()
+        .expect("create the scratch dir");
+    let dir = scratch.path();
     let stem = format!("{tag}-{}-{n}", std::process::id());
     let cfile = dir.join(format!("{stem}.c"));
     let bin = dir.join(format!("{stem}.bin"));

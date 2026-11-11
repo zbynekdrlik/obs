@@ -6,7 +6,7 @@ license = "GPL-3.0-or-later"
 publish = false
 description = "Regression guards over the vendored OBS, DistroAV and plugin sources (moved from camera-box, obs#1)"
 
-# No library and no dependencies: every check is a std-only integration test under tests/.
+# No library and no runtime dependencies: every check is an integration test under tests/.
 # Paths resolve from the repo root (CARGO_MANIFEST_DIR/../..), so `vendor/...`, `tests/c/...`
 # and `tests/fixtures/...` read exactly as they did in camera-box.
 
