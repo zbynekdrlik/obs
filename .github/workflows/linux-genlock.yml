@@ -361,6 +361,58 @@ jobs:
           DANTE_INPUT_TEST_IP: 10.99.0.1
         run: cargo llvm-cov --locked --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }} -- --nocapture
 
+  # obs#1 (section C point 6): the vendored-source regression guards moved from camera-box. A Rust
+  # test crate (tests/vendored) of std-only integration tests: source anchors on vendor/**, and
+  # harnesses that lift vendored C into tests/c programs and compile them with cc/g++.
+  # jxs_strih_build_1387 reads the pinned vstack crates, so vstack is checked out like the strih job.
+  vendored-tests:
+    name: Vendored-source tests (tests/vendored)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the harness dependencies (apt)
+        # libjansson-dev: drm_output_outputs_1424 links the lifted config grammar against jansson.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libjansson-dev
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Read the vstack pin
+        run: |
+          set -euo pipefail
+          tag="$(sed -n 's/^tag=//p' vstack.pin)"
+          commit="$(sed -n 's/^commit=//p' vstack.pin)"
+          if [ -z "$tag" ] || [ -z "$commit" ]; then echo "ERROR: vstack.pin needs tag= and commit="; exit 1; fi
+          echo "VSTACK_TAG=$tag" >> "$GITHUB_ENV"
+      - name: Check out vstack at the pinned tag
+        uses: actions/checkout@v4
+        with:
+          repository: zbynekdrlik/vstack
+          ref: ${{ env.VSTACK_TAG }}
+          path: vstack
+      - name: Format
+        working-directory: tests/vendored
+        run: cargo fmt --check
+      - name: Clippy
+        working-directory: tests/vendored
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        # tests/support/vstack.rs checks that VSTACK_SRC is the commit vstack.pin names.
+        working-directory: tests/vendored
+        env:
+          VSTACK_SRC: ${{ github.workspace }}/vstack
+        run: |
+          set -euo pipefail
+          cargo test --locked --no-fail-fast 2>&1 | tee vendored-tests.log
+          # a test camera-box ran must run here: none ignored, none filtered
+          if grep -E '^test result: .* [1-9][0-9]* (ignored|filtered out)' vendored-tests.log; then
+            echo "ERROR: a vendored test was ignored or filtered out"; exit 1
+          fi
+
   linux-genlock-build-strih:
     name: Full Linux genlock bundle -- strih variant (issue 1317)
     needs: [linux-distroav-compile-check, dante-input-ffi]
