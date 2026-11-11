@@ -8,13 +8,17 @@ name: Windows genlock build (vendored OBS + DistroAV)
 
 on:
   workflow_dispatch:
+  # obs#1 point 7 (ROZHODNUTÉ 11.11.2026 with camera-box): a vX.Y.Z tag also publishes the Windows
+  # bundle into that tag's release (created by linux-genlock.yml), as its own assets.
+  push:
+    tags: ['v*']
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-genlock-build
-  cancel-in-progress: true
+  group: windows-genlock-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   build:
@@ -22,6 +26,15 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+
+      # obs#1 point 7: a tag run fails here, before the 150-min build, when the tag is not VERSION.
+      - name: The tag matches VERSION (obs#1)
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          want="v$(tr -d '[:space:]' < VERSION)"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then echo "ERROR: tag $GITHUB_REF_NAME, VERSION says $want"; exit 1; fi
 
       # PRIMARY updater-disable gate (#55): assert the SOURCE mechanism that actually
       # disables the in-app updater, NOT the packaging outcome. The genlock #43 patch
@@ -2272,6 +2285,16 @@ jobs:
           if (!(Test-Path "stage/obs-plugins/64bit/vlc-video.dll")) { Write-Error "vlc-video.dll not built (issue 1425) -- the stock DLL on the boxes would stamp relative to plugin load"; exit 1 }
           git rev-parse HEAD | Out-File stage/GENLOCK_BUILD_SHA.txt -Encoding ascii
 
+      # obs#1 point 3: OBS_RELEASE.txt names the release tag (tag=none off a tag), the commit and
+      # VERSION, as in the Linux bundle. Written before the manifest so the manifest lists it.
+      - name: Write OBS_RELEASE.txt (obs#1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then rel_tag="$GITHUB_REF_NAME"; else rel_tag="none"; fi
+          printf 'tag=%s\ncommit=%s\nversion=%s\n' "$rel_tag" "$(git rev-parse HEAD)" "$(tr -d '[:space:]' < VERSION)" > stage/OBS_RELEASE.txt
+          cat stage/OBS_RELEASE.txt
+
       # #120: emit the per-component SHA manifest INTO the bundle (stage/BUNDLE_MANIFEST.json).
       # EPIC #125 / #119: a single git-HEAD txt (above) cannot catch a stale-BYTES build of the
       # right version (the #119 inert preload). The manifest records each rebuilt component's pinned
@@ -2295,9 +2318,94 @@ jobs:
         run: |
           scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
 
+      # obs#1 point 2: the release fields, one schema with the strih bundle (scripts/release-fields.sh;
+      # no vstack and no loudness dock in this build, so those fields are left out).
+      - name: Add the release fields to BUNDLE_MANIFEST.json (obs#1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/release-fields.sh stage/BUNDLE_MANIFEST.json stage/OBS_RELEASE.txt
+          scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: obs-genlock-windows-x64
           path: stage/
           if-no-files-found: error
+
+      # obs#1 point 7: the portable rundir zip + WINDOWS_MANIFEST.json (camera-box pins the strih
+      # BUNDLE_MANIFEST.json by sha256, so the Windows bundle carries its own). Runs on every build,
+      # so a dispatch proves the packaging before a tag; only publish-windows uploads them.
+      - name: Package the Windows release assets (obs#1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(sed -n 's/^tag=//p' stage/OBS_RELEASE.txt)"
+          if [ "$tag" = "none" ]; then tag="dev-$(git rev-parse --short=12 HEAD)"; fi
+          mkdir -p release
+          zip="obs-windows-x64-$tag.zip"
+          (cd stage && 7z a -tzip -mx=5 -bd "../release/$zip" . > /dev/null)
+          cp stage/BUNDLE_MANIFEST.json release/WINDOWS_MANIFEST.json
+          (cd release && for f in "$zip" WINDOWS_MANIFEST.json; do sha256sum "$f" > "$f.sha256"; done && sha256sum -c ./*.sha256)
+          # Read the zip back: obs64.exe present, the manifest inside matches its files.
+          mkdir unpack && (cd unpack && 7z x -bd "../release/$zip" > /dev/null)
+          if [ ! -f unpack/bin/64bit/obs64.exe ]; then echo "ERROR: the unpacked zip has no bin/64bit/obs64.exe"; exit 1; fi
+          scripts/genlock-manifest.sh --check unpack/BUNDLE_MANIFEST.json --stage unpack
+          cmp unpack/BUNDLE_MANIFEST.json release/WINDOWS_MANIFEST.json
+          ls -l release
+
+      - name: Upload the Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-windows-release-assets
+          path: release/
+          if-no-files-found: error
+          compression-level: 0
+
+  # obs#1 point 7: adds the Windows assets to the tag's release, which linux-genlock.yml's
+  # publish-release creates (its strih assets and BUNDLE_MANIFEST.json are never touched here).
+  publish-windows:
+    name: Publish the Windows bundle (tag vX.Y.Z on main)
+    needs: [build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The tag is on main
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then echo "ERROR: $GITHUB_SHA is not on main"; exit 1; fi
+
+      - name: Download the Windows release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: obs-windows-release-assets
+          path: release
+
+      - name: Add the Windows assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum -c ./*.sha256
+          jq -e --arg t "$GITHUB_REF_NAME" --arg c "$GITHUB_SHA" '.release.obs_tag == $t and .release.obs_commit == $c' WINDOWS_MANIFEST.json > /dev/null
+          # The Linux tag run creates the release; wait for it (bounded: its strih build is shorter
+          # than this Windows build, so it normally exists already).
+          for i in $(seq 1 120); do
+            if gh release view "$GITHUB_REF_NAME" --json tagName > /dev/null 2>&1; then break; fi
+            if [ "$i" = 120 ]; then echo "ERROR: release $GITHUB_REF_NAME does not exist after 120 min (linux-genlock publish-release failed?)"; exit 1; fi
+            sleep 60
+          done
+          zip="obs-windows-x64-$GITHUB_REF_NAME.zip"
+          # --clobber replaces only these four Windows names on a re-run.
+          gh release upload "$GITHUB_REF_NAME" --clobber "$zip" "$zip.sha256" WINDOWS_MANIFEST.json WINDOWS_MANIFEST.json.sha256
+          gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[] | "\(.name) \(.size)"'

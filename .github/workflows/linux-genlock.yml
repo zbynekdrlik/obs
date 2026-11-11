@@ -42,6 +42,7 @@ on:
       # camera-box#1436: the strih variant builds the loudness dock (the stream operator's LUFS meter).
       - 'vendor/obs-loudness-dock/**'
       - 'scripts/genlock-manifest.sh'
+      - 'scripts/release-fields.sh'
       - 'scripts/genlock-runtime-packages.sh'
       # issue 1387 + camera-box#1487: the strih variant links the JPEG XS C ABIs (jxs-recv-ffi, which
       # carries jxs-send-ffi) into DistroAV's JPEG XS source and program output. They come from the
@@ -840,44 +841,14 @@ jobs:
       - name: Assert bundle manifest self-consistent (#120)
         run: scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
 
-      # obs#1 point 2: the release fields go into BUNDLE_MANIFEST.json as one "release" line right
-      # after the opening brace. genlock-manifest.sh --check reads the files[] entries line by line,
-      # so the rest of the file keeps its exact layout; the re-check below proves it.
+      # obs#1 point 2: the release fields go into BUNDLE_MANIFEST.json (scripts/release-fields.sh,
+      # one schema with the Windows bundle); the re-check proves the files[] layout is untouched.
       - name: Add the release fields to BUNDLE_MANIFEST.json (obs#1)
         run: |
           set -euo pipefail
-          abi="$(grep -rhoE '#define[[:space:]]+CBJXS_ABI_VERSION[[:space:]]+[0-9]+' vstack/jxs/recv-ffi/include vstack/jxs/send-ffi/include | awk '{print $3}' | sort -u)"
-          if [ "$(printf '%s\n' "$abi" | grep -c .)" != 1 ]; then echo "ERROR: want one CBJXS_ABI_VERSION in the vstack headers, got: '$abi'"; exit 1; fi
-          stats="$(sed -n 's/^#define OBS_GENLOCK_STATS_VERSION \([0-9]\+\)$/\1/p' vendor/obs-studio/libobs/obs.h)"
-          out_stats="$(sed -n 's/^#define OBS_GENLOCK_OUTPUT_STATS_VERSION \([0-9]\+\)$/\1/p' vendor/obs-studio/libobs/obs.h)"
-          vban="$(sed -n 's/^project(obs-vban VERSION \([0-9.]\+\))$/\1/p' vendor/obs-vban/CMakeLists.txt)"
-          dock="$(sed -n 's/^project(obs-audio-video-sync-dock VERSION \([0-9.]\+\))$/\1/p' vendor/av-sync-dock/CMakeLists.txt)"
-          loudness="$(sed -n 's/^project(loudness-dock VERSION \([0-9.]\+\))$/\1/p' vendor/obs-loudness-dock/CMakeLists.txt)"
-          obs="$(jq -r '.components[] | select(.name == "obs-studio") | .pinned_version' stage/BUNDLE_MANIFEST.json)"
-          distroav="$(jq -r '.components[] | select(.name == "distroav") | .pinned_version' stage/BUNDLE_MANIFEST.json)"
-          for v in stats out_stats vban dock loudness obs distroav; do
-            if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then echo "ERROR: could not read $v"; exit 1; fi
-          done
-          release="$(jq -cn \
-            --arg tag "$(sed -n 's/^tag=//p' stage/OBS_RELEASE.txt)" \
-            --arg commit "$(git rev-parse HEAD)" \
-            --arg version "$(tr -d '[:space:]' < VERSION)" \
-            --arg obs "$obs" --arg distroav "$distroav" \
-            --arg vban "$vban" --arg dock "$dock" --arg loudness "$loudness" \
-            --arg vstack_tag "$VSTACK_TAG" --arg vstack_commit "$VSTACK_COMMIT" \
-            --argjson stats "$stats" --argjson out_stats "$out_stats" \
-            --arg obs_h "$(sha256sum vendor/obs-studio/libobs/obs.h | cut -d' ' -f1)" \
-            --argjson abi "$abi" \
-            '{obs_tag: $tag, obs_commit: $commit, obs_version: $version,
-              versions: {"obs-studio": $obs, distroav: $distroav, "obs-vban": $vban, "av-sync-dock": $dock, "loudness-dock": $loudness},
-              vstack_tag: $vstack_tag, vstack_commit: $vstack_commit,
-              genlock_stats_version: $stats, genlock_output_stats_version: $out_stats,
-              obs_h_sha256: $obs_h, cbjxs_abi_version: $abi}')"
-          awk -v line="  \"release\": $release," 'NR == 1 {print; print line; next} {print}' stage/BUNDLE_MANIFEST.json > manifest.tmp
-          mv manifest.tmp stage/BUNDLE_MANIFEST.json
-          jq -e '.release.obs_commit and (.files | length > 0)' stage/BUNDLE_MANIFEST.json > /dev/null
+          scripts/release-fields.sh stage/BUNDLE_MANIFEST.json stage/OBS_RELEASE.txt --loudness \
+            --vstack vstack "$VSTACK_TAG" "$VSTACK_COMMIT"
           scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
-          jq '.release' stage/BUNDLE_MANIFEST.json
 
       - name: Upload artifact (strih variant)
         uses: actions/upload-artifact@v4

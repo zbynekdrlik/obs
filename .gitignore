@@ -4,3 +4,6 @@ build/
 TARGETS.md
 *.pem
 *.key
+
+# Claude Code subagent worktrees (temporary lanes)
+.claude/worktrees/
