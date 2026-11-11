@@ -87,6 +87,7 @@ static void *gpu_encode_thread(void *data)
 	 * takes 49-60 ms on NVIDIA under the graphics lock; take it now, not in the first recording */
 	obs_enter_graphics();
 	obs_leave_graphics();
+	os_event_signal(video->gpu_encode_warm);
 
 	while (os_sem_wait(video->gpu_encode_semaphore) == 0) {
 		struct obs_tex_frame tf;
@@ -342,6 +343,8 @@ bool init_gpu_encoding(struct obs_core_video_mix *video)
 		return false;
 	if (os_event_init(&video->gpu_encode_inactive, OS_EVENT_TYPE_MANUAL) != 0)
 		return false;
+	if (os_event_init(&video->gpu_encode_warm, OS_EVENT_TYPE_MANUAL) != 0)
+		return false;
 	if (pthread_create(&video->gpu_encode_thread, NULL, gpu_encode_thread, video) != 0)
 		return false;
 
@@ -349,6 +352,20 @@ bool init_gpu_encoding(struct obs_core_video_mix *video)
 
 	video->gpu_encode_thread_initialized = true;
 	return true;
+}
+
+/* obs#29: after its creator left graphics, wait until the new encode thread took and left them
+ * once, so no later join (obs_free_video_mix may run with graphics held) meets a thread still
+ * waiting for graphics. A creator that itself still holds graphics cannot wait here. */
+void wait_gpu_encode_warm(struct obs_core_video_mix *video)
+{
+	if (!video->gpu_encode_thread_initialized || !video->gpu_encode_warm)
+		return;
+	if (gs_get_context()) {
+		blog(LOG_WARNING, "gpu-encode: encode thread started by a thread that holds graphics; not waiting for its warm-up (obs#29)");
+		return;
+	}
+	os_event_wait(video->gpu_encode_warm);
 }
 
 void stop_gpu_encoding_thread(struct obs_core_video_mix *video)
@@ -370,6 +387,10 @@ void free_gpu_encoding(struct obs_core_video_mix *video)
 	if (video->gpu_encode_inactive) {
 		os_event_destroy(video->gpu_encode_inactive);
 		video->gpu_encode_inactive = NULL;
+	}
+	if (video->gpu_encode_warm) {
+		os_event_destroy(video->gpu_encode_warm);
+		video->gpu_encode_warm = NULL;
 	}
 
 #define free_deque(x)                                               \
