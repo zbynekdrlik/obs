@@ -16,7 +16,8 @@
  *     two recordings run and stop, each on a thread of its own, and shutdown does not hang;
  *   - obs#31: an encode error stops the recording and the next recording encodes again, on the
  *     canvas mix and on a GPU-rescale mix (the error path used to wait on the encode thread from
- *     the encode thread itself, a hang).
+ *     the encode thread itself, a hang); an error stop queued behind a user stop and restart
+ *     leaves the new recording alone.
  *
  *   gpu-encode-test <libobs data dir>   (the SDK's share/obs/libobs/, which holds the effects)
  *
@@ -313,7 +314,13 @@ static void encode_error_round(obs_output_t *output, const char *which)
 		os_event_timedwait(stopped, 5000);
 	}
 	set_fail_from(-1);
-	os_sleep_ms(200);
+	/* "deactivate" can come before the encoder's own stop on the destruction thread ends */
+	obs_encoder_t *encoder = obs_output_get_video_encoder(output);
+	bool inactive = false;
+	for (int waited = 0; waited < 5000 && !(inactive = !obs_encoder_active(encoder)); waited += 10)
+		os_sleep_ms(10);
+	snprintf(what, sizeof(what), "%s encoder is inactive within 5 s after the encode error", which);
+	expect(inactive, what);
 
 	reset_seen();
 	snprintf(what, sizeof(what), "%s recording after the encode error starts", which);
@@ -325,7 +332,61 @@ static void encode_error_round(obs_output_t *output, const char *which)
 	bool stopped_after = os_event_timedwait(stopped, 5000) == 0;
 	snprintf(what, sizeof(what), "%s recording after the encode error stops within 5 s", which);
 	expect(stopped_after, what);
-	bail_if_hung(!stopped_by_error || !encodes || !stopped_after);
+	bail_if_hung(!stopped_by_error || !inactive || !encodes || !stopped_after);
+}
+
+/* obs#31 review: the encode-error stop is queued on the destruction thread. Held there (a task
+ * that waits), the user stops and restarts first; the queued stop must leave the new recording
+ * alone, and the user's stop must not be repeated by it. */
+static os_event_t *destroy_hold;
+static os_event_t *destroy_held;
+
+static void hold_destruction_thread(void *param)
+{
+	(void)param;
+	os_event_signal(destroy_held);
+	os_event_wait(destroy_hold);
+}
+
+static void stale_error_stop_round(obs_output_t *output)
+{
+	os_event_init(&destroy_hold, OS_EVENT_TYPE_MANUAL);
+	os_event_init(&destroy_held, OS_EVENT_TYPE_MANUAL);
+	obs_queue_task(OBS_TASK_DESTROY, hold_destruction_thread, NULL, false);
+	expect(os_event_timedwait(destroy_held, 3000) == 0, "the destruction thread is held");
+
+	reset_seen();
+	set_fail_from(5);
+	expect(obs_output_start(output), "a recording whose error stop is held starts");
+	bool failed = false;
+	for (int waited = 0; waited < 5000 && !failed; waited += 10) {
+		pthread_mutex_lock(&seen_mutex);
+		failed = frames_encoded > 5;
+		pthread_mutex_unlock(&seen_mutex);
+		os_sleep_ms(10);
+	}
+	expect(failed, "its encoder failed");
+	set_fail_from(-1);
+	obs_output_stop(output);
+	expect(os_event_timedwait(stopped, 5000) == 0, "the user's stop ends it while the error stop is held");
+
+	reset_seen();
+	expect(obs_output_start(output), "the next recording starts while the old error stop is held");
+	expect(wait_packets(5, 5000), "the next recording sends packets");
+
+	os_event_signal(destroy_hold);
+	obs_wait_for_destroy_queue();
+	long before = seen_packets();
+	bool still = wait_packets(before + 10, 5000);
+	expect(still, "the next recording keeps encoding after the stale error stop ran");
+	expect(obs_output_active(output), "the next recording is still active after the stale error stop ran");
+
+	obs_output_stop(output);
+	bool stopped_ok = os_event_timedwait(stopped, 5000) == 0;
+	expect(stopped_ok, "the next recording stops within 5 s");
+	os_event_destroy(destroy_hold);
+	os_event_destroy(destroy_held);
+	bail_if_hung(!still || !stopped_ok);
 }
 
 int main(int argc, char **argv)
@@ -439,6 +500,7 @@ int main(int argc, char **argv)
 		os_event_timedwait(stopped, 5000);
 
 	encode_error_round(output, "a canvas-mix");
+	stale_error_stop_round(output);
 
 	/* GPU rescale: the encoder gets a mix of its own, freed when it stops. */
 	obs_encoder_set_scaled_size(encoder, 32, 32);
