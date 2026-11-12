@@ -294,3 +294,71 @@ fn the_floor_at_the_tested_rate_pairs() {
         assert!(cfg(floor).unwrap().latency_ns >= 4_000_000, "{rates}");
     }
 }
+
+const TX: &str = "rx_port_base = 47200\ntx = [\"OBS program L\", \"OBS program R\"]";
+
+#[test]
+fn tx_channels_reach_the_device_and_carry_track_1_unless_set() {
+    // obs#41 (camera-box#1513): the stream OBS sends its program mix (track 1) on two TX channels.
+    let (_d, path) = write(&GOOD.replace("rx_port_base = 47200", TX));
+    let cfg = InputConfig::load(&path).unwrap();
+    assert_eq!(cfg.tx_track(), 1);
+    let dev = cfg.dlink(48_000).device().unwrap();
+    assert_eq!(dev.tx, ["OBS program L", "OBS program R"]);
+    assert_eq!(dev.rx, ["Master L", "Master R"]);
+
+    let (_d, path) = write(&GOOD.replace("rx_port_base = 47200", &format!("{TX}\ntx_track = 3")));
+    assert_eq!(InputConfig::load(&path).unwrap().tx_track(), 3);
+}
+
+#[test]
+fn without_tx_there_is_no_track() {
+    let (_d, path) = write(GOOD);
+    assert_eq!(InputConfig::load(&path).unwrap().tx_track(), 0);
+}
+
+#[test]
+fn a_tx_of_other_than_two_channels_or_a_track_outside_1_to_6_is_refused_by_its_key() {
+    for (keys, wanted) in [
+        (
+            "tx = [\"L\"]",
+            "tx: 1 channels; the TX takes 2 (left, right) or none",
+        ),
+        (
+            "tx = [\"L\", \"R\", \"C\"]",
+            "tx: 3 channels; the TX takes 2 (left, right) or none",
+        ),
+        ("tx_track = 1", "tx_track: set without tx"),
+        (
+            "tx = [\"L\", \"R\"]\ntx_track = 0",
+            "tx_track: 0 is not one of 1..=6",
+        ),
+        (
+            "tx = [\"L\", \"R\"]\ntx_track = 7",
+            "tx_track: 7 is not one of 1..=6",
+        ),
+    ] {
+        let (_d, path) = write(&GOOD.replace(
+            "rx_port_base = 47200",
+            &format!("rx_port_base = 47200\n{keys}"),
+        ));
+        let err = InputConfig::load(&path).unwrap_err();
+        assert!(err.contains(wanted), "{keys}: {err}");
+    }
+}
+
+#[test]
+fn stream_snv_s_split_with_tx_at_20_ms_is_the_one_dstack_pins() {
+    // dstack v0.6.103 (dstack #241, its split test): TX + RX, a 20 ms budget, a 96 kHz network,
+    // OBS at 48 kHz, block 128: W 768 samples (8 ms), P 11364583 ns, RX path 13322916 ns, TX
+    // path 19999999 ns. The recommended stream-snv setting with TX (obs#41).
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        &format!("{TX}\nnetwork_rate = 96000\nlatency_ms = 20"),
+    ));
+    let split = InputConfig::load(&path).unwrap().split(48_000).unwrap();
+    assert_eq!(split.margin, 768);
+    assert_eq!(split.latency_ns, 11_364_583);
+    assert_eq!(split.rx_path_ns, 13_322_916);
+    assert_eq!(split.tx_path_ns, 19_999_999);
+}

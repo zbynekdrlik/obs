@@ -14,6 +14,11 @@ cmc_port = 8800
 flows_port = 4455
 rx_port_base = 47200
 # state_file = "..."              # default: dante-input.state.toml next to this file
+# OBS's audio track out to Dante on the same device (obs#41). With TX, set latency_ms = 20: a
+# device with TX gets 2/5 of the budget as the pump's late margin (8 ms at 20, 6 ms at 15).
+# OBS mix to the wire is about the 40 ms FIFO + the TX path (~60 ms at 20).
+# tx = ["OBS program L", "OBS program R"]   # left, right; none: RX only
+# tx_track = 1                    # the OBS track sent, 1-6; 1 unless set
 
 # One subscription per RX channel; each names its own transmitter, so channels from two TX
 # devices are fine.

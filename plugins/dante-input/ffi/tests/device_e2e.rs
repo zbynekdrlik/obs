@@ -8,9 +8,13 @@
 
 use std::ffi::c_void;
 use std::net::UdpSocket;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use dante_input_ffi::DanteInput;
+
+/// One device at a time: the tests share the process (and its PTP follower).
+static ONE_DEVICE: Mutex<()> = Mutex::new(());
 
 unsafe extern "C" fn drop_audio(_: *mut c_void, _: *const *const f32, _: u32, _: u32) {}
 
@@ -24,6 +28,7 @@ fn iface_ip() -> (String, String) {
 
 #[test]
 fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     let (iface, ip) = iface_ip();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dante-input.toml");
@@ -69,6 +74,8 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         " wire_late=",
         " wake_delay_us=",
         " wake_delay_peak_us=",
+        // obs#41: the TX tokens, 0 on a device without TX.
+        " tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0",
     ] {
         assert!(line.contains(field), "{field} missing: {line}");
     }
@@ -100,4 +107,55 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         UdpSocket::bind((ip.as_str(), port))
             .unwrap_or_else(|e| panic!("UDP {ip}:{port} still held after stop: {e}"));
     }
+}
+
+/// obs#41 (camera-box#1513): a device with `tx` takes OBS's track as OBS hands it (1024 frames
+/// every 1024 frames' time, on OBS's own clock), primes its FIFO and plays it into the TX
+/// channels; the status line's tx_* tokens show it. The wire itself is dlink's (dstack's tests).
+#[test]
+fn a_device_with_tx_plays_obs_s_track_into_its_tx_channels() {
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let (iface, _ip) = iface_ip();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dante-input.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "name = \"obs-e2e-tx\"\niface = \"{iface}\"\nrx = [\"Master L\", \"Master R\"]\n\
+             tx = [\"OBS program L\", \"OBS program R\"]\nlatency_ms = 20\n\
+             network_rate = 96000\narc_port = 24441\ncmc_port = 28801\nflows_port = 24456\nrx_port_base = 22300\n"
+        ),
+    )
+    .unwrap();
+    let d = DanteInput::start(&path, 48_000, drop_audio, std::ptr::null_mut())
+        .expect("the device with TX starts");
+    assert_eq!(d.tx_track(), 1);
+    assert_eq!(d.tx_rate(), 48_000);
+    let left = vec![0.25f32; 1024];
+    let right = vec![-0.25f32; 1024];
+    let start = Instant::now();
+    let mut sent = 0u64;
+    while start.elapsed() < Duration::from_secs(3) {
+        // OBS's pace: 1024 frames at 48 kHz every 21.33 ms.
+        let due = start.elapsed().as_secs_f64() * 48_000.0;
+        while (sent as f64) < due {
+            d.tx_push(&[&left, &right], 1024);
+            sent += 1024;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(d.ended(), None, "the device ended by itself");
+    let st = d.status().expect("a running device has a status");
+    let line = st.line();
+    eprintln!("{line}");
+    assert_eq!(st.tx_track, 1, "{line}");
+    assert!(
+        !st.tx_priming,
+        "the player primed on the pushed track: {line}"
+    );
+    // ~3 s of pump blocks at 48 kHz, less the start: well past 1 s of frames played.
+    assert!(st.tx_played > 48_000, "{line}");
+    assert_eq!(st.tx_overflows, 0, "{line}");
+    assert!(line.contains(" tx_track=1 tx_played="), "{line}");
+    d.stop();
 }

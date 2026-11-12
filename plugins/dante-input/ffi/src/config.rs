@@ -9,7 +9,8 @@ use serde::Deserialize;
 /// (owner ROZHODNUTÉ 4.11.2026, dstack#1; it was 10 ms, camera-box#1485). Since dlink
 /// v0.6.22 (dstack #68, owner 3.11.2026) it is each direction's whole path, the Dante latency
 /// and the work together; dlink gives the Dante latency what the work of the directions the
-/// device uses leaves (v0.6.24: RX only here, so dlink's RX path is the whole budget).
+/// device uses leaves (v0.6.24: an RX-only device's RX path is the whole budget; with `tx`,
+/// obs#41, the budget is split for both directions and the pump's margin is 2/5 of it).
 /// Before v0.4.9 the same `latency_ms` was the Dante latency alone.
 pub const DEFAULT_LATENCY_MS: u32 = (dlink::BUDGET_NS / 1_000_000) as u32;
 /// dlink's least Dante latency, so no budget below it can work. The real floor depends on the
@@ -24,6 +25,10 @@ pub const MAX_LATENCY_MS: u32 = 100;
 const _: () = assert!(DEFAULT_LATENCY_MS >= MIN_LATENCY_MS && DEFAULT_LATENCY_MS <= MAX_LATENCY_MS);
 /// The most RX channels the source takes: OBS's widest speaker layout (7.1).
 pub const MAX_CHANNELS: usize = 8;
+/// The TX channels: the left and right of one OBS track (obs#41).
+pub const TX_CHANNELS: usize = 2;
+/// OBS's audio tracks, from 1 (`MAX_AUDIO_MIXES`).
+pub const TRACKS: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +66,12 @@ pub struct InputConfig {
     pub flow_slots: Option<usize>,
     #[serde(default)]
     pub subscribe: Vec<Subscription>,
+    /// The TX channels' names, left then right: the device sends OBS's track `tx_track` on them
+    /// (obs#41, camera-box#1513). Empty: no TX, the device is RX only as before.
+    #[serde(default)]
+    pub tx: Vec<String>,
+    /// The OBS audio track the TX carries, 1 to 6; track 1 unless set. Only with `tx`.
+    pub tx_track: Option<u32>,
 }
 
 fn default_latency() -> u32 {
@@ -114,6 +125,21 @@ impl InputConfig {
                 problems.push(format!("subscribe: rx {} is not one of 1..={n}", s.rx));
             }
         }
+        let t = self.tx.len();
+        if t != 0 && t != TX_CHANNELS {
+            problems.push(format!(
+                "tx: {t} channels; the TX takes {TX_CHANNELS} (left, right) or none"
+            ));
+        }
+        match self.tx_track {
+            Some(_) if self.tx.is_empty() => {
+                problems.push("tx_track: set without tx".to_string());
+            }
+            Some(k) if !(1..=TRACKS).contains(&k) => {
+                problems.push(format!("tx_track: {k} is not one of 1..={TRACKS}"));
+            }
+            _ => {}
+        }
         if problems.is_empty() {
             Ok(())
         } else {
@@ -144,11 +170,22 @@ impl InputConfig {
         })
     }
 
-    /// The dlink config of this file for OBS running at `obs_rate`: RX only, no TX channels.
+    /// The OBS track the TX carries, from 1; 0 when the file has no TX.
+    pub fn tx_track(&self) -> u32 {
+        if self.tx.is_empty() {
+            0
+        } else {
+            self.tx_track.unwrap_or(1)
+        }
+    }
+
+    /// The dlink config of this file for OBS running at `obs_rate`: its RX channels, and its TX
+    /// channels when the file has them.
     pub fn dlink(&self, obs_rate: u32) -> dlink::Config {
         let state = self.state_file.clone().unwrap_or_default();
         let mut c = dlink::Config::new(self.name.clone(), state)
             .rx(self.rx.clone())
+            .tx(self.tx.clone())
             .budget_ns(u64::from(self.latency_ms) * 1_000_000)
             .sample_rate(self.app_rate(obs_rate))
             .product("obs", "dante-input");

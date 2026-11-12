@@ -31,6 +31,17 @@ uint32_t dante_input_sample_rate(const struct dante_input *d);
 /* The RX channels per block. */
 uint32_t dante_input_channels(const struct dante_input *d);
 
+/* The OBS audio track (from 1) the device sends on its TX channels; 0 without TX (obs#41). */
+uint32_t dante_input_tx_track(const struct dante_input *d);
+
+/* The rate, Hz, to hand dante_input_tx_push the track at; 0 without TX. */
+uint32_t dante_input_tx_rate(const struct dante_input *d);
+
+/* Hands the TX `frames` frames of the track as `channels` float planes (left, right; one plane goes
+ * out on both). OBS's audio thread only, at dante_input_tx_rate. */
+void dante_input_tx_push(const struct dante_input *d, const float *const *planes, uint32_t channels,
+			 uint32_t frames);
+
 /* Stops the device; no callback runs after this returns. */
 void dante_input_stop(struct dante_input *d);
 
