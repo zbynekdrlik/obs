@@ -65,6 +65,10 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         " obs_dropped=",
         " max_obs_us=",
         " delivered_frames=",
+        // camera-box#1510 (dstack #234): appended after max_obs_us.
+        " wire_late=",
+        " wake_delay_us=",
+        " wake_delay_peak_us=",
     ] {
         assert!(line.contains(field), "{field} missing: {line}");
     }

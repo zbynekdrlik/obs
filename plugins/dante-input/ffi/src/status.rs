@@ -180,13 +180,45 @@ mod tests {
             obs_dropped: 12,
             max_obs_us: 13,
             delivered_frames: 4800,
+            wire_late: 14,
+            wake_delay_us: 15,
+            wake_delay_peak_us: 16,
         };
         assert_eq!(
             st.line(),
             "dante-input status: clock=media holdover=0 gm=001dc1fffe0a polls=12 re_anchors=1 \
              rx_packets=100 rx_loss=3 rx_gaps=1 rx_late=2 socket_drops=4 blocks=50 underruns=5 \
              overruns=6 delivered_frames=4800 rx_holes=7 rx_written_late=8 late_blocks=9 \
-             rebootstraps=10 max_process_us=11 obs_dropped=12 max_obs_us=13"
+             rebootstraps=10 max_process_us=11 obs_dropped=12 max_obs_us=13 \
+             wire_late=14 wake_delay_us=15 wake_delay_peak_us=16"
+        );
+    }
+
+    /// camera-box#1510 (dstack #234): a late packet is late on the wire or woke our RX thread
+    /// late. wire_late adds up over the flows; the wake delays are the worst flow's.
+    #[test]
+    fn the_flows_wire_late_add_up_and_their_wake_delays_take_the_worst() {
+        let mut st = Status::default();
+        st.flow(Flow {
+            wire_late: 2,
+            wake_delay_us: 300,
+            wake_delay_peak_us: 4_000,
+        });
+        st.flow(Flow {
+            wire_late: 5,
+            wake_delay_us: 900,
+            wake_delay_peak_us: 1_200,
+        });
+        st.flow(Flow::default());
+        assert_eq!(
+            (st.wire_late, st.wake_delay_us, st.wake_delay_peak_us),
+            (7, 900, 4_000)
+        );
+        assert!(
+            st.line()
+                .ends_with(" max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000"),
+            "{}",
+            st.line()
         );
     }
 
