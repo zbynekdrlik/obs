@@ -1,5 +1,6 @@
 //! The C ABI under the OBS `dante_input` source (obs#1, camera-box#1485): one dlink device (dstack)
-//! per OBS process, RX only. The pump's [`Sink`] only copies each block into a lock-free ring; the
+//! per OBS process: its RX into OBS sources, and since v0.4.27 (obs#41) optionally one OBS track out
+//! on two TX channels ([`tx`]). The pump's [`Sink`] only copies each block into a lock-free ring; the
 //! `dante-input-obs` thread ([`Feeder`]) hands it to the C callback as float planes. OBS takes its
 //! source mutexes in that call, so it never runs inside the pump's block (1.33 ms at 96 kHz since dlink v0.6.20) (v0.3.0 on
 //! strih-snv: blocks of up to 6.7 ms, past the 5 ms margin, skipped).
@@ -20,9 +21,11 @@ use dlink::{Block, Link, Map, Place, Process};
 pub mod config;
 pub mod status;
 pub mod tray;
+pub mod tx;
 
 use config::InputConfig;
 use status::Status;
+use tx::{TxIn, TxOut};
 
 /// OBS's log levels (util/base.h).
 pub const LOG_ERROR: c_int = 100;
@@ -271,6 +274,22 @@ impl Process for Sink {
     }
 }
 
+/// The device's processor: the RX into the ring ([`Sink`]) and, with TX, OBS's track out of the
+/// TX FIFO ([`TxOut`]), each block.
+pub struct Pump {
+    sink: Sink,
+    tx: Option<TxOut>,
+}
+
+impl Process for Pump {
+    fn process(&mut self, block: &mut Block<'_>) {
+        self.sink.process(block);
+        if let Some(tx) = &mut self.tx {
+            tx.fill(block);
+        }
+    }
+}
+
 /// The OBS side, on the `dante-input-obs` thread: the ring's whole frames to the C callback as
 /// planes of at most [`MAX_CHUNK`] frames, behind the gate.
 pub struct Feeder {
@@ -370,6 +389,8 @@ pub struct DanteInput {
     status: Option<JoinHandle<()>>,
     feed_stop: Arc<AtomicBool>,
     feeder: Option<JoinHandle<()>>,
+    /// The TX's OBS side (obs#41); `None` without TX.
+    tx: Option<Arc<TxIn>>,
 }
 
 impl DanteInput {
@@ -387,7 +408,7 @@ impl DanteInput {
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
+                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} tx={:?} tx_track={} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
                 path.display(),
                 cfg.name,
                 cfg.iface,
@@ -395,6 +416,8 @@ impl DanteInput {
                 link_cfg.device_rate(),
                 link_cfg.converts(),
                 cfg.rx,
+                cfg.tx,
+                cfg.tx_track(),
                 cfg.arc_port,
                 cfg.cmc_port,
                 cfg.flows_port,
@@ -427,17 +450,38 @@ impl DanteInput {
             Arc::clone(&feed),
             Arc::clone(&gate),
         );
+        let (tx_in, tx_out) = match cfg.tx_track() {
+            0 => (None, None),
+            track => {
+                // OBS writes at its own rate (0 when unknown: then the app rate, which OBS takes).
+                let obs = if obs_rate == 0 { rate } else { obs_rate };
+                let (i, o) = tx::tx(track, obs, rate)?;
+                log(
+                    LOG_INFO,
+                    &format!(
+                        "dante-input start: TX of OBS track {track} on {:?}: OBS {obs} Hz into a FIFO held at {} ms by dlink's ASRC player, read at {rate} Hz; tx_path_ns={}",
+                        cfg.tx,
+                        tx::target_ms(),
+                        split.tx_path_ns,
+                    ),
+                );
+                (Some(Arc::new(i)), Some(o))
+            }
+        };
         let map = Map {
             rx: (0..n).collect(),
-            tx: Vec::new(),
+            tx: (0..cfg.tx.len()).collect(),
         };
-        let link = Link::start(&link_cfg, &Place::Iface(cfg.iface.clone()), map, sink)
+        let pump = Pump { sink, tx: tx_out };
+        let link = Link::start(&link_cfg, &Place::Iface(cfg.iface.clone()), map, pump)
             .map_err(|e| format!("the device did not start: {e}"))?;
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: device {} running on {}, {n} RX channels",
-                cfg.name, cfg.iface
+                "dante-input start: device {} running on {}, {n} RX channels, {} TX channels",
+                cfg.name,
+                cfg.iface,
+                cfg.tx.len()
             ),
         );
         // dtray's obs line: the hand-off to OBS, on dlink's own status thread.
@@ -462,9 +506,10 @@ impl DanteInput {
         let (stop, stopped) = mpsc::channel();
         let watched = Arc::clone(&link);
         let counted = Arc::clone(&feed);
+        let tx_counted = tx_in.clone();
         let spawned = std::thread::Builder::new()
             .name("dante-input-status".into())
-            .spawn(move || status_loop(&watched, &stopped, &counted));
+            .spawn(move || status_loop(&watched, &stopped, &counted, tx_counted.as_deref()));
         let feed_stop = Arc::new(AtomicBool::new(false));
         let mut d = DanteInput {
             link,
@@ -476,6 +521,7 @@ impl DanteInput {
             status: None,
             feed_stop: Arc::clone(&feed_stop),
             feeder: None,
+            tx: tx_in,
         };
         match spawned {
             Ok(t) => d.status = Some(t),
@@ -516,7 +562,24 @@ impl DanteInput {
 
     /// The device's counts now; `None` once it is stopped.
     pub fn status(&self) -> Option<Status> {
-        status_of(&self.link, &self.feed)
+        status_of(&self.link, &self.feed, self.tx.as_deref())
+    }
+
+    /// The OBS track the TX carries, from 1; 0 without TX.
+    pub fn tx_track(&self) -> u32 {
+        self.tx.as_ref().map_or(0, |t| t.track())
+    }
+
+    /// The rate OBS hands the TX track at, Hz; 0 without TX.
+    pub fn tx_rate(&self) -> u32 {
+        self.tx.as_ref().map_or(0, |t| t.rate())
+    }
+
+    /// OBS's track planes into the TX (OBS's audio thread only); nothing without TX.
+    pub fn tx_push(&self, planes: &[&[f32]], frames: usize) {
+        if let Some(t) = &self.tx {
+            t.push(planes, frames);
+        }
     }
 
     /// dlink's status JSON (what dtray reads), the obs part as `app`; `None` once stopped.
@@ -570,16 +633,24 @@ impl DanteInput {
     }
 }
 
-fn status_of(link: &Mutex<Option<Link>>, feed: &Feed) -> Option<Status> {
+fn status_of(link: &Mutex<Option<Link>>, feed: &Feed, tx: Option<&TxIn>) -> Option<Status> {
     let guard = link.lock().ok()?;
     let l = guard.as_ref()?;
     let mut st = Status::read(l.media(), feed.delivered.load(Ordering::Relaxed));
     st.obs_dropped = feed.dropped.load(Ordering::Relaxed);
     st.max_obs_us = feed.max_obs_ns.load(Ordering::Relaxed) / 1_000;
+    if let Some(t) = tx {
+        st.tx(t.counts());
+    }
     Some(st)
 }
 
-fn status_loop(link: &Mutex<Option<Link>>, stopped: &mpsc::Receiver<()>, feed: &Feed) {
+fn status_loop(
+    link: &Mutex<Option<Link>>,
+    stopped: &mpsc::Receiver<()>,
+    feed: &Feed,
+    tx: Option<&TxIn>,
+) {
     let mut ended_logged = false;
     let mut lines = 0u32;
     loop {
@@ -587,7 +658,7 @@ fn status_loop(link: &Mutex<Option<Link>>, stopped: &mpsc::Receiver<()>, feed: &
             Err(RecvTimeoutError::Timeout) => {}
             _ => return,
         }
-        let Some(st) = status_of(link, feed) else {
+        let Some(st) = status_of(link, feed, tx) else {
             return;
         };
         log(LOG_INFO, &st.line());
@@ -674,6 +745,63 @@ pub unsafe extern "C" fn dante_input_sample_rate(d: *const DanteInput) -> u32 {
 pub unsafe extern "C" fn dante_input_channels(d: *const DanteInput) -> u32 {
     // SAFETY: the caller's contract.
     unsafe { d.as_ref() }.map_or(0, DanteInput::channels)
+}
+
+/// The OBS track (from 1) the device sends on its TX channels; 0 without TX (obs#41).
+///
+/// # Safety
+/// `d` comes from dante_input_start and was not stopped.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dante_input_tx_track(d: *const DanteInput) -> u32 {
+    // SAFETY: the caller's contract.
+    unsafe { d.as_ref() }.map_or(0, DanteInput::tx_track)
+}
+
+/// The rate, Hz, to hand dante_input_tx_push the track at; 0 without TX.
+///
+/// # Safety
+/// `d` comes from dante_input_start and was not stopped.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dante_input_tx_rate(d: *const DanteInput) -> u32 {
+    // SAFETY: the caller's contract.
+    unsafe { d.as_ref() }.map_or(0, DanteInput::tx_rate)
+}
+
+/// Hands the TX `frames` frames of OBS's track as `channels` float planes (left, right; one plane
+/// goes out on both). Call it from OBS's audio thread only, at dante_input_tx_rate.
+///
+/// # Safety
+/// `d` comes from dante_input_start and was not stopped; `planes` holds `channels` pointers, each
+/// to `frames` floats, or is NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dante_input_tx_push(
+    d: *const DanteInput,
+    planes: *const *const f32,
+    channels: u32,
+    frames: u32,
+) {
+    // SAFETY: the caller's contract.
+    let Some(d) = (unsafe { d.as_ref() }) else {
+        return;
+    };
+    if planes.is_null() || channels == 0 {
+        return;
+    }
+    let frames = frames as usize;
+    let n = (channels as usize).min(config::TX_CHANNELS);
+    let mut views: [&[f32]; config::TX_CHANNELS] = [&[]; config::TX_CHANNELS];
+    for (c, view) in views.iter_mut().enumerate().take(n) {
+        // SAFETY: the caller's contract: `channels` plane pointers.
+        let p = unsafe { *planes.add(c) };
+        if p.is_null() {
+            return;
+        }
+        // SAFETY: the caller's contract: each plane holds `frames` floats.
+        *view = unsafe { std::slice::from_raw_parts(p, frames) };
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        d.tx_push(&views[..n], frames)
+    }));
 }
 
 /// Stops the device; no callback runs after this returns.
