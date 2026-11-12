@@ -15,3 +15,8 @@ paths:
 # dante-input CPUs
 
 - dante-input.toml has no CPU keys. The owner ruled CPU-core pinning for dlink apps out (dstack#1, 4.11.2026). v0.4.11 had `pump_cpu`/`rx_cpu`, and v0.4.12 removed them. Because of `deny_unknown_fields`, a file that still sets them is refused at load.
+
+# dante-input status line
+
+- camera-box's E2E program-audio gate parses the `dante-input status:` line by token name. A new token goes at the END, after the last one (v0.4.26 appended `wire_late wake_delay_us wake_delay_peak_us` after `max_obs_us`). Never reorder or rename a token. `the_line_carries_every_contract_field_in_order` pins the whole line, and `tests/device_e2e.rs` checks the tokens on a real device.
+- dlink's per-flow reads are per slot (`media.rx.lane(slot)` for 0..32). The line sums the counts and takes the worst slot for delays (`Status::flow`). A `last_*` value is dlink's last heartbeat second, not the print interval.
