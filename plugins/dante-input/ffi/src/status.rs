@@ -3,6 +3,9 @@
 //! frames the network never brought, rx_holes samples the pump read before their packet came (OBS
 //! got silence there), underruns blocks the pump skipped (OBS never got them). late_blocks and
 //! overruns are timing only: a block run up to the margin late still reads its own samples.
+//! wire_late, wake_delay_us and wake_delay_peak_us (dlink v0.6.101, dstack #234, Linux; 0 on
+//! Windows) tell a late packet late on the wire from our RX thread's late wake; they come last on
+//! the line, so the tokens before them keep their order (camera-box#1510).
 
 use std::fmt::Write as _;
 
@@ -44,6 +47,13 @@ pub struct Status {
     pub max_obs_us: u64,
     /// Frames handed to OBS.
     pub delivered_frames: u64,
+    /// Packets already later than the flow's limit when the kernel received them (all flows):
+    /// late on the wire, not by a late RX-thread wake.
+    pub wire_late: u64,
+    /// The largest RX-thread wake delay in the heartbeat's last second (any flow), µs.
+    pub wake_delay_us: u64,
+    /// The largest RX-thread wake delay since the start (any flow), µs.
+    pub wake_delay_peak_us: u64,
 }
 
 impl Status {
@@ -61,7 +71,7 @@ impl Status {
             " clock={} holdover={} gm={gm} polls={} re_anchors={} rx_packets={} rx_loss={} \
              rx_gaps={} rx_late={} socket_drops={} blocks={} underruns={} overruns={} delivered_frames={} \
              rx_holes={} rx_written_late={} late_blocks={} rebootstraps={} max_process_us={} \
-             obs_dropped={} max_obs_us={}",
+             obs_dropped={} max_obs_us={} wire_late={} wake_delay_us={} wake_delay_peak_us={}",
             if self.media_clock { "media" } else { "free" },
             u8::from(self.holdover),
             self.clock_polls,
@@ -82,6 +92,9 @@ impl Status {
             self.max_process_us,
             self.obs_dropped,
             self.max_obs_us,
+            self.wire_late,
+            self.wake_delay_us,
+            self.wake_delay_peak_us,
         );
         s
     }
@@ -103,6 +116,11 @@ impl Status {
             st.rx_loss += l.gap_frames;
             st.rx_gaps += l.gaps;
             st.rx_late += l.late;
+            st.flow(Flow {
+                wire_late: l.wire_late,
+                wake_delay_us: media.rx.last_wake_delay_us(slot),
+                wake_delay_peak_us: l.wake_delay_peak_us,
+            });
         }
         if let Some(drops) = media.rx.socket_drops() {
             st.socket_drops = drops.iter().sum();
@@ -126,6 +144,13 @@ impl Status {
         st
     }
 
+    /// One flow slot's RX timing: wire_late adds up, the wake delays keep the worst flow's.
+    pub fn flow(&mut self, f: Flow) {
+        self.wire_late += f.wire_late;
+        self.wake_delay_us = self.wake_delay_us.max(f.wake_delay_us);
+        self.wake_delay_peak_us = self.wake_delay_peak_us.max(f.wake_delay_peak_us);
+    }
+
     /// The engine pump's counts: only skipped blocks are underruns.
     pub fn pump(&mut self, p: Pump) {
         self.media_clock = p.media;
@@ -136,6 +161,16 @@ impl Status {
         self.overruns = p.overruns;
         self.max_process_us = p.max_process_us;
     }
+}
+
+/// One flow slot's RX timing (dlink v0.6.101, dstack #234).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flow {
+    pub wire_late: u64,
+    /// The heartbeat's last second, µs.
+    pub wake_delay_us: u64,
+    /// Since the start, µs.
+    pub wake_delay_peak_us: u64,
 }
 
 /// The engine pump's counts (dstack's PumpView, which dlink does not name).

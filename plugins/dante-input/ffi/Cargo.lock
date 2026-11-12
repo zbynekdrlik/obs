@@ -90,8 +90,8 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.101"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.101#ff694ec2f908f9ab4761bbf87c6051cc8b6f653a"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -102,8 +102,8 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.101"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.101#ff694ec2f908f9ab4761bbf87c6051cc8b6f653a"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -125,21 +125,21 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.101"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.101#ff694ec2f908f9ab4761bbf87c6051cc8b6f653a"
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.101"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.101#ff694ec2f908f9ab4761bbf87c6051cc8b6f653a"
 dependencies = [
  "rubato",
 ]
 
 [[package]]
 name = "dsync-ptp"
-version = "1.29.0"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.29.0#f3c34bccfd14c3ce9e5a5ee672763b849893e10c"
+version = "1.33.1"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.33.1#f45090fb0be4eb756441f9eed3ed0c10d6ffeb0e"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -281,7 +281,7 @@ dependencies = [
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.101#ff694ec2f908f9ab4761bbf87c6051cc8b6f653a"
 dependencies = [
  "fastrand",
  "flume",
