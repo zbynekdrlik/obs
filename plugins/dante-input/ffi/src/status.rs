@@ -3,9 +3,11 @@
 //! frames the network never brought, rx_holes samples the pump read before their packet came (OBS
 //! got silence there), underruns blocks the pump skipped (OBS never got them). late_blocks and
 //! overruns are timing only: a block run up to the margin late still reads its own samples.
-//! wire_late, wake_delay_us and wake_delay_peak_us (dlink v0.6.101, dstack #234, Linux; 0 on
-//! Windows) tell a late packet late on the wire from our RX thread's late wake; they come last on
-//! the line, so the tokens before them keep their order (camera-box#1510).
+//! wire_late, wake_delay_us and wake_delay_peak_us (dlink v0.6.101, dstack #234) tell a late
+//! packet late on the wire from our RX thread's late wake; they come last on the line, so the
+//! tokens before them keep their order (camera-box#1510). The wake delay is the RX pass's time less
+//! the kernel's receive stamp, which is wall clock (CLOCK_REALTIME): a forward step of it between a
+//! receive and the pass reads as a false wake delay, and stays in wake_delay_peak_us for the run.
 
 use std::fmt::Write as _;
 
@@ -50,7 +52,10 @@ pub struct Status {
     /// Packets already later than the flow's limit when the kernel received them (all flows):
     /// late on the wire, not by a late RX-thread wake.
     pub wire_late: u64,
-    /// The largest RX-thread wake delay in the heartbeat's last second (any flow), µs.
+    /// The largest RX-thread wake delay in dlink's last heartbeat second (any flow), µs: a
+    /// one-second sample, not the whole print interval (1 s, then 10 s), so wake_delay_peak_us
+    /// holds a spike between prints. dlink takes the second only with its clock ready; before that
+    /// it keeps the last one.
     pub wake_delay_us: u64,
     /// The largest RX-thread wake delay since the start (any flow), µs.
     pub wake_delay_peak_us: u64,
