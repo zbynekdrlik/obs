@@ -4,8 +4,7 @@
  * ~/.camera-box/dante-input.toml exists (camera-box's deploy writes it) and stops at unload, so its
  * Dante subscriptions stay up whatever the scenes do. Without the file there is no device and no
  * source kind at all: the box behaves as before. Every source of the kind outputs the device's RX
- * channels. With `tx` in the file (obs#41), OBS's track `tx_track` goes out on the device's TX
- * channels: a raw audio callback on that mix hands it to the device. */
+ * channels. */
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -39,9 +38,6 @@ static bool registered;
 /* The dante-input-obs thread's own: the stamp the next block gets, and the re-anchors. */
 static uint64_t next_ts;
 static uint64_t resyncs;
-/* The mix the TX taps (tx_track - 1); -1 while no raw audio callback is registered. */
-static long tx_mix = -1;
-
 /* Set once the first block reached a source (logged once, the proof of life in OBS). */
 static volatile long first_block_logged;
 
@@ -179,43 +175,6 @@ static void pin_module(void)
 		blog(LOG_WARNING, "dante-input start: could not hold the module loaded: %s", dlerror());
 }
 
-/* OBS's audio thread: the TX track's mix as float planes, into the device's TX FIFO. */
-static void on_tx_audio(void *param, size_t mix_idx, struct audio_data *data)
-{
-	UNUSED_PARAMETER(param);
-	UNUSED_PARAMETER(mix_idx);
-	const float *planes[2] = {(const float *)data->data[0], (const float *)data->data[1]};
-	dante_input_tx_push(device, planes, planes[1] ? 2 : 1, data->frames);
-}
-
-/* Taps the TX track's mix when the device has TX: OBS hands it at the device's TX rate, stereo. */
-static void start_tx(void)
-{
-	uint32_t track = dante_input_tx_track(device);
-	if (!track)
-		return;
-	struct audio_convert_info conv = {
-		.samples_per_sec = dante_input_tx_rate(device),
-		.format = AUDIO_FORMAT_FLOAT_PLANAR,
-		.speakers = SPEAKERS_STEREO,
-	};
-	size_t mix = track - 1;
-	obs_add_raw_audio_callback(mix, &conv, on_tx_audio, NULL);
-	tx_mix = (long)mix;
-	blog(LOG_INFO, "dante-input start: TX taps OBS track %u (mix %zu) at %u Hz", track, mix,
-	     conv.samples_per_sec);
-}
-
-/* Untaps the TX track before the device stops, so no push reaches a stopped device. */
-static void stop_tx(void)
-{
-	if (tx_mix < 0)
-		return;
-	obs_remove_raw_audio_callback((size_t)tx_mix, on_tx_audio, NULL);
-	blog(LOG_INFO, "dante-input stop: TX untapped OBS mix %ld", tx_mix);
-	tx_mix = -1;
-}
-
 bool obs_module_load(void)
 {
 	const char *home = getenv("HOME");
@@ -241,7 +200,6 @@ bool obs_module_load(void)
 		device_channels = dante_input_channels(device);
 		os_atomic_set_long(&device_rate, (long)dante_input_sample_rate(device));
 		pin_module();
-		start_tx();
 	} else {
 		/* The source kind is still registered, so a scene that names it loads silent, not missing;
 		 * the reason is in the log as `dante-input error:`. */
@@ -257,7 +215,6 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
-	stop_tx();
 	if (device) {
 		dante_input_stop(device);
 		device = NULL;

@@ -59,20 +59,6 @@ pub struct Status {
     pub wake_delay_us: u64,
     /// The largest RX-thread wake delay since the start (any flow), µs.
     pub wake_delay_peak_us: u64,
-    /// The OBS track the TX carries, from 1; 0 without TX (obs#41). The tx_* tokens are 0 then.
-    pub tx_track: u32,
-    /// Frames the TX player gave the device.
-    pub tx_played: u64,
-    /// TX blocks with no OBS audio in the FIFO: silence went out.
-    pub tx_underruns: u64,
-    /// FIFO depths the TX player could not steer back (a skip or a refill).
-    pub tx_recentres: u64,
-    /// OBS frames the TX FIFO had no room for.
-    pub tx_overflows: u64,
-    /// The TX converter's correction, tenths of a ppm (printed as ppm with one decimal).
-    pub tx_ppm_tenths: i64,
-    /// The TX player waits for the FIFO's depth: silence goes out.
-    pub tx_priming: bool,
 }
 
 impl Status {
@@ -90,9 +76,7 @@ impl Status {
             " clock={} holdover={} gm={gm} polls={} re_anchors={} rx_packets={} rx_loss={} \
              rx_gaps={} rx_late={} socket_drops={} blocks={} underruns={} overruns={} delivered_frames={} \
              rx_holes={} rx_written_late={} late_blocks={} rebootstraps={} max_process_us={} \
-             obs_dropped={} max_obs_us={} wire_late={} wake_delay_us={} wake_delay_peak_us={} \
-             tx_track={} tx_played={} tx_underruns={} tx_recentres={} tx_overflows={} tx_ppm={:.1} \
-             tx_priming={}",
+             obs_dropped={} max_obs_us={} wire_late={} wake_delay_us={} wake_delay_peak_us={}",
             if self.media_clock { "media" } else { "free" },
             u8::from(self.holdover),
             self.clock_polls,
@@ -116,26 +100,8 @@ impl Status {
             self.wire_late,
             self.wake_delay_us,
             self.wake_delay_peak_us,
-            self.tx_track,
-            self.tx_played,
-            self.tx_underruns,
-            self.tx_recentres,
-            self.tx_overflows,
-            self.tx_ppm_tenths as f64 / 10.0,
-            u8::from(self.tx_priming),
         );
         s
-    }
-
-    /// Takes the TX's counts (obs#41).
-    pub fn tx(&mut self, c: crate::tx::TxCounts) {
-        self.tx_track = c.track;
-        self.tx_played = c.played;
-        self.tx_underruns = c.underruns;
-        self.tx_recentres = c.recentres;
-        self.tx_overflows = c.overflows;
-        self.tx_ppm_tenths = (c.ppm * 10.0).round() as i64;
-        self.tx_priming = c.priming;
     }
 
     /// Reads the device's counts from `media`.
@@ -257,13 +223,6 @@ mod tests {
             wire_late: 14,
             wake_delay_us: 15,
             wake_delay_peak_us: 16,
-            tx_track: 1,
-            tx_played: 96000,
-            tx_underruns: 17,
-            tx_recentres: 18,
-            tx_overflows: 19,
-            tx_ppm_tenths: -125,
-            tx_priming: false,
         };
         assert_eq!(
             st.line(),
@@ -271,9 +230,7 @@ mod tests {
              rx_packets=100 rx_loss=3 rx_gaps=1 rx_late=2 socket_drops=4 blocks=50 underruns=5 \
              overruns=6 delivered_frames=4800 rx_holes=7 rx_written_late=8 late_blocks=9 \
              rebootstraps=10 max_process_us=11 obs_dropped=12 max_obs_us=13 \
-             wire_late=14 wake_delay_us=15 wake_delay_peak_us=16 \
-             tx_track=1 tx_played=96000 tx_underruns=17 tx_recentres=18 tx_overflows=19 \
-             tx_ppm=-12.5 tx_priming=0"
+             wire_late=14 wake_delay_us=15 wake_delay_peak_us=16"
         );
     }
 
@@ -299,7 +256,7 @@ mod tests {
         );
         assert!(
             st.line()
-                .contains(" max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000 "),
+                .ends_with(" max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000"),
             "{}",
             st.line()
         );
@@ -339,31 +296,6 @@ mod tests {
         assert!(
             line.starts_with("dante-input status: clock=free holdover=1 gm=none "),
             "{line}"
-        );
-    }
-
-    /// obs#41: the TX's counts land on the line; the ppm rounds to a tenth.
-    #[test]
-    fn the_tx_counts_land_on_the_line_and_without_tx_they_read_0() {
-        let mut st = Status::default();
-        assert!(st.line().ends_with(
-            "tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0"
-        ));
-        st.tx(crate::tx::TxCounts {
-            track: 1,
-            played: 4800,
-            underruns: 2,
-            recentres: 1,
-            overflows: 3,
-            ppm: 4.26,
-            priming: true,
-        });
-        assert!(
-            st.line().ends_with(
-                "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1"
-            ),
-            "{}",
-            st.line()
         );
     }
 }
