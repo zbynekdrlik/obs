@@ -4,15 +4,15 @@
 //! OBS makes its mix on its own clock (the system clock); the device sends on dlink's media clock
 //! (PTP). The two drift, so the mix goes through dlink's bridge (dstack #241, dsend's): OBS's
 //! audio thread writes a [`Fifo`] at OBS's rate ([`TxIn::push`]), and the pump reads it through
-//! the ASRC [`Player`] at the device's app rate ([`TxOut::fill`]). The player keeps the FIFO at
-//! [`player::TARGET_S`] (40 ms) by moving its ratio at most 300 ppm, 5 ppm/s; an underrun plays
-//! silence and adds a cushion of up to [`player::CUSHION_MAX_S`]. So OBS's mix reaches the wire
-//! the FIFO's depth plus dlink's TX path later: ~60 ms at a 20 ms budget.
+//! the ASRC [`Player`] at the device's app rate ([`TxOut::fill`]). The player keeps the FIFO at the
+//! device's app buffer ([`AppBuffer`], dstack #247: OBS's 1024-frame chunk and one pump block,
+//! 22.667 ms on a 96 kHz device) by moving its ratio a few ppm. OBS's mix reaches the wire that
+//! buffer plus dlink's TX path later; the device logs every term at its start.
 
 use std::sync::Arc;
 
 use dlink::Block;
-use dlink::bridge::{Fifo, Player, Stats, fifo_for, player};
+use dlink::bridge::{AppBuffer, Fifo, Player, Stats, fifo_for};
 
 use crate::config::TX_CHANNELS;
 
@@ -25,6 +25,7 @@ pub struct TxIn {
     stats: Arc<Stats>,
     track: u32,
     rate: u32,
+    buffer: AppBuffer,
 }
 
 /// The pump side: fills the device's TX outputs from the player.
@@ -52,18 +53,31 @@ pub struct TxCounts {
     pub priming: bool,
 }
 
-/// The TX of OBS's track `track` (from 1): OBS writes at `obs_rate`, the pump reads at `app_rate`.
-pub fn tx(track: u32, obs_rate: u32, app_rate: u32) -> Result<(TxIn, TxOut), String> {
+/// The TX of OBS's track `track` (from 1): OBS writes at `obs_rate`, the pump reads at `app_rate`,
+/// the FIFO held at `buffer` (the device's `bridge_buffer`).
+pub fn tx(
+    track: u32,
+    obs_rate: u32,
+    app_rate: u32,
+    buffer: AppBuffer,
+) -> Result<(TxIn, TxOut), String> {
     let fifo = Arc::new(fifo_for(TX_CHANNELS, obs_rate));
     let stats = Arc::new(Stats::default());
-    let player = Player::new(Arc::clone(&fifo), obs_rate, app_rate, Arc::clone(&stats))
-        .map_err(|e| format!("the TX rate conversion {obs_rate} to {app_rate} Hz: {e}"))?;
+    let player = Player::new(
+        Arc::clone(&fifo),
+        obs_rate,
+        app_rate,
+        buffer,
+        Arc::clone(&stats),
+    )
+    .map_err(|e| format!("the TX rate conversion {obs_rate} to {app_rate} Hz: {e}"))?;
     Ok((
         TxIn {
             fifo,
             stats,
             track,
             rate: obs_rate,
+            buffer,
         },
         TxOut {
             player,
@@ -81,6 +95,11 @@ impl TxIn {
     /// The rate OBS writes at, Hz.
     pub fn rate(&self) -> u32 {
         self.rate
+    }
+
+    /// The FIFO's depth the player holds, ms (the app buffer, before dlink's TX path).
+    pub fn target_ms(&self) -> f64 {
+        self.buffer.target_ns() as f64 / 1_000_000.0
     }
 
     /// Writes `frames` frames of OBS's planes: the left and right channels, a missing right
@@ -130,11 +149,6 @@ impl TxOut {
             done += n;
         }
     }
-}
-
-/// The FIFO's depth the player holds, ms (the TX's own latency before dlink's TX path).
-pub fn target_ms() -> f64 {
-    player::TARGET_S * 1_000.0
 }
 
 #[cfg(test)]

@@ -365,3 +365,40 @@ fn a_device_with_tx_states_its_tx_hand_off_with_dlink_s_work_margin() {
         split.work_margin_ns + split.tx_convert_ns
     );
 }
+
+#[test]
+fn the_stream_pc_s_program_tx_latency_is_the_one_dstack_quotes() {
+    // dstack #247 / v0.6.112 (peer, 13.11.2026): the stream PC's device with TX, 96 kHz network,
+    // OBS at 48 kHz, block 128, as camera-box will configure it (a 1 ms, b 12.041666 ms to keep
+    // its RX latency): app buffer 22.667 + W 6 + TX converter 0.635 + P 13.042 = ~42.3 ms.
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        &format!(
+            "{TX}\nnetwork_rate = 96000\nnetwork_latency_ms = 1\nreceive_buffer_ms = 12.041666"
+        ),
+    ));
+    let cfg = InputConfig::load(&path).unwrap();
+    let split = cfg.split(48_000).unwrap();
+    let buffer = cfg.dlink(48_000).bridge_buffer().unwrap();
+    assert_eq!(buffer.target_ns(), 22_666_666);
+    assert_eq!(split.latency_ns, 13_041_666);
+    assert_eq!(split.work_margin_ns, 6_000_000);
+    assert_eq!((split.tx_convert_ns + 500) / 1_000, 635);
+    let total = split.tx_path_ns + buffer.target_ns();
+    assert!(
+        (42_300_000..42_400_000).contains(&total),
+        "{total} {split:?}"
+    );
+}
+
+#[test]
+fn a_device_without_tx_has_no_app_buffer() {
+    let (_d, path) = write(GOOD);
+    assert_eq!(
+        InputConfig::load(&path)
+            .unwrap()
+            .dlink(48_000)
+            .bridge_buffer(),
+        None
+    );
+}

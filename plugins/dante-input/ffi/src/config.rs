@@ -14,6 +14,9 @@ pub const MAX_CHANNELS: usize = 8;
 pub const TX_CHANNELS: usize = 2;
 /// OBS's audio tracks, from 1 (`MAX_AUDIO_MIXES`).
 pub const TRACKS: u32 = 6;
+/// The frames OBS hands a raw audio callback at once (`AUDIO_OUTPUT_FRAMES`): the TX bridge's
+/// producer chunk (dstack #247).
+pub const OBS_CHUNK_FRAMES: u64 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,6 +166,15 @@ impl InputConfig {
         })
     }
 
+    /// The rate OBS hands the TX track at: OBS's own (`obs_rate`), else the app rate OBS takes.
+    pub fn obs_side_rate(&self, obs_rate: u32) -> u32 {
+        if obs_rate == 0 {
+            self.app_rate(obs_rate)
+        } else {
+            obs_rate
+        }
+    }
+
     /// The OBS track the TX carries, from 1; 0 when the file has no TX.
     pub fn tx_track(&self) -> u32 {
         if self.tx.is_empty() {
@@ -193,6 +205,13 @@ impl InputConfig {
         }
         if let Some(rate) = self.network_rate {
             c = c.network_rate(rate);
+        }
+        if !self.tx.is_empty() {
+            // dstack #247: the TX bridge's FIFO holds OBS's chunk and one pump block.
+            c = c.app_buffer(
+                dlink::bridge::chunk_ns(OBS_CHUNK_FRAMES, self.obs_side_rate(obs_rate)),
+                None,
+            );
         }
         if let Some(base) = self.rx_port_base {
             c = c.rx_port_base(base);

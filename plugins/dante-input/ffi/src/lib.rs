@@ -454,16 +454,19 @@ impl DanteInput {
         let (tx_in, tx_out) = match cfg.tx_track() {
             0 => (None, None),
             track => {
-                // OBS writes at its own rate (0 when unknown: then the app rate, which OBS takes).
-                let obs = if obs_rate == 0 { rate } else { obs_rate };
-                let (i, o) = tx::tx(track, obs, rate)?;
+                let obs = cfg.obs_side_rate(obs_rate);
+                let buffer = link_cfg
+                    .bridge_buffer()
+                    .ok_or("the TX has no app buffer (Config::app_buffer)")?;
+                let (i, o) = tx::tx(track, obs, rate, buffer)?;
                 log(
                     LOG_INFO,
                     &format!(
-                        "dante-input start: TX of OBS track {track} on {:?}: OBS {obs} Hz into a FIFO held at {} ms by dlink's ASRC player, read at {rate} Hz; tx_path_ns={}",
+                        "dante-input start: TX of OBS track {track} on {:?}: OBS {obs} Hz into a FIFO held at {} ms (the app buffer) by dlink's ASRC player, read at {rate} Hz; tx_path_ns={} obs_to_wire_ns={}",
                         cfg.tx,
-                        tx::target_ms(),
+                        i.target_ms(),
                         split.tx_path_ns,
+                        split.tx_path_ns + buffer.target_ns(),
                     ),
                 );
                 (Some(Arc::new(i)), Some(o))
