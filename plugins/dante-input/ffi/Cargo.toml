@@ -1,6 +1,6 @@
 [package]
 name = "dante-input-ffi"
-version = "0.4.28"
+version = "0.4.29"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false
@@ -34,7 +34,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.106: latency in named terms (dstack #244): (a) network latency + (b) receive buffer = P, the app hand-off and W stated; Config::budget_ns and BUDGET_NS are gone, so dante-input.toml's latency_ms is replaced by network_latency_ms / receive_buffer_ms. Neither set: no latency change. BREAKING for the file.
 # v0.6.112: the bridge FIFO's target is the app buffer, derived from the producer's chunk + one pump block (dstack #247): OBS's 1024 frames at 48 kHz + 1.333 ms = 22.667 ms on a 96 kHz device, not a fixed 40 ms. Config::app_buffer / bridge_buffer; Player::new takes the buffer. Breaking for the bridge only.
 # v0.6.118: fixed flow ports from the device's slot in the dstack flow range 29800-31847 (dstack #264, owner 13.11.2026), so one generic Dante-leg filter fits every PC; an unset rx_port_base now means the slot's own block. A device whose ARC port is no slot's (4440-4471) must set both bases. RX status names the transmitter (dstack #266).
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.118" }
+# v0.6.125: a reordered RX packet fills its hole and counts as reordered, so gaps/gap_frames (rx_gaps/rx_loss) count only holes still open at playout (dstack #278, camera-box issue 1508); a once-a-minute INFO line per RX flow gives the wake delay p50/p99/p99.9/max and the network latency (dstack #234, camera-box issue 1510). RxCounts gains reordered. No latency change.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.125" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

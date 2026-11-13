@@ -81,6 +81,15 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
     ] {
         assert!(line.contains(field), "{field} missing: {line}");
     }
+    // obs#45 (dstack #278): reorders apart from loss, the last token, a count.
+    let reordered = line
+        .rsplit_once(" rx_reordered=")
+        .map(|(_, v)| v)
+        .unwrap_or_else(|| panic!("rx_reordered missing: {line}"));
+    assert!(
+        reordered.parse::<u64>().is_ok(),
+        "rx_reordered is the last token, a count: {line}"
+    );
     // dtray's obs part: dlink calls the hook on its own thread, so the first reads may not
     // carry it yet.
     let mut app = serde_json::Value::Null;
