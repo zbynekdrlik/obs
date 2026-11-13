@@ -10,7 +10,7 @@ paths:
 
 # dante-input latency
 
-- Since v0.4.27 (dlink v0.6.106, dstack #244) the latency is named terms: `network_latency_ms` (a) + `receive_buffer_ms` (b) = the Dante latency P, plus each direction's app hand-off (c). `latency_ms` is gone and refused (strict file). Neither term set keeps P as before (13.041666 ms at 96/48 RX only). `InputConfig::split` maps dlink's ns refusal to the file's keys. obs never states latency numbers itself: quote dstack's start-log lines (`dante-input start: latency ...`) or dstack. A dlink pin bump can break the API (budget_ns was removed): run `cargo clippy --all-targets` before pushing.
+- Since v0.4.27 (dlink v0.6.106, dstack #244) the latency is named terms: `network_latency_ms` (a) + `receive_buffer_ms` (b) = the Dante latency P, plus each direction's app hand-off (c). `latency_ms` is gone and refused (strict file). Neither term set keeps P as before (13.041666 ms at 96/48 RX only). `InputConfig::split` maps dlink's ns refusal to the file's keys. obs never states latency numbers itself: quote dlink's own start-log lines (`dante-input dlink: ... dlink latency: ...`) or dstack. A dlink pin bump can break the API (budget_ns was removed): run `cargo clippy --all-targets` before pushing.
 
 # dante-input CPUs
 

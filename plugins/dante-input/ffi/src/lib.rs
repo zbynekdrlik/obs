@@ -437,10 +437,6 @@ impl DanteInput {
                 split.latency_ns, split.rx_path_ns, split.tx_path_ns,
             ),
         );
-        // dstack #244: each term on its own line, never one lump.
-        for line in split.lines(link_cfg.directions(), link_cfg.terms()) {
-            log(LOG_INFO, &format!("dante-input start: latency {line}"));
-        }
         let n = cfg.rx.len();
         let feed = Arc::new(Feed::default());
         let gate = Gate::new();
