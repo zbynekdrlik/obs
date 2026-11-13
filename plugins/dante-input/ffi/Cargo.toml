@@ -1,6 +1,6 @@
 [package]
 name = "dante-input-ffi"
-version = "0.4.26"
+version = "0.4.27"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false
@@ -30,7 +30,10 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.67: an unanswered Dante flow request is retried 6 s after it instead of after the full backoff (dstack #20); on stream-snv 10.11.2026 dante_input came back ~10 s after mbc following a NIC restart (camera-box). No API or latency change.
 # v0.6.78: dsync-ptp v1.29.0 measures the PTP phase on the delay floor, so one-sided late receive stamps under OBS load no longer move it; on strih-snv 10.11.2026 dsync lost its phase lock every 2-15 min with OBS at ~600 % CPU (camera-box). No API or latency change.
 # v0.6.101: per RX flow on Linux, wire_late and the RX thread's wake delay (SO_TIMESTAMPNS), on the status line (dstack #234, camera-box#1510). Passes v0.6.99 (Link::start fails fast again; v0.6.98 skipped) and dsync-ptp v1.33.1. Additive API, no latency change.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.101" }
+# v0.6.103: dlink::bridge (Fifo + the ASRC Player, moved from dstack-endpoint without cpal) for the TX of an OBS track (dstack #241, obs#41). Additive API; a device with TX splits its budget for both directions.
+# v0.6.106: latency in named terms (dstack #244): (a) network latency + (b) receive buffer = P, the app hand-off and W stated; Config::budget_ns and BUDGET_NS are gone, so dante-input.toml's latency_ms is replaced by network_latency_ms / receive_buffer_ms. Neither set: no latency change. BREAKING for the file.
+# v0.6.112: the bridge FIFO's target is the app buffer, derived from the producer's chunk + one pump block (dstack #247): OBS's 1024 frames at 48 kHz + 1.333 ms = 22.667 ms on a 96 kHz device, not a fixed 40 ms. Config::app_buffer / bridge_buffer; Player::new takes the buffer. Breaking for the bridge only.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.112" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

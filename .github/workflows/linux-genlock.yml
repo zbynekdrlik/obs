@@ -686,17 +686,21 @@ jobs:
           sudo ip link add dante0 type dummy
           sudo ip addr add 10.99.0.1/24 dev dante0
           sudo ip link set dante0 up
-          for mode in absent bad-iface running; do
+          for mode in absent bad-iface running running-tx; do
             home="$RUNNER_TEMP/home-$mode"
             mkdir -p "$home"
             case "$mode" in
               bad-iface) iface=nosuch0 ;;
-              running) iface=dante0 ;;
+              running|running-tx) iface=dante0 ;;
               *) iface="" ;;
             esac
             if [ -n "$iface" ]; then
               mkdir -p "$home/.camera-box"
               printf 'name = "obs-ci"\niface = "%s"\nnetwork_rate = 96000\nrx = ["Master L", "Master R"]\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 47200\n' "$iface" > "$home/.camera-box/dante-input.toml"
+            fi
+            # obs#41: the TX of OBS's track 1 on the same device (dlink's default latency terms).
+            if [ "$mode" = running-tx ]; then
+              printf 'tx = ["OBS program L", "OBS program R"]\n' >> "$home/.camera-box/dante-input.toml"
             fi
             echo "== $mode"
             HOME="$home" xvfb-run -a "$test_bin" "$so" "$mode"

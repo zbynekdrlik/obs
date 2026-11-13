@@ -7,6 +7,9 @@
  *                                           is registered, the device is not, `dante-input error:`.
  *   module_test <dante-input.so> running    the config names a real interface: the device runs, a
  *                                           source is created and destroyed, unload stops it.
+ *   module_test <dante-input.so> running-tx the config also has `tx` (obs#41): OBS's track 1 mix
+ *                                           reaches the device's TX FIFO (the status line's tx_*
+ *                                           tokens move), unload untaps it before the stop.
  *
  * The caller writes HOME/.camera-box/dante-input.toml for the last two. Exit 0 = every check held. */
 
@@ -17,6 +20,7 @@
 #include <util/threading.h>
 
 #include <stdarg.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -68,6 +72,20 @@ static bool mapped(const char *name)
 	return found;
 }
 
+/* The value of ` <token>=` in the last status line that has it; 0 when none has. */
+static unsigned long long last_value(const char *token)
+{
+	unsigned long long v = 0;
+	pthread_mutex_lock(&logged_mutex);
+	const char *p = logged.array;
+	while (p && (p = strstr(p, token)) != NULL) {
+		p += strlen(token);
+		v = strtoull(p, NULL, 10);
+	}
+	pthread_mutex_unlock(&logged_mutex);
+	return v;
+}
+
 /* `s` logged within `ms` (libobs destroys a released source on another thread). */
 static bool logged_within(const char *s, int ms)
 {
@@ -82,7 +100,7 @@ static bool logged_within(const char *s, int ms)
 int main(int argc, char **argv)
 {
 	if (argc != 3) {
-		fprintf(stderr, "usage: %s <dante-input.so> absent|bad-iface|running\n", argv[0]);
+		fprintf(stderr, "usage: %s <dante-input.so> absent|bad-iface|running|running-tx\n", argv[0]);
 		return 2;
 	}
 	const char *so = argv[1];
@@ -127,12 +145,38 @@ int main(int argc, char **argv)
 		obs_source_release(src);
 		expect(logged_within("dante-input source: destroyed (0 source(s) left)", 3000),
 		       "the source is destroyed within 3 s");
+	} else if (strcmp(mode, "running-tx") == 0) {
+		expect(logged_has("(device running)"), "the device runs");
+		expect(logged_has("1 RX channels, 2 TX channels") || logged_has("2 RX channels, 2 TX channels"),
+		       "the device has its 2 TX channels");
+		expect(logged_has("dante-input start: TX taps OBS track 1 (mix 0) at 48000 Hz"),
+		       "the TX taps OBS's track 1 at OBS's 48 kHz");
+		/* OBS's audio thread outputs the mix on its own; the FIFO primes at 40 ms and the
+		 * player then plays it. The status line comes every second at the start. */
+		expect(logged_within(" tx_track=1 ", 3000), "the status line carries the TX track");
+		expect(logged_within(" tx_priming=0", 4000), "the TX player primed on OBS's mix");
+		unsigned long long first = last_value(" tx_played=");
+		os_sleep_ms(2500);
+		unsigned long long later = last_value(" tx_played=");
+		expect(later > first && first > 0, "tx_played grows while OBS runs");
+		fprintf(stderr, "tx_played %llu then %llu\n", first, later);
+		expect(last_value(" tx_overflows=") == 0 && logged_has(" tx_overflows="),
+		       "no OBS frame was dropped at the FIFO (the last status line)");
 	} else {
 		fprintf(stderr, "unknown mode %s\n", mode);
 		return 2;
 	}
 
 	obs_shutdown();
+	if (strcmp(mode, "running-tx") == 0) {
+		expect(logged_has("dante-input stop: TX untapped OBS mix 0"), "unload untaps the TX");
+		expect(logged_has("dante-input stop: device stopped (Done)"), "unload stops the device cleanly");
+		pthread_mutex_lock(&logged_mutex);
+		const char *untap = strstr(logged.array, "TX untapped");
+		const char *stopped = strstr(logged.array, "dante-input stop: device stopped");
+		pthread_mutex_unlock(&logged_mutex);
+		expect(untap && stopped && untap < stopped, "the TX is untapped before the device stops");
+	}
 	if (strcmp(mode, "running") == 0) {
 		/* RTLD_NODELETE held: the module stays mapped after OBS unloaded it. */
 		expect(mapped("dante-input.so"), "the module stays mapped after unload (pinned)");

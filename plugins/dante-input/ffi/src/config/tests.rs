@@ -28,14 +28,14 @@ fn write(text: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 #[test]
-fn a_full_file_reads_with_dlink_s_default_budget_and_the_state_file_next_to_it() {
+fn a_full_file_reads_with_dlink_s_default_latency_terms_and_the_state_file_next_to_it() {
     let (_d, path) = write(GOOD);
     let cfg = InputConfig::load(&path).unwrap();
     assert_eq!(cfg.name, "strih-obs");
     assert_eq!(cfg.iface, "enp7s0.70");
-    // dlink v0.6.28: the default budget is 15 ms (owner 4.11.2026, dstack#1); the file follows it.
-    assert_eq!(cfg.latency_ms, 15);
-    assert_eq!(u64::from(cfg.latency_ms) * 1_000_000, dlink::BUDGET_NS);
+    // dlink v0.6.106 (dstack #244): no term set means dlink's defaults, which keep P as before.
+    assert_eq!(cfg.network_latency_ms, None);
+    assert_eq!(cfg.receive_buffer_ms, None);
     assert_eq!(cfg.rx, ["Master L", "Master R"]);
     assert_eq!(
         cfg.state_file,
@@ -53,8 +53,8 @@ fn the_dlink_device_takes_ports_subscriptions_latency_and_no_tx() {
         .device()
         .unwrap();
     assert_eq!(dev.name, "strih-obs");
-    // dstack #68: the budget (15 ms by default) is the whole path. At 48 kHz, block 128 (2.67 ms)
-    // leaves 12.33 ms of Dante latency, in whole samples (592).
+    // dlink v0.6.106 (dstack #244): the default terms keep P as before: 592 whole samples at
+    // 48 kHz RX only (the old 15 ms budget less the 2.67 ms block).
     assert_eq!(dev.latency_ns, 592 * 1_000_000_000 / 48_000);
     assert_eq!(
         (dev.arc_port, dev.cmc_port, dev.flows_port),
@@ -67,18 +67,40 @@ fn the_dlink_device_takes_ports_subscriptions_latency_and_no_tx() {
 }
 
 #[test]
-fn a_latency_from_the_file_reaches_the_device() {
+fn the_file_s_latency_terms_reach_the_device() {
     let (_d, path) = write(&GOOD.replace(
         "rx_port_base = 47200",
-        "rx_port_base = 47200\nlatency_ms = 20",
+        "rx_port_base = 47200\nnetwork_latency_ms = 2\nreceive_buffer_ms = 5",
     ));
-    let dev = InputConfig::load(&path)
-        .unwrap()
-        .dlink(48_000)
-        .device()
-        .unwrap();
-    // 20 ms budget less the 2.67 ms block: 832 samples of Dante latency.
-    assert_eq!(dev.latency_ns, 832 * 1_000_000_000 / 48_000);
+    let cfg = InputConfig::load(&path).unwrap();
+    let split = cfg.split(48_000).unwrap();
+    assert_eq!(split.network_latency_ns, 2_000_000);
+    assert_eq!(split.receive_buffer_ns, 5_000_000);
+    // P = (a) + (b): 7 ms, 336 whole samples at 48 kHz.
+    let dev = cfg.dlink(48_000).device().unwrap();
+    assert_eq!(dev.latency_ns, 7_000_000);
+}
+
+#[test]
+fn a_fraction_of_a_ms_is_a_term_dante_controller_offers() {
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\nnetwork_latency_ms = 0.25",
+    ));
+    let split = InputConfig::load(&path).unwrap().split(48_000).unwrap();
+    assert_eq!(split.network_latency_ns, 250_000);
+}
+
+#[test]
+fn latency_ms_is_gone_and_a_file_that_still_sets_it_is_refused() {
+    // dstack #244: dlink has no single budget any more; no deployed file sets it (camera-box,
+    // 13.11.2026).
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 47200\nlatency_ms = 15",
+    ));
+    let e = InputConfig::load(&path).unwrap_err();
+    assert!(e.contains("unknown field `latency_ms`"), "{e}");
 }
 
 #[test]
@@ -115,24 +137,27 @@ fn a_missing_file_names_the_path() {
 }
 
 #[test]
-fn a_latency_outside_4_to_100_ms_is_refused() {
-    for bad in [0, 3, 101] {
+fn a_term_of_0_or_less_or_over_100_ms_is_refused_by_its_key() {
+    for key in ["network_latency_ms", "receive_buffer_ms"] {
+        for bad in ["0", "-1", "100.5"] {
+            let (_d, path) = write(&GOOD.replace(
+                "rx_port_base = 47200",
+                &format!("rx_port_base = 47200\n{key} = {bad}"),
+            ));
+            let e = InputConfig::load(&path).unwrap_err();
+            assert!(
+                e.contains(&format!(
+                    "{key}: {} is not over 0 and up to 100 ms",
+                    bad.parse::<f64>().unwrap()
+                )),
+                "{e}"
+            );
+        }
         let (_d, path) = write(&GOOD.replace(
             "rx_port_base = 47200",
-            &format!("rx_port_base = 47200\nlatency_ms = {bad}"),
+            &format!("rx_port_base = 47200\n{key} = 100"),
         ));
-        let e = InputConfig::load(&path).unwrap_err();
-        assert!(
-            e.contains(&format!("latency_ms: {bad} is not one of 4..=100")),
-            "{e}"
-        );
-    }
-    for good in [4, 100] {
-        let (_d, path) = write(&GOOD.replace(
-            "rx_port_base = 47200",
-            &format!("rx_port_base = 47200\nlatency_ms = {good}"),
-        ));
-        assert_eq!(InputConfig::load(&path).unwrap().latency_ms, good);
+        InputConfig::load(&path).unwrap();
     }
 }
 
@@ -217,36 +242,43 @@ fn the_example_config_reads_and_subscribes_from_two_transmitters() {
 }
 
 #[test]
-fn a_budget_the_work_leaves_under_4_ms_of_is_refused_by_its_key() {
-    // dlink v0.6.28: an RX-only device's work is the RX side alone. At a 96 kHz network with OBS
-    // at 48 kHz that is the 1.33 ms block and the half-band converter's 0.625 ms RX delay, so 5 ms
-    // leaves 3.04 ms and 6 ms leaves 4.04 ms; the RX path is the whole budget.
-    let net = |ms: u32| {
+fn a_dante_latency_under_dlink_s_floor_is_refused_by_the_file_s_keys() {
+    // dlink's floor for an RX-only device is 4 ms (MIN_LATENCY_NS): P = (a) + (b) under it is
+    // refused, named by the file's keys.
+    let terms = |a: &str, b: &str| {
         GOOD.replace(
             "rx_port_base = 47200",
-            &format!("rx_port_base = 47200\nnetwork_rate = 96000\nlatency_ms = {ms}"),
+            &format!(
+                "rx_port_base = 47200\nnetwork_rate = 96000\nnetwork_latency_ms = {a}\nreceive_buffer_ms = {b}"
+            ),
         )
     };
-    let (_d, path) = write(&net(5));
+    let (_d, path) = write(&terms("0.25", "1"));
     let e = InputConfig::load(&path).unwrap().split(48_000).unwrap_err();
-    assert!(e.starts_with("latency_ms: 5 is too small here: "), "{e}");
-    let (_d, path) = write(&net(6));
+    assert!(
+        e.starts_with(
+            "network_latency_ms + receive_buffer_ms (0.25 ms + 1 ms) are too small here:"
+        ),
+        "{e}"
+    );
+    let (_d, path) = write(&terms("1", "3"));
     let split = InputConfig::load(&path).unwrap().split(48_000).unwrap();
-    assert!(split.latency_ns >= 4_000_000, "{split:?}");
-    assert!(split.rx_path_ns <= 6_000_000, "{split:?}");
+    assert_eq!(split.latency_ns, 4_000_000);
 }
 
 #[test]
 fn strih_snv_s_default_split_is_the_one_dstack_publishes() {
-    // camera-box#1485: strih-snv runs a 96 kHz network with OBS at 48 kHz and no latency_ms. The
-    // dstack v0.6.28 CHANGELOG gives this RX-only pair P 13041666 ns at the 15 ms default; the
-    // start line prints it as dante_latency_ns, and the RX path is the whole budget.
+    // camera-box#1485: strih-snv runs a 96 kHz network with OBS at 48 kHz and sets no latency
+    // term. P stays 13041666 ns (dstack v0.6.28), now stated as 1 ms network latency + 12.041666
+    // ms receive buffer (dstack #244, v0.6.106); the RX path is P + the hand-off, ~15 ms.
     let (_d, path) = write(&GOOD.replace(
         "rx_port_base = 47200",
         "rx_port_base = 47200\nnetwork_rate = 96000",
     ));
     let split = InputConfig::load(&path).unwrap().split(48_000).unwrap();
     assert_eq!(split.latency_ns, 13_041_666);
+    assert_eq!(split.network_latency_ns, 1_000_000);
+    assert_eq!(split.receive_buffer_ns, 12_041_666);
     assert!(
         (14_990_000..=15_000_000).contains(&split.rx_path_ns),
         "{split:?}"
@@ -265,32 +297,123 @@ fn a_zero_rate_is_refused_on_load_by_its_key() {
     }
 }
 
+const TX: &str = "rx_port_base = 47200\ntx = [\"OBS program L\", \"OBS program R\"]";
+
 #[test]
-fn the_floor_at_the_tested_rate_pairs() {
-    // (network/app rates, the least whole-ms budget that leaves 4 ms): dlink v0.6.28's half-band
-    // converter makes 96/48 the one pair at 6 ms.
-    for (rates, floor) in [
-        ("", 7),
-        ("network_rate = 88200", 7),
-        ("network_rate = 96000", 6),
-        ("network_rate = 96000\nsample_rate = 44100", 7),
-        ("network_rate = 96000\nsample_rate = 32000", 7),
-        ("sample_rate = 44100", 7),
+fn tx_channels_reach_the_device_and_carry_track_1_unless_set() {
+    // obs#41 (camera-box#1513): the stream OBS sends its program mix (track 1) on two TX channels.
+    let (_d, path) = write(&GOOD.replace("rx_port_base = 47200", TX));
+    let cfg = InputConfig::load(&path).unwrap();
+    assert_eq!(cfg.tx_track(), 1);
+    let dev = cfg.dlink(48_000).device().unwrap();
+    assert_eq!(dev.tx, ["OBS program L", "OBS program R"]);
+    assert_eq!(dev.rx, ["Master L", "Master R"]);
+
+    let (_d, path) = write(&GOOD.replace("rx_port_base = 47200", &format!("{TX}\ntx_track = 3")));
+    assert_eq!(InputConfig::load(&path).unwrap().tx_track(), 3);
+}
+
+#[test]
+fn without_tx_there_is_no_track() {
+    let (_d, path) = write(GOOD);
+    assert_eq!(InputConfig::load(&path).unwrap().tx_track(), 0);
+}
+
+#[test]
+fn a_tx_of_other_than_two_channels_or_a_track_outside_1_to_6_is_refused_by_its_key() {
+    for (keys, wanted) in [
+        (
+            "tx = [\"L\"]",
+            "tx: 1 channels; the TX takes 2 (left, right) or none",
+        ),
+        (
+            "tx = [\"L\", \"R\", \"C\"]",
+            "tx: 3 channels; the TX takes 2 (left, right) or none",
+        ),
+        ("tx_track = 1", "tx_track: set without tx"),
+        ("tx = [\"L\", \" \"]", "tx: a channel name is empty"),
+        ("tx = [\"L\", \"L\"]", "tx: both channels are named \"L\""),
+        (
+            "tx = [\"L\", \"R\"]\ntx_track = 0",
+            "tx_track: 0 is not one of 1..=6",
+        ),
+        (
+            "tx = [\"L\", \"R\"]\ntx_track = 7",
+            "tx_track: 7 is not one of 1..=6",
+        ),
     ] {
-        let cfg = |ms: u32| {
-            let (_d, path) = write(&GOOD.replace(
-                "rx_port_base = 47200",
-                &format!("rx_port_base = 47200\n{rates}\nlatency_ms = {ms}"),
-            ));
-            InputConfig::load(&path).unwrap().split(48_000)
-        };
-        let below = floor - 1;
-        assert!(
-            cfg(below)
-                .unwrap_err()
-                .starts_with(&format!("latency_ms: {below} is too small here: ")),
-            "{rates}"
-        );
-        assert!(cfg(floor).unwrap().latency_ns >= 4_000_000, "{rates}");
+        let (_d, path) = write(&GOOD.replace(
+            "rx_port_base = 47200",
+            &format!("rx_port_base = 47200\n{keys}"),
+        ));
+        let err = InputConfig::load(&path).unwrap_err();
+        assert!(err.contains(wanted), "{keys}: {err}");
     }
+}
+
+#[test]
+fn a_device_with_tx_states_its_tx_hand_off_with_dlink_s_work_margin() {
+    // dstack #244: with TX the TX path is the TX hand-off (c) (W + the converter) plus P, and W
+    // is dlink's WORK_MARGIN_NS unless set. The program TX's own latency comes from dstack #247.
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        &format!("{TX}\nnetwork_rate = 96000"),
+    ));
+    let split = InputConfig::load(&path).unwrap().split(48_000).unwrap();
+    assert_eq!(split.work_margin_ns, dlink::WORK_MARGIN_NS);
+    assert_eq!(split.tx_path_ns, split.tx_handoff_ns + split.latency_ns);
+    assert_eq!(
+        split.tx_handoff_ns,
+        split.work_margin_ns + split.tx_convert_ns
+    );
+}
+
+#[test]
+fn the_stream_pc_s_program_tx_latency_is_the_one_dstack_quotes() {
+    // dstack #247 / v0.6.112 (peer, 13.11.2026): the stream PC's device with TX, 96 kHz network,
+    // OBS at 48 kHz, block 128, as camera-box will configure it (a 1 ms, b 12.041666 ms to keep
+    // its RX latency): app buffer 22.667 + W 6 + TX converter 0.635 + P 13.042 = ~42.3 ms.
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        &format!(
+            "{TX}\nnetwork_rate = 96000\nnetwork_latency_ms = 1\nreceive_buffer_ms = 12.041666"
+        ),
+    ));
+    let cfg = InputConfig::load(&path).unwrap();
+    let split = cfg.split(48_000).unwrap();
+    let buffer = cfg.dlink(48_000).bridge_buffer().unwrap();
+    assert_eq!(buffer.target_ns(), 22_666_666);
+    assert_eq!(split.latency_ns, 13_041_666);
+    assert_eq!(split.work_margin_ns, 6_000_000);
+    assert_eq!((split.tx_convert_ns + 500) / 1_000, 635);
+    let total = split.tx_path_ns + buffer.target_ns();
+    assert!(
+        (42_300_000..42_400_000).contains(&total),
+        "{total} {split:?}"
+    );
+}
+
+#[test]
+fn a_device_without_tx_has_no_app_buffer() {
+    let (_d, path) = write(GOOD);
+    assert_eq!(
+        InputConfig::load(&path)
+            .unwrap()
+            .dlink(48_000)
+            .bridge_buffer(),
+        None
+    );
+}
+
+#[test]
+fn on_a_48_khz_device_the_app_buffer_is_obs_s_chunk_and_a_48_khz_block() {
+    // dlink sizes the block from the device's rate: 21.333 ms + 128 frames at 48 kHz (2.667 ms)
+    // = 24 ms (dstack v0.6.112 CHANGELOG).
+    let (_d, path) = write(&GOOD.replace("rx_port_base = 47200", TX));
+    let buffer = InputConfig::load(&path)
+        .unwrap()
+        .dlink(48_000)
+        .bridge_buffer()
+        .unwrap();
+    assert_eq!(buffer.target_ns(), 24_000_000);
 }

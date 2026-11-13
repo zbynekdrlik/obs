@@ -5,25 +5,18 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// The latency budget unless the file sets one: dlink's own default, 15 ms since dlink v0.6.28
-/// (owner ROZHODNUTÉ 4.11.2026, dstack#1; it was 10 ms, camera-box#1485). Since dlink
-/// v0.6.22 (dstack #68, owner 3.11.2026) it is each direction's whole path, the Dante latency
-/// and the work together; dlink gives the Dante latency what the work of the directions the
-/// device uses leaves (v0.6.24: RX only here, so dlink's RX path is the whole budget).
-/// Before v0.4.9 the same `latency_ms` was the Dante latency alone.
-pub const DEFAULT_LATENCY_MS: u32 = (dlink::BUDGET_NS / 1_000_000) as u32;
-/// dlink's least Dante latency, so no budget below it can work. The real floor depends on the
-/// rates and the block: [`InputConfig::split`] refuses a budget that leaves under 4 ms after
-/// the work (dlink v0.6.28, RX only: 6 ms at 96/48 kHz network/app, 7 ms at 48/48, 88.2/48,
-/// 96/44.1, 96/32 and 44.1/44.1 kHz, which the tests check).
-pub const MIN_LATENCY_MS: u32 = 4;
-/// Past this the program audio is too late to be any use.
-pub const MAX_LATENCY_MS: u32 = 100;
-// dlink's default budget is the file's default, so it must be one the file check takes; a dlink
-// bump past 100 ms would otherwise refuse every file without latency_ms.
-const _: () = assert!(DEFAULT_LATENCY_MS >= MIN_LATENCY_MS && DEFAULT_LATENCY_MS <= MAX_LATENCY_MS);
+/// The longest latency term the file may set, ms: past it the program audio is too late to be
+/// any use.
+pub const MAX_TERM_MS: f64 = 100.0;
 /// The most RX channels the source takes: OBS's widest speaker layout (7.1).
 pub const MAX_CHANNELS: usize = 8;
+/// The TX channels: the left and right of one OBS track (obs#41).
+pub const TX_CHANNELS: usize = 2;
+/// OBS's audio tracks, from 1 (`MAX_AUDIO_MIXES`).
+pub const TRACKS: u32 = 6;
+/// The frames OBS hands a raw audio callback at once (`AUDIO_OUTPUT_FRAMES`): the TX bridge's
+/// producer chunk (dstack #247).
+pub const OBS_CHUNK_FRAMES: u64 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,7 +27,7 @@ pub struct Subscription {
     pub tx_device: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputConfig {
     /// The device name Dante Controller lists.
@@ -43,9 +36,14 @@ pub struct InputConfig {
     pub iface: String,
     /// Where the device keeps what Dante Controller sets; next to the config unless set.
     pub state_file: Option<PathBuf>,
-    /// The latency budget, ms: each direction's whole path, which dlink splits (dstack #68).
-    #[serde(default = "default_latency")]
-    pub latency_ms: u32,
+    /// (a) The Dante network latency of the device's subscriptions, ms: usually one of Dante
+    /// Controller's 0.25, 0.5, 1, 2 or 5, but dlink takes any value and decides; it refuses only
+    /// a P = (a) + (b) under its floor. dlink's 1 ms unless set (dlink v0.6.106, dstack #244).
+    pub network_latency_ms: Option<f64>,
+    /// (b) This PC's receive buffer, ms: the RX thread's room to wake and pass, sized from the
+    /// status line's wake delays. Unset, dlink keeps the Dante latency P = (a) + (b) as it was
+    /// before v0.6.106 (13.041666 ms at 96/48 kHz RX only). `latency_ms` is gone (dstack #244).
+    pub receive_buffer_ms: Option<f64>,
     /// Hz: the rate OBS gets its blocks at. OBS's own audio rate unless set (owner, dstack #90:
     /// obs keeps OBS's rate, dlink converts).
     pub sample_rate: Option<u32>,
@@ -61,10 +59,12 @@ pub struct InputConfig {
     pub flow_slots: Option<usize>,
     #[serde(default)]
     pub subscribe: Vec<Subscription>,
-}
-
-fn default_latency() -> u32 {
-    DEFAULT_LATENCY_MS
+    /// The TX channels' names, left then right: the device sends OBS's track `tx_track` on them
+    /// (obs#41, camera-box#1513). Empty: no TX, the device is RX only as before.
+    #[serde(default)]
+    pub tx: Vec<String>,
+    /// The OBS audio track the TX carries, 1 to 6; track 1 unless set. Only with `tx`.
+    pub tx_track: Option<u32>,
 }
 
 impl InputConfig {
@@ -95,11 +95,17 @@ impl InputConfig {
                 problems.push(format!("{key}: 0 Hz"));
             }
         }
-        if !(MIN_LATENCY_MS..=MAX_LATENCY_MS).contains(&self.latency_ms) {
-            problems.push(format!(
-                "latency_ms: {} is not one of {MIN_LATENCY_MS}..={MAX_LATENCY_MS}",
-                self.latency_ms
-            ));
+        for (key, term) in [
+            ("network_latency_ms", self.network_latency_ms),
+            ("receive_buffer_ms", self.receive_buffer_ms),
+        ] {
+            if let Some(ms) = term
+                && !(ms > 0.0 && ms <= MAX_TERM_MS)
+            {
+                problems.push(format!(
+                    "{key}: {ms} is not over 0 and up to {MAX_TERM_MS} ms"
+                ));
+            }
         }
         let n = self.rx.len();
         if n == 0 || n > MAX_CHANNELS || n == 7 {
@@ -113,6 +119,27 @@ impl InputConfig {
             if s.rx == 0 || s.rx > n {
                 problems.push(format!("subscribe: rx {} is not one of 1..={n}", s.rx));
             }
+        }
+        let t = self.tx.len();
+        if self.tx.iter().any(|n| n.trim().is_empty()) {
+            problems.push("tx: a channel name is empty".to_string());
+        }
+        if t == TX_CHANNELS && self.tx[0] == self.tx[1] {
+            problems.push(format!("tx: both channels are named {:?}", self.tx[0]));
+        }
+        if t != 0 && t != TX_CHANNELS {
+            problems.push(format!(
+                "tx: {t} channels; the TX takes {TX_CHANNELS} (left, right) or none"
+            ));
+        }
+        match self.tx_track {
+            Some(_) if self.tx.is_empty() => {
+                problems.push("tx_track: set without tx".to_string());
+            }
+            Some(k) if !(1..=TRACKS).contains(&k) => {
+                problems.push(format!("tx_track: {k} is not one of 1..={TRACKS}"));
+            }
+            _ => {}
         }
         if problems.is_empty() {
             Ok(())
@@ -130,34 +157,68 @@ impl InputConfig {
         }
     }
 
-    /// How dlink splits this file's budget for OBS at `obs_rate`. A budget that leaves under
-    /// 4 ms of Dante latency is refused, named by its key in the file (dlink names it
-    /// `budget_ns`); any other refusal passes through as dlink's (a 0 Hz rate, which
-    /// [`InputConfig::load`] already refuses by its key).
+    /// dlink's latency terms for this file at `obs_rate` (dstack #244). A Dante latency under its
+    /// floor is refused named by the file's keys (dlink names them in ns); any other refusal
+    /// passes through as dlink's.
     pub fn split(&self, obs_rate: u32) -> Result<dlink::Split, String> {
         self.dlink(obs_rate).split().map_err(|e| {
-            if e.starts_with("budget_ns:") {
-                format!("latency_ms: {} is too small here: {e}", self.latency_ms)
-            } else {
-                e
+            match e.strip_prefix("network_latency_ns + receive_buffer_ns:") {
+                Some(rest) => format!(
+                    "network_latency_ms + receive_buffer_ms ({} + {}) are too small here:{rest}",
+                    term_text(self.network_latency_ms),
+                    term_text(self.receive_buffer_ms),
+                ),
+                None => e,
             }
         })
     }
 
-    /// The dlink config of this file for OBS running at `obs_rate`: RX only, no TX channels.
+    /// The rate OBS hands the TX track at: OBS's own (`obs_rate`), else the app rate OBS takes.
+    pub fn obs_side_rate(&self, obs_rate: u32) -> u32 {
+        if obs_rate == 0 {
+            self.app_rate(obs_rate)
+        } else {
+            obs_rate
+        }
+    }
+
+    /// The OBS track the TX carries, from 1; 0 when the file has no TX.
+    pub fn tx_track(&self) -> u32 {
+        if self.tx.is_empty() {
+            0
+        } else {
+            self.tx_track.unwrap_or(1)
+        }
+    }
+
+    /// The dlink config of this file for OBS running at `obs_rate`: its RX channels, and its TX
+    /// channels when the file has them.
     pub fn dlink(&self, obs_rate: u32) -> dlink::Config {
         let state = self.state_file.clone().unwrap_or_default();
         let mut c = dlink::Config::new(self.name.clone(), state)
             .rx(self.rx.clone())
-            .budget_ns(u64::from(self.latency_ms) * 1_000_000)
+            .tx(self.tx.clone())
             .sample_rate(self.app_rate(obs_rate))
             .product("obs", "dante-input");
         if let (Some(arc), Some(cmc), Some(flows)) = (self.arc_port, self.cmc_port, self.flows_port)
         {
             c = c.ports(dlink::Ports { arc, cmc, flows });
         }
+        if let Some(ms) = self.network_latency_ms {
+            c = c.network_latency_ns(ms_to_ns(ms));
+        }
+        if let Some(ms) = self.receive_buffer_ms {
+            c = c.receive_buffer_ns(ms_to_ns(ms));
+        }
         if let Some(rate) = self.network_rate {
             c = c.network_rate(rate);
+        }
+        if !self.tx.is_empty() {
+            // dstack #247: the TX bridge's FIFO holds OBS's chunk and one pump block.
+            c = c.app_buffer(
+                dlink::bridge::chunk_ns(OBS_CHUNK_FRAMES, self.obs_side_rate(obs_rate)),
+                None,
+            );
         }
         if let Some(base) = self.rx_port_base {
             c = c.rx_port_base(base);
@@ -170,6 +231,16 @@ impl InputConfig {
         }
         c
     }
+}
+
+/// A file's ms as dlink's ns, to the nearest ns.
+fn ms_to_ns(ms: f64) -> u64 {
+    (ms * 1_000_000.0).round() as u64
+}
+
+/// A term as the refusal names it: its ms, or "default".
+fn term_text(ms: Option<f64>) -> String {
+    ms.map_or_else(|| "default".to_string(), |v| format!("{v} ms"))
 }
 
 #[cfg(test)]
