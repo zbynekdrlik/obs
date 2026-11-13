@@ -408,11 +408,12 @@ impl DanteInput {
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: config={} name={} iface={} latency_ms={} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} tx={:?} tx_track={} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
+                "dante-input start: config={} name={} iface={} network_latency_ms={:?} receive_buffer_ms={:?} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} tx={:?} tx_track={} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
                 path.display(),
                 cfg.name,
                 cfg.iface,
-                cfg.latency_ms,
+                cfg.network_latency_ms,
+                cfg.receive_buffer_ms,
                 link_cfg.device_rate(),
                 link_cfg.converts(),
                 cfg.rx,
@@ -432,10 +433,14 @@ impl DanteInput {
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: latency split dante_latency_ns={} rx_path_ns={}",
-                split.latency_ns, split.rx_path_ns,
+                "dante-input start: latency split dante_latency_ns={} rx_path_ns={} tx_path_ns={}",
+                split.latency_ns, split.rx_path_ns, split.tx_path_ns,
             ),
         );
+        // dstack #244: each term on its own line, never one lump.
+        for line in split.lines(link_cfg.directions(), link_cfg.terms()) {
+            log(LOG_INFO, &format!("dante-input start: latency {line}"));
+        }
         let n = cfg.rx.len();
         let feed = Arc::new(Feed::default());
         let gate = Gate::new();

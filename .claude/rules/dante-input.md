@@ -10,7 +10,7 @@ paths:
 
 # dante-input latency
 
-- Since v0.4.9 (dlink v0.6.22, dstack #68), `latency_ms` is the budget for each direction's whole path, and dlink splits it. Before, it was the Dante latency alone. The real floor depends on the rates and the block. An RX-only device is sized by RX work alone (dlink v0.6.24). Since v0.6.28 it is 6 ms at 96/48 and 7 ms at the other pairs `the_floor_at_the_tested_rate_pairs` checks. The default follows `dlink::BUDGET_NS` (15 ms since v0.6.28, owner 4.11.2026); a dlink default change moves dante-input's with it, so re-read the dstack CHANGELOG table and the pinned test numbers. `InputConfig::split` refuses a smaller budget by its key. A dlink pin bump can change the API (latency_ns was removed): run `cargo clippy --all-targets` before pushing.
+- Since v0.4.27 (dlink v0.6.106, dstack #244) the latency is named terms: `network_latency_ms` (a) + `receive_buffer_ms` (b) = the Dante latency P, plus each direction's app hand-off (c). `latency_ms` is gone and refused (strict file). Neither term set keeps P as before (13.041666 ms at 96/48 RX only). `InputConfig::split` maps dlink's ns refusal to the file's keys. obs never states latency numbers itself: quote dstack's start-log lines (`dante-input start: latency ...`) or dstack. A dlink pin bump can break the API (budget_ns was removed): run `cargo clippy --all-targets` before pushing.
 
 # dante-input CPUs
 
@@ -26,5 +26,5 @@ paths:
 
 - `tx` sends one OBS track (`tx_track`, from 1) on the same device (obs#41). OBS's mix runs on OBS's clock and Dante on PTP, so the mix goes through `dlink::bridge`: plugin.c's raw audio callback writes the `Fifo` on OBS's audio thread, and `TxOut::fill` reads it through the ASRC `Player` in the pump. Do not write a ring or a converter of our own.
 - plugin.c untaps the raw audio callback (`stop_tx`) before `dante_input_stop`, so no push reaches a stopped device. `test/module_test.c running-tx` checks the order.
-- A device with TX splits the budget for both directions: the pump's late margin W drops from the whole budget (RX only) to 2/5 of it. Use latency_ms 20 with TX (W 8 ms; `stream_snv_s_split_with_tx_at_20_ms_is_the_one_dstack_pins`).
+- With TX, the TX path is the TX hand-off (W + converter) + P; W is dlink's `WORK_MARGIN_NS` unless set. The program TX's FIFO term comes from dstack #247, not a fixed 40 ms.
 - `tests/device_e2e.rs` serializes its devices (`ONE_DEVICE`): two devices in one test process at once would share the PTP follower and ports. Locally run it on a harmless interface (`DANTE_INPUT_TEST_IFACE=docker0 DANTE_INPUT_TEST_IP=172.17.0.1`), never on the Dante VLAN.

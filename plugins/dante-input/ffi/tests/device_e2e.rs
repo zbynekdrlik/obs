@@ -122,7 +122,7 @@ fn a_device_with_tx_plays_obs_s_track_into_its_tx_channels() {
         &path,
         format!(
             "name = \"obs-e2e-tx\"\niface = \"{iface}\"\nrx = [\"Master L\", \"Master R\"]\n\
-             tx = [\"OBS program L\", \"OBS program R\"]\nlatency_ms = 20\n\
+             tx = [\"OBS program L\", \"OBS program R\"]\n\
              network_rate = 96000\narc_port = 24441\ncmc_port = 28801\nflows_port = 24456\nrx_port_base = 22300\n"
         ),
     )
