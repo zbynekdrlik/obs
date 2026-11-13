@@ -408,7 +408,7 @@ impl DanteInput {
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: config={} name={} iface={} network_latency_ms={:?} receive_buffer_ms={:?} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} tx={:?} tx_track={} ports={:?}/{:?}/{:?} rx_port_base={:?} subscriptions={} state_file={}",
+                "dante-input start: config={} name={} iface={} network_latency_ms={:?} receive_buffer_ms={:?} obs_rate={obs_rate} sample_rate={rate} device_rate={} converts={} rx={:?} tx={:?} tx_track={} ports={:?}/{:?}/{:?} rx_port_base={:?} tx_port_base={:?} subscriptions={} state_file={}",
                 path.display(),
                 cfg.name,
                 cfg.iface,
@@ -423,6 +423,7 @@ impl DanteInput {
                 cfg.cmc_port,
                 cfg.flows_port,
                 cfg.rx_port_base,
+                cfg.tx_port_base,
                 cfg.subscribe.len(),
                 cfg.state_file.as_deref().unwrap_or(Path::new("")).display(),
             ),

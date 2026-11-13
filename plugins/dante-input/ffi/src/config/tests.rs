@@ -417,3 +417,29 @@ fn on_a_48_khz_device_the_app_buffer_is_obs_s_chunk_and_a_48_khz_block() {
         .unwrap();
     assert_eq!(buffer.target_ns(), 24_000_000);
 }
+
+#[test]
+fn the_flow_bases_reach_the_device_and_unset_they_leave_dlink_s_slot_block() {
+    // dlink v0.6.118 (dstack #264, camera-box#1519): unset bases mean the slot's block in
+    // 29800-31847; a box's file drops rx_port_base. Set, both reach the device.
+    let (_d, path) = write(&GOOD.replace("rx_port_base = 47200\n", ""));
+    let dev = InputConfig::load(&path)
+        .unwrap()
+        .dlink(48_000)
+        .device()
+        .unwrap();
+    assert_eq!((dev.rx_port_base, dev.tx_port_base), (None, None));
+    let (_d, path) = write(&GOOD.replace(
+        "rx_port_base = 47200",
+        "rx_port_base = 31000\ntx_port_base = 31032",
+    ));
+    let dev = InputConfig::load(&path)
+        .unwrap()
+        .dlink(48_000)
+        .device()
+        .unwrap();
+    assert_eq!(
+        (dev.rx_port_base, dev.tx_port_base),
+        (Some(31000), Some(31032))
+    );
+}

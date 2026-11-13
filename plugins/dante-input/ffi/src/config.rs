@@ -55,7 +55,13 @@ pub struct InputConfig {
     pub arc_port: Option<u16>,
     pub cmc_port: Option<u16>,
     pub flows_port: Option<u16>,
+    /// The RX flow ports from this base (32 ports). Unset: the device's slot block in the dstack
+    /// flow range 29800-31847 (dlink v0.6.118, dstack #264), which the generic Dante-leg filter
+    /// accepts; leave it unset unless the ARC port is no slot's (4440-4471).
     pub rx_port_base: Option<u16>,
+    /// The TX flow ports from this base (32 ports). Unset: the slot's TX block. A device whose ARC
+    /// port is no slot's (4440-4471) must set both bases (dlink v0.6.118).
+    pub tx_port_base: Option<u16>,
     pub flow_slots: Option<usize>,
     #[serde(default)]
     pub subscribe: Vec<Subscription>,
@@ -222,6 +228,9 @@ impl InputConfig {
         }
         if let Some(base) = self.rx_port_base {
             c = c.rx_port_base(base);
+        }
+        if let Some(base) = self.tx_port_base {
+            c = c.tx_port_base(base);
         }
         if let Some(n) = self.flow_slots {
             c = c.flow_slots(n);
