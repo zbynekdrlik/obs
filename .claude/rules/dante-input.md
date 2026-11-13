@@ -21,6 +21,7 @@ paths:
 - camera-box's E2E program-audio gate parses the `dante-input status:` line by token name. A new token goes at the END, after the last one (v0.4.26 appended `wire_late wake_delay_us wake_delay_peak_us` after `max_obs_us`). Never reorder or rename a token. `the_line_carries_every_contract_field_in_order` pins the whole line, and `tests/device_e2e.rs` checks the tokens on a real device.
 - dlink's per-flow reads are per slot (`media.rx.lane(slot)` for 0..32). The line sums the counts and takes the worst slot for delays (`Status::flow`). A `last_*` value is dlink's last heartbeat second, not the print interval.
 - v0.4.27 appended the TX tokens `tx_track tx_played tx_underruns tx_recentres tx_overflows tx_ppm tx_priming` (obs#41). They read 0 on a device without TX.
+- v0.4.29 appended `rx_reordered` (obs#45, dlink v0.6.125, dstack #278): packets that filled a hole another packet opened. Since that pin `rx_gaps`/`rx_loss` count only holes still open at playout, so a reorder is no longer loss. dlink logs the wake delay's minute p50/p99/p99.9/max and the network latency itself (`RX flow timing in the last minute`); they are not tokens.
 
 # dante-input TX
 

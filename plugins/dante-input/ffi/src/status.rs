@@ -8,6 +8,10 @@
 //! tokens before them keep their order (camera-box#1510). The wake delay is the RX pass's time less
 //! the kernel's receive stamp, which is wall clock (CLOCK_REALTIME): a forward step of it between a
 //! receive and the pass reads as a false wake delay, and stays in wake_delay_peak_us for the run.
+//! Since dlink v0.6.125 (dstack #278) a reordered packet fills the hole its overtaker opened and
+//! counts in rx_reordered, last on the line (obs#45); rx_gaps / rx_loss count only the holes still
+//! open at playout. The wake delay's minute percentiles are not on the line: dlink logs them once a
+//! minute per flow (`RX flow timing in the last minute ...`, dstack #234), through our logger.
 
 use std::fmt::Write as _;
 
@@ -73,6 +77,10 @@ pub struct Status {
     pub tx_ppm_tenths: i64,
     /// The TX player waits for the FIFO's depth: silence goes out.
     pub tx_priming: bool,
+    /// Packets that filled a hole another packet had opened: overtaken on the way, not lost
+    /// (dlink v0.6.125, dstack #278). rx_gaps / rx_loss count only the holes still open at
+    /// playout, so a reorder no longer reads as loss (camera-box issue 1508).
+    pub rx_reordered: u64,
 }
 
 impl Status {
@@ -92,7 +100,7 @@ impl Status {
              rx_holes={} rx_written_late={} late_blocks={} rebootstraps={} max_process_us={} \
              obs_dropped={} max_obs_us={} wire_late={} wake_delay_us={} wake_delay_peak_us={} \
              tx_track={} tx_played={} tx_underruns={} tx_recentres={} tx_overflows={} tx_ppm={:.1} \
-             tx_priming={}",
+             tx_priming={} rx_reordered={}",
             if self.media_clock { "media" } else { "free" },
             u8::from(self.holdover),
             self.clock_polls,
@@ -123,6 +131,7 @@ impl Status {
             self.tx_overflows,
             self.tx_ppm_tenths as f64 / 10.0,
             u8::from(self.tx_priming),
+            self.rx_reordered,
         );
         s
     }
@@ -155,6 +164,7 @@ impl Status {
             st.rx_loss += l.gap_frames;
             st.rx_gaps += l.gaps;
             st.rx_late += l.late;
+            st.rx_reordered += l.reordered;
             st.flow(Flow {
                 wire_late: l.wire_late,
                 wake_delay_us: media.rx.last_wake_delay_us(slot),
@@ -264,6 +274,7 @@ mod tests {
             tx_overflows: 19,
             tx_ppm_tenths: -125,
             tx_priming: false,
+            rx_reordered: 20,
         };
         assert_eq!(
             st.line(),
@@ -273,7 +284,7 @@ mod tests {
              rebootstraps=10 max_process_us=11 obs_dropped=12 max_obs_us=13 \
              wire_late=14 wake_delay_us=15 wake_delay_peak_us=16 \
              tx_track=1 tx_played=96000 tx_underruns=17 tx_recentres=18 tx_overflows=19 \
-             tx_ppm=-12.5 tx_priming=0"
+             tx_ppm=-12.5 tx_priming=0 rx_reordered=20"
         );
     }
 
@@ -300,7 +311,7 @@ mod tests {
         assert!(
             st.line().ends_with(
                 " max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000 \
-                 tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0"
+                 tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 rx_reordered=0"
             ),
             "{}",
             st.line()
@@ -349,7 +360,8 @@ mod tests {
     fn the_tx_counts_land_on_the_line_and_without_tx_they_read_0() {
         let mut st = Status::default();
         assert!(st.line().ends_with(
-            "tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0"
+            "tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
+             rx_reordered=0"
         ));
         st.tx(crate::tx::TxCounts {
             track: 1,
@@ -362,7 +374,7 @@ mod tests {
         });
         assert!(
             st.line().ends_with(
-                "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1"
+                "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1 rx_reordered=0"
             ),
             "{}",
             st.line()

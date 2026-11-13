@@ -78,6 +78,8 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         " wake_delay_peak_us=",
         // obs#41: the TX tokens, 0 on a device without TX.
         " tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0",
+        // obs#45 (dstack #278): reorders apart from loss, appended last.
+        " rx_reordered=",
     ] {
         assert!(line.contains(field), "{field} missing: {line}");
     }
