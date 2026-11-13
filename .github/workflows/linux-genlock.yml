@@ -696,7 +696,7 @@ jobs:
             esac
             if [ -n "$iface" ]; then
               mkdir -p "$home/.camera-box"
-              printf 'name = "obs-ci"\niface = "%s"\nnetwork_rate = 96000\nrx = ["Master L", "Master R"]\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 47200\n' "$iface" > "$home/.camera-box/dante-input.toml"
+              printf 'name = "obs-ci"\niface = "%s"\nnetwork_rate = 96000\nrx = ["Master L", "Master R"]\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 31200\ntx_port_base = 31232\n' "$iface" > "$home/.camera-box/dante-input.toml"
             fi
             # obs#41: the TX of OBS's track 1 on the same device (dlink's default latency terms).
             if [ "$mode" = running-tx ]; then

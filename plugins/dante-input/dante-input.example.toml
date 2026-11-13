@@ -13,7 +13,9 @@ rx = ["Master L", "Master R", "Click", "Guide"]   # 1-6 or 8 channels; OBS gets 
 arc_port = 4440                   # arc/cmc/flows: all three or none
 cmc_port = 8800
 flows_port = 4455
-rx_port_base = 47200
+# rx_port_base / tx_port_base: leave unset. Since dlink v0.6.118 (dstack #264) the flow ports
+# are the device's slot block in 29800-31847, which the generic Dante-leg filter accepts. Set
+# both only for an ARC port outside 4440-4471, inside that range.
 # state_file = "..."              # default: dante-input.state.toml next to this file
 # OBS's audio track out to Dante on the same device (obs#41). Its latency term by term: dstack's
 # start log lines ("dlink latency: ...", and the TX line's obs_to_wire_ns: the app buffer, OBS's

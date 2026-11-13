@@ -6,7 +6,7 @@ paths:
 # dante-input tests
 
 - A test that binds fixed UDP/TCP ports keeps every port below Linux's ephemeral range (32768-60999). Ports in that range collide with any outbound socket on the CI runner ("Address already in use"). That failure blocked the v0.4.7 release.
-- The device's RX flow ports go up from `rx_port_base`. Choose the base so that base + flows stays below 32768. `tests/device_e2e.rs` uses 22200.
+- Since dlink v0.6.118 (dstack #264) the flow ports default to the device's slot block in 29800-31847. A device whose ARC port is no slot's (4440-4471) must set both `rx_port_base` and `tx_port_base`, or it does not start. The tests use ARC 24440/24441, so they set both inside 29800-31847, below the ephemeral range (`tests/device_e2e.rs` 31000/31032 and 31100/31132, the CI module test 31200/31232). Deployed configs leave both unset.
 
 # dante-input latency
 
