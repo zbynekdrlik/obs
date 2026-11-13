@@ -36,8 +36,9 @@ pub struct InputConfig {
     pub iface: String,
     /// Where the device keeps what Dante Controller sets; next to the config unless set.
     pub state_file: Option<PathBuf>,
-    /// (a) The Dante network latency of the device's subscriptions, ms: what Dante Controller
-    /// shows (0.25, 0.5, 1, 2 or 5). dlink's 1 ms unless set (dlink v0.6.106, dstack #244).
+    /// (a) The Dante network latency of the device's subscriptions, ms: usually one of Dante
+    /// Controller's 0.25, 0.5, 1, 2 or 5, but dlink takes any value and decides; it refuses only
+    /// a P = (a) + (b) under its floor. dlink's 1 ms unless set (dlink v0.6.106, dstack #244).
     pub network_latency_ms: Option<f64>,
     /// (b) This PC's receive buffer, ms: the RX thread's room to wake and pass, sized from the
     /// status line's wake delays. Unset, dlink keeps the Dante latency P = (a) + (b) as it was
@@ -120,6 +121,12 @@ impl InputConfig {
             }
         }
         let t = self.tx.len();
+        if self.tx.iter().any(|n| n.trim().is_empty()) {
+            problems.push("tx: a channel name is empty".to_string());
+        }
+        if t == TX_CHANNELS && self.tx[0] == self.tx[1] {
+            problems.push(format!("tx: both channels are named {:?}", self.tx[0]));
+        }
         if t != 0 && t != TX_CHANNELS {
             problems.push(format!(
                 "tx: {t} channels; the TX takes {TX_CHANNELS} (left, right) or none"

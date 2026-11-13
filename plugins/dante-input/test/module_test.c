@@ -72,14 +72,14 @@ static bool mapped(const char *name)
 	return found;
 }
 
-/* The tx_played value of the last status line that has one; 0 when none has. */
-static unsigned long long last_tx_played(void)
+/* The value of ` <token>=` in the last status line that has it; 0 when none has. */
+static unsigned long long last_value(const char *token)
 {
 	unsigned long long v = 0;
 	pthread_mutex_lock(&logged_mutex);
 	const char *p = logged.array;
-	while (p && (p = strstr(p, " tx_played=")) != NULL) {
-		p += strlen(" tx_played=");
+	while (p && (p = strstr(p, token)) != NULL) {
+		p += strlen(token);
 		v = strtoull(p, NULL, 10);
 	}
 	pthread_mutex_unlock(&logged_mutex);
@@ -155,12 +155,13 @@ int main(int argc, char **argv)
 		 * player then plays it. The status line comes every second at the start. */
 		expect(logged_within(" tx_track=1 ", 3000), "the status line carries the TX track");
 		expect(logged_within(" tx_priming=0", 4000), "the TX player primed on OBS's mix");
-		unsigned long long first = last_tx_played();
+		unsigned long long first = last_value(" tx_played=");
 		os_sleep_ms(2500);
-		unsigned long long later = last_tx_played();
+		unsigned long long later = last_value(" tx_played=");
 		expect(later > first && first > 0, "tx_played grows while OBS runs");
 		fprintf(stderr, "tx_played %llu then %llu\n", first, later);
-		expect(logged_has(" tx_overflows=0 "), "no OBS frame was dropped at the FIFO");
+		expect(last_value(" tx_overflows=") == 0 && logged_has(" tx_overflows="),
+		       "no OBS frame was dropped at the FIFO (the last status line)");
 	} else {
 		fprintf(stderr, "unknown mode %s\n", mode);
 		return 2;

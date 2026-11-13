@@ -331,6 +331,8 @@ fn a_tx_of_other_than_two_channels_or_a_track_outside_1_to_6_is_refused_by_its_k
             "tx: 3 channels; the TX takes 2 (left, right) or none",
         ),
         ("tx_track = 1", "tx_track: set without tx"),
+        ("tx = [\"L\", \" \"]", "tx: a channel name is empty"),
+        ("tx = [\"L\", \"L\"]", "tx: both channels are named \"L\""),
         (
             "tx = [\"L\", \"R\"]\ntx_track = 0",
             "tx_track: 0 is not one of 1..=6",
@@ -401,4 +403,17 @@ fn a_device_without_tx_has_no_app_buffer() {
             .bridge_buffer(),
         None
     );
+}
+
+#[test]
+fn on_a_48_khz_device_the_app_buffer_is_obs_s_chunk_and_a_48_khz_block() {
+    // dlink sizes the block from the device's rate: 21.333 ms + 128 frames at 48 kHz (2.667 ms)
+    // = 24 ms (dstack v0.6.112 CHANGELOG).
+    let (_d, path) = write(&GOOD.replace("rx_port_base = 47200", TX));
+    let buffer = InputConfig::load(&path)
+        .unwrap()
+        .dlink(48_000)
+        .bridge_buffer()
+        .unwrap();
+    assert_eq!(buffer.target_ns(), 24_000_000);
 }

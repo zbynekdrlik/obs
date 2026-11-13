@@ -157,11 +157,13 @@ fn obs_at_another_rate_than_the_device_s_app_rate_converts() {
 }
 
 #[test]
-fn the_fifo_target_is_obs_s_chunk_and_one_pump_block() {
-    // dstack #247 (v0.6.112): 21.333 ms of OBS's 1024 frames at 48 kHz + 1.333 ms of a 128-frame
-    // block at 96 kHz = 22.667 ms, not the fixed 40 ms before.
+fn the_tx_holds_the_fifo_at_the_app_buffer_it_is_given() {
+    // dstack #247: the target is the device's app buffer, not a constant of ours. A set app
+    // buffer (30 ms) wins over the chunk and the block.
+    let set = buffer(RATE).set(Some(30_000_000));
+    let (tx_in, _out) = tx(1, RATE, RATE, set).unwrap();
+    assert_eq!(tx_in.target_ms(), 30.0);
     let (tx_in, _out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
-    assert_eq!(buffer(RATE).target_ns(), 21_333_333 + 1_333_333);
     assert!(
         (tx_in.target_ms() - 22.666666).abs() < 1e-6,
         "{}",

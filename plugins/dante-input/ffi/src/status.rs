@@ -298,8 +298,10 @@ mod tests {
             (7, 900, 4_000)
         );
         assert!(
-            st.line()
-                .contains(" max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000 "),
+            st.line().ends_with(
+                " max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000 \
+                 tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0"
+            ),
             "{}",
             st.line()
         );
