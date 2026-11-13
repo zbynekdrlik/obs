@@ -9,10 +9,12 @@
 //! the kernel's receive stamp, which is wall clock (CLOCK_REALTIME): a forward step of it between a
 //! receive and the pass reads as a false wake delay, and stays in wake_delay_peak_us for the run.
 //! Since dlink v0.6.125 (dstack #278) a reordered packet fills the hole its overtaker opened and
-//! counts in rx_reordered, last on the line (obs#45); rx_gaps / rx_loss count only the holes still
-//! open at playout. Since v0.6.126 a ring hole read before its flow's first sample (the OBS-start
-//! burst) counts in start_holes, last on the line (obs#47), not in rx_holes. The wake delay's minute percentiles are not on the line: dlink logs them once a
-//! minute per flow (`RX flow timing in the last minute ...`, dstack #234), through our logger.
+//! counts in rx_reordered, appended after tx_priming (obs#45); rx_gaps / rx_loss count only the
+//! holes still open at playout. Since dlink v0.6.126 a ring hole read before its flow's first
+//! sample (the OBS-start burst) counts in start_holes, appended after rx_reordered (obs#47), not
+//! in rx_holes. The wake and write delays' minute percentiles are not on the line: dlink logs them
+//! once a minute per flow (`RX flow timing in the last minute ...`, dstack #234), through our
+//! logger.
 
 use std::fmt::Write as _;
 
@@ -253,10 +255,11 @@ pub struct Lane {
 /// One channel ring's counts (dstack's ring Counters, which dlink does not name).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Ring {
-    /// Samples read that no packet had written, once the flow ran (since dstack v0.6.126).
+    /// Samples read that no packet had written, once the flow ran (since dlink v0.6.126,
+    /// dstack #234).
     pub holes: u64,
     pub written_late: u64,
-    /// Samples read before the flow's first sample (dstack v0.6.126).
+    /// Samples read before the flow's first sample (dlink v0.6.126, dstack #234).
     pub start_holes: u64,
 }
 
@@ -360,7 +363,8 @@ mod tests {
         assert!(
             st.line().ends_with(
                 " max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000 \
-                 tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 rx_reordered=0 start_holes=0"
+                 tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
+                 rx_reordered=0 start_holes=0"
             ),
             "{}",
             st.line()
@@ -438,7 +442,8 @@ mod tests {
         assert!(line.ends_with(" rx_reordered=10 start_holes=0"), "{line}");
     }
 
-    /// obs#47 (dstack v0.6.126): the rings' counts add up; the start burst is apart from the holes.
+    /// obs#47 (dlink v0.6.126, dstack #234): the rings' counts add up; the start burst is apart
+    /// from the holes.
     #[test]
     fn the_rings_counts_add_up_and_start_holes_are_not_holes() {
         let mut st = Status::default();
@@ -481,7 +486,8 @@ mod tests {
         });
         assert!(
             st.line().ends_with(
-                "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1 rx_reordered=0 start_holes=0"
+                "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1 \
+                 rx_reordered=0 start_holes=0"
             ),
             "{}",
             st.line()
