@@ -4,8 +4,8 @@
 //! got silence there), underruns blocks the pump skipped (OBS never got them). late_blocks and
 //! overruns are timing only: a block run up to the margin late still reads its own samples.
 //! wire_late, wake_delay_us and wake_delay_peak_us (dlink v0.6.101, dstack #234) tell a late
-//! packet late on the wire from our RX thread's late wake; they come last on the line, so the
-//! tokens before them keep their order (camera-box#1510). The wake delay is the RX pass's time less
+//! packet late on the wire from our RX thread's late wake; they were appended after max_obs_us, so
+//! the tokens before them keep their order (camera-box#1510). New tokens always go last. The wake delay is the RX pass's time less
 //! the kernel's receive stamp, which is wall clock (CLOCK_REALTIME): a forward step of it between a
 //! receive and the pass reads as a false wake delay, and stays in wake_delay_peak_us for the run.
 //! Since dlink v0.6.125 (dstack #278) a reordered packet fills the hole its overtaker opened and
@@ -160,11 +160,13 @@ impl Status {
         };
         for slot in 0..32 {
             let l = media.rx.lane(slot);
-            st.rx_packets += l.packets;
-            st.rx_loss += l.gap_frames;
-            st.rx_gaps += l.gaps;
-            st.rx_late += l.late;
-            st.rx_reordered += l.reordered;
+            st.lane(Lane {
+                packets: l.packets,
+                gap_frames: l.gap_frames,
+                gaps: l.gaps,
+                late: l.late,
+                reordered: l.reordered,
+            });
             st.flow(Flow {
                 wire_late: l.wire_late,
                 wake_delay_us: media.rx.last_wake_delay_us(slot),
@@ -193,6 +195,15 @@ impl Status {
         st
     }
 
+    /// One flow slot's RX counts: they add up over the slots.
+    pub fn lane(&mut self, l: Lane) {
+        self.rx_packets += l.packets;
+        self.rx_loss += l.gap_frames;
+        self.rx_gaps += l.gaps;
+        self.rx_late += l.late;
+        self.rx_reordered += l.reordered;
+    }
+
     /// One flow slot's RX timing: wire_late adds up, the wake delays keep the worst flow's.
     pub fn flow(&mut self, f: Flow) {
         self.wire_late += f.wire_late;
@@ -210,6 +221,18 @@ impl Status {
         self.overruns = p.overruns;
         self.max_process_us = p.max_process_us;
     }
+}
+
+/// One flow slot's RX counts (dstack's RxCounts, which dlink does not name).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Lane {
+    pub packets: u64,
+    /// Frames of the holes still open at playout (dstack #278).
+    pub gap_frames: u64,
+    pub gaps: u64,
+    pub late: u64,
+    /// Packets that filled a hole: reordered, not lost.
+    pub reordered: u64,
 }
 
 /// One flow slot's RX timing (dlink v0.6.101, dstack #234).
@@ -353,6 +376,40 @@ mod tests {
             line.starts_with("dante-input status: clock=free holdover=1 gm=none "),
             "{line}"
         );
+    }
+
+    /// obs#45 (dstack #278): the slots' counts add up; a reorder is apart from the loss.
+    #[test]
+    fn the_slots_rx_counts_add_up_and_reorders_are_not_loss() {
+        let mut st = Status::default();
+        st.lane(Lane {
+            packets: 100,
+            gap_frames: 0,
+            gaps: 0,
+            late: 1,
+            reordered: 7,
+        });
+        st.lane(Lane {
+            packets: 50,
+            gap_frames: 16,
+            gaps: 1,
+            late: 2,
+            reordered: 3,
+        });
+        st.lane(Lane::default());
+        assert_eq!(
+            (
+                st.rx_packets,
+                st.rx_loss,
+                st.rx_gaps,
+                st.rx_late,
+                st.rx_reordered
+            ),
+            (150, 16, 1, 3, 10)
+        );
+        let line = st.line();
+        assert!(line.contains(" rx_loss=16 rx_gaps=1 rx_late=3 "), "{line}");
+        assert!(line.ends_with(" rx_reordered=10"), "{line}");
     }
 
     /// obs#41: the TX's counts land on the line; the ppm rounds to a tenth.
