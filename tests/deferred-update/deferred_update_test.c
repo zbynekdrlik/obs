@@ -6,8 +6,9 @@
  * frame's tick (update and all) and runs it on a later frame. The test runs real libobs with 15 video
  * sources whose create defers an update of 8 ms, and checks:
  *
- *   - no gap between two tick_sources (a tick callback's calls) reaches 100 ms (it was 121 ms; with
- *     the budget about a frame + 8 ms);
+ *   - no gap between two tick_sources (a tick callback's calls) reaches 60 ms: measured 121.2 ms
+ *     without the budget, 33.4 ms with it in CI (33.4-41.0 ms locally), so the bound sits with
+ *     about 20 ms of margin over the fix and 60 ms under the old code;
  *   - every source's update ran;
  *   - no source's video_tick ran before its first update (OBS's order kept);
  *   - review: a video source with no update callback that gets obs_source_update keeps ticking, and
@@ -256,7 +257,7 @@ int main(int argc, char **argv)
 	fprintf(stderr, "updates %ld, ticks before an update %ld, max tick_sources gap %.1f ms\n",
 		os_atomic_load_long(&updates), os_atomic_load_long(&ticks_before_update), (double)max_gap_ns / 1e6);
 	expect(os_atomic_load_long(&updates) == SOURCES, "every source's deferred update ran");
-	expect(max_gap_ns < 100000000, "no tick_sources gap reaches 100 ms (15 updates of 8 ms spread over frames)");
+	expect(max_gap_ns < 60000000, "no tick_sources gap reaches 60 ms (15 updates of 8 ms spread over frames)");
 	expect(os_atomic_load_long(&ticks_before_update) == 0, "no source's video_tick ran before its first update");
 
 	for (int i = 0; i < SOURCES; i++)

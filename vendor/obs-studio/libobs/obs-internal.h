@@ -514,7 +514,7 @@ struct obs_core_video {
 	 * pending once it is spent skips that frame's tick (obs-source.c). Graphics thread only. */
 	bool deferred_update_budget_armed;
 	uint64_t deferred_update_spent_ns;
-	uint32_t deferred_updates_this_tick;
+	uint32_t first_updates_allowed_this_tick;
 	uint32_t deferred_updates_postponed_this_tick;
 	graphics_t *graphics;
 	gs_effect_t *default_effect;

@@ -69,8 +69,6 @@ static uint32_t tick_audit_lines;
 static uint32_t tick_audit_breakdown_lines;
 static uint32_t tick_audit_postponed_lines;
 
-
-
 /* room for one more line of a kind: its own budget, and one line when it runs out */
 static bool tick_audit_budget(uint32_t *lines, const char *what)
 {
@@ -269,7 +267,7 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 	/* obs#30: the frame's first-update budget (obs-source.c obs_source_video_tick) */
 	obs->video.deferred_update_budget_armed = true;
 	obs->video.deferred_update_spent_ns = 0;
-	obs->video.deferred_updates_this_tick = 0;
+	obs->video.first_updates_allowed_this_tick = 0;
 	obs->video.deferred_updates_postponed_this_tick = 0;
 
 	for (size_t i = 0; i < data->sources_to_tick.num; i++) {
