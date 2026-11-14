@@ -15,7 +15,6 @@
 #include <util/dstr.h>
 #include <util/platform.h>
 #include <util/threading.h>
-#include <util/util_uint64.h>
 
 #include <stdlib.h>
 
@@ -27,7 +26,6 @@ OBS_DECLARE_MODULE()
 /* The most sources one block goes to at once (a scene collection has one, maybe two). */
 #define DANTE_INPUT_MAX_SOURCES 16
 /* A block stamp further than this from the system clock is re-anchored on it. */
-#define DANTE_INPUT_RESYNC_NS 20000000ULL
 
 static struct dante_input *device;
 static uint32_t device_channels;
@@ -37,8 +35,6 @@ static pthread_mutex_t sources_mutex = PTHREAD_MUTEX_INITIALIZER;
 static DARRAY(obs_source_t *) sources;
 static bool registered;
 /* The dante-input-obs thread's own: the stamp the next block gets, and the re-anchors. */
-static uint64_t next_ts;
-static uint64_t resyncs;
 /* The mix the TX taps (tx_track - 1); -1 while no raw audio callback is registered. */
 static long tx_mix = -1;
 
@@ -72,28 +68,13 @@ static void on_log(int level, const char *msg)
 	blog(level, "%s", msg);
 }
 
-/* Blocks are stamped by their sample count, so OBS sees the device's steady pace, not the
- * pump's wake jitter; a stamp that drifts past DANTE_INPUT_RESYNC_NS from the system clock (a gap,
- * a stall, clock drift) is re-anchored on it. */
-static uint64_t stamp(uint32_t frames, uint32_t rate)
-{
-	uint64_t now = os_gettime_ns();
-	uint64_t diff = now > next_ts ? now - next_ts : next_ts - now;
-	if (next_ts == 0 || diff > DANTE_INPUT_RESYNC_NS) {
-		if (next_ts != 0) {
-			resyncs++;
-			blog(LOG_INFO, "dante-input timing: re-anchored on the system clock (off by %llu us, %llu re-anchor(s))",
-			     (unsigned long long)(diff / 1000), (unsigned long long)resyncs);
-		}
-		next_ts = now;
-	}
-	uint64_t ts = next_ts;
-	next_ts += util_mul_div64(frames, 1000000000ULL, rate);
-	return ts;
-}
-
-/* The device's pump thread, every block. */
-static void on_audio(void *opaque, const float *const *planes, uint32_t channels, uint32_t frames)
+/* The device's OBS feeder thread, every chunk. obs#53 (camera-box issue 1527): the stamp is the
+ * chunk's play time from dlink, which follows the Dante media clock's drift against os_gettime_ns
+ * block by block, so the fork's stamp-placed ASRC lands the audio at one fixed latency. The old stamp
+ * (first arrival + the sample count, re-anchored at 20 ms) stepped the A/V ~21 ms once an hour. The
+ * system clock stamps a chunk only before the device has a media clock. */
+static void on_audio(void *opaque, const float *const *planes, uint32_t channels, uint32_t frames,
+		     uint64_t timestamp_ns)
 {
 	UNUSED_PARAMETER(opaque);
 	uint32_t rate = (uint32_t)os_atomic_load_long(&device_rate);
@@ -106,7 +87,7 @@ static void on_audio(void *opaque, const float *const *planes, uint32_t channels
 	audio.speakers = layout_of(channels);
 	audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
 	audio.samples_per_sec = rate;
-	audio.timestamp = stamp(frames, rate);
+	audio.timestamp = timestamp_ns ? timestamp_ns : os_gettime_ns();
 
 	/* Strong refs under the lock, the output outside it: OBS's own locks are never taken while
 	 * sources_mutex is held, so source create/destroy cannot deadlock against the pump. */

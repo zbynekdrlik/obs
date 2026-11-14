@@ -11,8 +11,12 @@ extern "C" {
 
 struct dante_input;
 
-/* planes[c] holds `frames` samples of channel c, -1.0 to 1.0. Runs on the device's pump thread. */
-typedef void (*dante_input_audio_cb)(void *opaque, const float *const *planes, uint32_t channels, uint32_t frames);
+/* planes[c] holds `frames` samples of channel c, -1.0 to 1.0. Runs on the device's OBS feeder thread.
+ * timestamp_ns is the first frame's play time on OBS's clock (os_gettime_ns): dlink's per-block play
+ * time plus the frames before it in the block (dstack#295); 0 while the device has no media clock
+ * (obs#53). */
+typedef void (*dante_input_audio_cb)(void *opaque, const float *const *planes, uint32_t channels, uint32_t frames,
+				     uint64_t timestamp_ns);
 /* level is OBS's (LOG_ERROR 100, LOG_WARNING 200, LOG_INFO 300). */
 typedef void (*dante_input_log_cb)(int level, const char *msg);
 

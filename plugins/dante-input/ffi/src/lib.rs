@@ -63,13 +63,22 @@ pub const RING_SECONDS: usize = 1;
 /// The most frames one callback hands OBS (10 ms at 48 kHz).
 pub const MAX_CHUNK: usize = 480;
 
-/// `planes[c]` holds `frames` samples of channel `c`, -1.0 to 1.0.
+/// `planes[c]` holds `frames` samples of channel `c`, -1.0 to 1.0. `timestamp_ns` is the play time
+/// of the first frame on OBS's clock (`os_gettime_ns`): its block's play time from dlink (dstack#295)
+/// plus the frames before it in the block; 0 while the device has no media clock (obs#53).
 pub type AudioCb = unsafe extern "C" fn(
     opaque: *mut c_void,
     planes: *const *const f32,
     channels: u32,
     frames: u32,
+    timestamp_ns: u64,
 );
+
+/// obs#53: a play time this far off its continuation is a jump (counted and logged, then followed).
+pub const STAMP_JUMP_NS: u64 = 1_000_000;
+
+/// Play-time entries the pump can queue ahead of the feeder (one per block).
+pub const STAMP_SLOTS: usize = 8192;
 pub type LogCb = unsafe extern "C" fn(level: c_int, msg: *const c_char);
 
 static LOG: OnceLock<LogCb> = OnceLock::new();
@@ -222,6 +231,21 @@ pub struct Feed {
     pub dropped: AtomicU64,
     /// The longest callback into OBS, ns.
     pub max_obs_ns: AtomicU64,
+    /// Chunks whose play time was more than [`STAMP_JUMP_NS`] off its continuation (obs#53).
+    pub stamp_jumps: AtomicU64,
+}
+
+/// A block's play time (dlink's `Block::play_at`, ns on OBS's clock) at its first frame's index in
+/// the ring's frame count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    pub frame: u64,
+    pub ns: i64,
+}
+
+/// The play times beside the ring, one per block that had one.
+pub fn stamps() -> (rtrb::Producer<Stamp>, rtrb::Consumer<Stamp>) {
+    rtrb::RingBuffer::new(STAMP_SLOTS)
 }
 
 /// The ring between the pump and the feeder: `channels` interleaved samples per frame,
@@ -234,14 +258,24 @@ pub fn ring(channels: usize, frames: usize) -> (rtrb::Producer<f32>, rtrb::Consu
 /// interleaved f32 frames. No lock, no allocation, no call out.
 pub struct Sink {
     ring: rtrb::Producer<f32>,
+    stamps: rtrb::Producer<Stamp>,
+    /// Frames queued so far: the next block's first frame index.
+    written: u64,
     channels: usize,
     feed: Arc<Feed>,
 }
 
 impl Sink {
-    pub fn new(ring: rtrb::Producer<f32>, channels: usize, feed: Arc<Feed>) -> Sink {
+    pub fn new(
+        ring: rtrb::Producer<f32>,
+        stamps: rtrb::Producer<Stamp>,
+        channels: usize,
+        feed: Arc<Feed>,
+    ) -> Sink {
         Sink {
             ring,
+            stamps,
+            written: 0,
             channels,
             feed,
         }
@@ -271,6 +305,15 @@ impl Process for Sink {
         }
         // SAFETY: every slot of the chunk was written above.
         unsafe { chunk.commit_all() };
+        if let Some(ns) = block.play_at() {
+            // A full stamp ring (a feeder a long way behind) loses this one: the feeder carries
+            // the last play time on by the sample count until the next.
+            let _ = self.stamps.push(Stamp {
+                frame: self.written,
+                ns,
+            });
+        }
+        self.written += frames as u64;
     }
 }
 
@@ -295,6 +338,15 @@ impl Process for Pump {
 pub struct Feeder {
     target: Target,
     ring: rtrb::Consumer<f32>,
+    stamps: rtrb::Consumer<Stamp>,
+    /// The app rate of the ring's frames.
+    rate: u32,
+    /// Frames handed so far: the next chunk's first frame index.
+    read: u64,
+    /// The latest play time at or before `read`.
+    anchor: Option<Stamp>,
+    /// Where the last chunk's stamp continues (its stamp + its frames), for the jump check.
+    continues: Option<u64>,
     planes: Vec<Vec<f32>>,
     ptrs: Vec<*const f32>,
     feed: Arc<Feed>,
@@ -306,22 +358,71 @@ pub struct Feeder {
 unsafe impl Send for Feeder {}
 
 impl Feeder {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cb: AudioCb,
         opaque: *mut c_void,
         ring: rtrb::Consumer<f32>,
+        stamps: rtrb::Consumer<Stamp>,
         channels: usize,
+        rate: u32,
         feed: Arc<Feed>,
         gate: Arc<Gate>,
     ) -> Feeder {
         Feeder {
             target: Target { cb, opaque },
             ring,
+            stamps,
+            rate: rate.max(1),
+            read: 0,
+            anchor: None,
+            continues: None,
             planes: vec![vec![0.0; MAX_CHUNK]; channels],
             ptrs: vec![std::ptr::null(); channels],
             feed,
             gate,
         }
+    }
+
+    /// ns of `frames` frames at the app rate.
+    fn frames_ns(&self, frames: u64) -> u64 {
+        frames.saturating_mul(1_000_000_000) / u64::from(self.rate)
+    }
+
+    /// The play time of frame `read` (its block's, plus the frames before it in the block), 0
+    /// without one; a jump off the last chunk's continuation is counted and logged (obs#53).
+    fn stamp(&mut self, frames: usize) -> u64 {
+        while let Ok(s) = self.stamps.peek() {
+            if s.frame > self.read {
+                break;
+            }
+            self.anchor = Some(*s);
+            let _ = self.stamps.pop();
+        }
+        let Some(a) = self.anchor else {
+            return 0;
+        };
+        let ns =
+            a.ns.saturating_add(self.frames_ns(self.read - a.frame) as i64);
+        let ts = u64::try_from(ns).unwrap_or(0);
+        if let Some(cont) = self.continues {
+            let off = ts.abs_diff(cont);
+            if ts != 0 && off > STAMP_JUMP_NS {
+                let jumps = self.feed.stamp_jumps.fetch_add(1, Ordering::Relaxed) + 1;
+                if jumps <= 10 || jumps.is_multiple_of(100) {
+                    log(
+                        LOG_WARNING,
+                        &format!(
+                            "dante-input timing: a block's play time is {:.3} ms {} its continuation; OBS follows it (obs#53, {jumps} jump(s))",
+                            off as f64 / 1e6,
+                            if ts > cont { "after" } else { "before" },
+                        ),
+                    );
+                }
+            }
+        }
+        self.continues = (ts != 0).then(|| ts + self.frames_ns(frames as u64));
+        ts
     }
 
     /// Hands every whole frame queued now to OBS; the frames handed, `None` once the gate is
@@ -334,7 +435,9 @@ impl Feeder {
             if frames == 0 || n == 0 {
                 return Some(handed);
             }
-            let pass = self.gate.enter()?;
+            // The guard holds its own handle on the gate, so `self` stays free for the stamp.
+            let gate = Arc::clone(&self.gate);
+            let pass = gate.enter()?;
             let Ok(chunk) = self.ring.read_chunk(frames * n) else {
                 return Some(handed);
             };
@@ -346,6 +449,8 @@ impl Feeder {
             for (p, plane) in self.ptrs.iter_mut().zip(&self.planes) {
                 *p = plane.as_ptr();
             }
+            let ts = self.stamp(frames);
+            self.read += frames as u64;
             let t = Instant::now();
             // SAFETY: the planes outlive the call; the callback copies them
             // (obs_source_output_audio).
@@ -355,6 +460,7 @@ impl Feeder {
                     self.ptrs.as_ptr(),
                     n as u32,
                     frames as u32,
+                    ts,
                 )
             };
             let took = u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -443,12 +549,15 @@ impl DanteInput {
         let gate = Gate::new();
         let rate_frames = usize::try_from(rate).unwrap_or(usize::MAX);
         let (producer, consumer) = ring(n, rate_frames.saturating_mul(RING_SECONDS));
-        let sink = Sink::new(producer, n, Arc::clone(&feed));
+        let (stamp_in, stamp_out) = stamps();
+        let sink = Sink::new(producer, stamp_in, n, Arc::clone(&feed));
         let feeder = Feeder::new(
             cb,
             opaque,
             consumer,
+            stamp_out,
             n,
+            rate,
             Arc::clone(&feed),
             Arc::clone(&gate),
         );
