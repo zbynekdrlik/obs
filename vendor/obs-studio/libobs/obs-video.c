@@ -28,6 +28,9 @@
 
 #include "obs.h"
 #include "obs-internal.h"
+#if !defined(_WIN32)
+#include <dlfcn.h> /* obs#30: the tick audit names a tick callback by its symbol */
+#endif
 #include "graphics/vec4.h"
 #include "media-io/format-conversion.h"
 #include "media-io/video-frame.h"
@@ -52,6 +55,45 @@
 #include <string.h>
 #endif
 
+/* obs#30: every strih OBS start lost 2-3 JPEG XS and 6-7 program frames to one 70-117 ms
+ * tick_sources (p99 0.4-0.7 ms), a source's or a tick callback's video tick on this graphics thread,
+ * which OBS's profiler does not split. The tick audit names any one tick over TICK_AUDIT_SLOW_NS
+ * (over half a 30 fps frame). Log only: at most TICK_AUDIT_MAX_LINES lines for the process, then one
+ * line that says so. Only the graphics thread touches tick_audit_lines. */
+#define TICK_AUDIT_SLOW_NS 20000000ULL
+#define TICK_AUDIT_MAX_LINES 64
+static uint32_t tick_audit_lines;
+
+static bool tick_audit_room(void)
+{
+	if (tick_audit_lines < TICK_AUDIT_MAX_LINES) {
+		tick_audit_lines++;
+		return true;
+	}
+	if (tick_audit_lines == TICK_AUDIT_MAX_LINES) {
+		tick_audit_lines++;
+		blog(LOG_INFO, "tick-audit: %d slow video ticks logged; further ones are not logged (obs#30)",
+		     TICK_AUDIT_MAX_LINES);
+	}
+	return false;
+}
+
+static void tick_audit_callback(void (*tick)(void *param, float seconds), uint64_t took_ns)
+{
+	const double ms = (double)took_ns / 1000000.0;
+#if !defined(_WIN32)
+	Dl_info info;
+	if (dladdr((void *)(uintptr_t)tick, &info) && info.dli_sname) {
+		const char *module = info.dli_fname ? strrchr(info.dli_fname, '/') : NULL;
+		module = module ? module + 1 : (info.dli_fname ? info.dli_fname : "?");
+		blog(LOG_INFO, "tick-audit: tick callback %s (%s) took %.1f ms (over 20 ms; obs#30)", info.dli_sname,
+		     module, ms);
+		return;
+	}
+#endif
+	blog(LOG_INFO, "tick-audit: tick callback %p took %.1f ms (over 20 ms; obs#30)", (void *)(uintptr_t)tick, ms);
+}
+
 static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 {
 	struct obs_core_data *data = &obs->data;
@@ -73,7 +115,11 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 	for (size_t i = data->tick_callbacks.num; i > 0; i--) {
 		struct tick_callback *callback;
 		callback = data->tick_callbacks.array + (i - 1);
+		const uint64_t audit_start = os_gettime_ns();
 		callback->tick(callback->param, seconds);
+		const uint64_t took = os_gettime_ns() - audit_start;
+		if (took > TICK_AUDIT_SLOW_NS && tick_audit_room())
+			tick_audit_callback(callback->tick, took);
 	}
 
 	pthread_mutex_unlock(&data->draw_callbacks_mutex);
@@ -102,8 +148,13 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 		obs_source_t *s = data->sources_to_tick.array[i];
 		if (!obs_source_removed(s)) {
 			const uint64_t start = source_profiler_source_tick_start();
+			const uint64_t audit_start = os_gettime_ns();
 			obs_source_video_tick(s, seconds);
+			const uint64_t took = os_gettime_ns() - audit_start;
 			source_profiler_source_tick_end(s, start);
+			if (took > TICK_AUDIT_SLOW_NS && tick_audit_room())
+				blog(LOG_INFO, "tick-audit: source '%s' (%s) video tick took %.1f ms (over 20 ms; obs#30)",
+				     obs_source_get_name(s), obs_source_get_id(s), (double)took / 1000000.0);
 		}
 		obs_source_release(s);
 	}
