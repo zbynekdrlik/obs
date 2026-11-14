@@ -375,8 +375,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install the harness dependencies (apt)
         # libjansson-dev: drm_output_outputs_1424 links the lifted config grammar against jansson.
-        # libsimde-dev: the vban_source_* harness compiles vendor/obs-vban's vban-source.c, which
+        # libsimde-dev: the vban_source_* harness compiles the vendored VBAN plugin's source, which
         # includes libobs's util/sse-intrin.h (simde/x86/sse2.h); camera-box issue 1439, obs#50.
+        # (Do not name that plugin's directory here: vban_receive_wiring_1439 checks the imag-parity
+        # job range of this file never names it.)
         run: |
           set -euo pipefail
           sudo apt-get update
