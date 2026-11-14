@@ -31,5 +31,5 @@ paths:
 
 # libobs tick audit (obs#30)
 
-- `tick_sources` in `libobs/obs-video.c` logs `tick-audit:` for a source's or tick callback's video tick over 20 ms: the source's name and id, or the callback's symbol and module (dladdr; an address on Windows). It logs at most 64 lines a process, then one line. OBS's profiler does not split `tick_sources`, so read these lines to name a start stall. `tests/tick-audit` checks them.
+- `tick_sources` in `libobs/obs-video.c` logs `tick-audit:` for a source's or tick callback's video tick over 20 ms: the source's name and id, or the callback's symbol and module (dladdr; an address on Windows). It logs at most 64 lines a process, then one line. OBS's profiler does not split `tick_sources`, so read these lines to name a start stall. Since v0.4.32 a whole `tick_sources` over 20 ms also logs `tick-audit: tick_sources took …` with its phases (callbacks lock/run, sources lock, list, ticks sum + slowest, releases): v0.4.31 on strih showed a stall no single tick explained. `obs_enum_sources` holds `sources_mutex` across all its callbacks, so a slow enumerator on any thread stalls the video thread. `tests/tick-audit` checks them.
 - OBS writes `== Profiler Results ==` at exit. A short run's profile is mostly the start: `tick_sources` max vs p99 tells a one-off tick stall from a render one.

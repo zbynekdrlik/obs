@@ -180,13 +180,13 @@ static void register_ticker(const char *id)
 	obs_register_source(&info);
 }
 
-/* the value after `key` in each kept `tick_sources took` line: the largest one */
-static double breakdown_max(const char *key)
+/* the value after `key` in each kept `tick_sources took` line holding `part`: the largest one */
+static double breakdown_max(const char *part, const char *key)
 {
 	double best = -1.0;
 	pthread_mutex_lock(&log_mutex);
 	for (size_t i = 0; i < line_count && i < MAX_LINES; i++) {
-		if (!strstr(lines[i], "tick-audit: tick_sources took "))
+		if (!strstr(lines[i], "tick-audit: tick_sources took ") || !strstr(lines[i], part))
 			continue;
 		const char *at = strstr(lines[i], key);
 		if (!at)
@@ -208,7 +208,7 @@ static bool slow_enum(void *param, obs_source_t *source)
 	(void)param;
 	(void)source;
 	if (os_atomic_dec_long(&enum_slow_left) == 0)
-		os_sleep_ms(60);
+		os_sleep_ms(100);
 	return true;
 }
 
@@ -305,19 +305,20 @@ int main(int argc, char **argv)
 	os_sleep_ms(1000);
 	audit_ms("source 'short ", 20.0, 1000.0, &in, &out);
 	expect(in + out == 0, "a 4 ms tick is not named on its own");
-	double ticks = breakdown_max("ticks ");
+	double ticks = breakdown_max("(slowest 'short ", "ticks ");
 	fprintf(stderr, "largest ticks sum: %.1f ms\n", ticks);
-	expect(ticks >= 30.0, "short ticks adding up show in a tick_sources breakdown's ticks sum");
+	expect(ticks >= 30.0, "short ticks adding up show in a tick_sources breakdown's ticks sum, none over the bar");
 
-	/* Another thread holds the sources lock for 60 ms. */
+	/* Another thread holds the sources lock for 100 ms: a tick_sources starting in it waits at least
+	 * 100 ms less one 33 ms frame. */
 	enum_slow_left = 1;
 	pthread_t enumerator;
 	pthread_create(&enumerator, NULL, enum_thread, NULL);
 	pthread_join(enumerator, NULL);
 	os_sleep_ms(200);
-	double lock_wait = breakdown_max("sources lock ");
+	double lock_wait = breakdown_max("tick_sources took", "sources lock ");
 	fprintf(stderr, "largest sources lock wait: %.1f ms\n", lock_wait);
-	expect(lock_wait >= 30.0, "a held sources lock shows in a tick_sources breakdown's sources lock wait");
+	expect(lock_wait >= 50.0, "a held sources lock shows in a tick_sources breakdown's sources lock wait");
 
 	/* The cap: a source slow on every tick fills the 64 lines, then one line says so. */
 	obs_source_t *always = ticker("test_slow_always", "slow always", 21, UINT32_MAX);
