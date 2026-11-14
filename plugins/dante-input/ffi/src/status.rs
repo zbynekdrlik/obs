@@ -87,6 +87,9 @@ pub struct Status {
     /// Samples the pump read before their flow's first sample (the OBS-start burst, a new flow's
     /// start): never audio OBS was owed, so apart from rx_holes (dlink v0.6.126, dstack #234).
     pub start_holes: u64,
+    /// TX blocks that did not start where the last ended: dlink's player re-primed (v0.6.136,
+    /// dstack#303, obs#56).
+    pub tx_resyncs: u64,
 }
 
 impl Status {
@@ -106,7 +109,7 @@ impl Status {
              rx_holes={} rx_written_late={} late_blocks={} rebootstraps={} max_process_us={} \
              obs_dropped={} max_obs_us={} wire_late={} wake_delay_us={} wake_delay_peak_us={} \
              tx_track={} tx_played={} tx_underruns={} tx_recentres={} tx_overflows={} tx_ppm={:.1} \
-             tx_priming={} rx_reordered={} start_holes={}",
+             tx_priming={} rx_reordered={} start_holes={} tx_resyncs={}",
             if self.media_clock { "media" } else { "free" },
             u8::from(self.holdover),
             self.clock_polls,
@@ -139,6 +142,7 @@ impl Status {
             u8::from(self.tx_priming),
             self.rx_reordered,
             self.start_holes,
+            self.tx_resyncs,
         );
         s
     }
@@ -152,6 +156,7 @@ impl Status {
         self.tx_overflows = c.overflows;
         self.tx_ppm_tenths = (c.ppm * 10.0).round() as i64;
         self.tx_priming = c.priming;
+        self.tx_resyncs = c.resyncs;
     }
 
     /// Reads the device's counts from `media`.
@@ -327,6 +332,7 @@ mod tests {
             tx_priming: false,
             rx_reordered: 20,
             start_holes: 21,
+            tx_resyncs: 0,
         };
         assert_eq!(
             st.line(),
@@ -336,7 +342,7 @@ mod tests {
              rebootstraps=10 max_process_us=11 obs_dropped=12 max_obs_us=13 \
              wire_late=14 wake_delay_us=15 wake_delay_peak_us=16 \
              tx_track=1 tx_played=96000 tx_underruns=17 tx_recentres=18 tx_overflows=19 \
-             tx_ppm=-12.5 tx_priming=0 rx_reordered=20 start_holes=21"
+             tx_ppm=-12.5 tx_priming=0 rx_reordered=20 start_holes=21 tx_resyncs=0"
         );
     }
 
@@ -364,7 +370,7 @@ mod tests {
             st.line().ends_with(
                 " max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000 \
                  tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
-                 rx_reordered=0 start_holes=0"
+                 rx_reordered=0 start_holes=0 tx_resyncs=0"
             ),
             "{}",
             st.line()
@@ -439,7 +445,10 @@ mod tests {
         );
         let line = st.line();
         assert!(line.contains(" rx_loss=16 rx_gaps=1 rx_late=3 "), "{line}");
-        assert!(line.ends_with(" rx_reordered=10 start_holes=0"), "{line}");
+        assert!(
+            line.ends_with(" rx_reordered=10 start_holes=0 tx_resyncs=0"),
+            "{line}"
+        );
     }
 
     /// obs#47 (dlink v0.6.126, dstack #234): the rings' counts add up; the start burst is apart
@@ -464,7 +473,10 @@ mod tests {
         );
         let line = st.line();
         assert!(line.contains(" rx_holes=12 rx_written_late=4 "), "{line}");
-        assert!(line.ends_with(" rx_reordered=0 start_holes=3424"), "{line}");
+        assert!(
+            line.ends_with(" rx_reordered=0 start_holes=3424 tx_resyncs=0"),
+            "{line}"
+        );
     }
 
     /// obs#41: the TX's counts land on the line; the ppm rounds to a tenth.
@@ -473,7 +485,7 @@ mod tests {
         let mut st = Status::default();
         assert!(st.line().ends_with(
             "tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
-             rx_reordered=0 start_holes=0"
+             rx_reordered=0 start_holes=0 tx_resyncs=0"
         ));
         st.tx(crate::tx::TxCounts {
             track: 1,
@@ -483,11 +495,12 @@ mod tests {
             overflows: 3,
             ppm: 4.26,
             priming: true,
+            resyncs: 2,
         });
         assert!(
             st.line().ends_with(
                 "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1 \
-                 rx_reordered=0 start_holes=0"
+                 rx_reordered=0 start_holes=0 tx_resyncs=2"
             ),
             "{}",
             st.line()

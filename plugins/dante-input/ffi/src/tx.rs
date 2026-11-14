@@ -49,6 +49,9 @@ pub struct TxCounts {
     pub overflows: u64,
     /// The converter's correction, ppm.
     pub ppm: f64,
+    /// Blocks that did not start where the last one ended: the player re-primed to its target
+    /// (dlink v0.6.136, dstack#303, obs#56).
+    pub resyncs: u64,
     /// The player waits for the FIFO to reach its depth: silence goes out.
     pub priming: bool,
 }
@@ -124,6 +127,7 @@ impl TxIn {
             recentres: self.stats.recentres(),
             overflows: self.fifo.overflows(),
             ppm: self.stats.ppm(),
+            resyncs: self.stats.resyncs(),
             priming: self.stats.priming(),
         }
     }
@@ -135,11 +139,15 @@ impl TxOut {
     pub fn fill(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();
         let outputs = block.outputs().min(TX_CHANNELS);
+        let start = block.start();
         let mut done = 0;
         while done < frames {
             let n = (frames - done).min(CHUNK);
             let buf = &mut self.scratch[..n * TX_CHANNELS];
-            self.player.fill_with(buf, TX_CHANNELS, |x| x);
+            // obs#56 (dlink v0.6.136): each piece's start, so a block off the last one's end
+            // (a rebootstrap's skip) resyncs the player instead of leaving its FIFO off target.
+            let at = start.map(|s| s + done as u64);
+            self.player.fill_at(at, buf, TX_CHANNELS, |x| x);
             for c in 0..outputs {
                 let out = block.output(c);
                 for (f, slot) in out.iter_mut().skip(done).take(n).enumerate() {
