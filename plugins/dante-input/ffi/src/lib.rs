@@ -233,6 +233,10 @@ pub struct Feed {
     pub max_obs_ns: AtomicU64,
     /// Chunks whose play time was more than [`STAMP_JUMP_NS`] off its continuation (obs#53).
     pub stamp_jumps: AtomicU64,
+    /// Play times the pump could not queue: the stamp ring was full (obs#53).
+    pub stamps_dropped: AtomicU64,
+    /// Play times that were negative or overflowed: handed as 0 (the system clock) (obs#53).
+    pub bad_stamps: AtomicU64,
 }
 
 /// A block's play time (dlink's `Block::play_at`, ns on OBS's clock) at its first frame's index in
@@ -243,9 +247,10 @@ pub struct Stamp {
     pub ns: i64,
 }
 
-/// The play times beside the ring, one per block that had one.
-pub fn stamps() -> (rtrb::Producer<Stamp>, rtrb::Consumer<Stamp>) {
-    rtrb::RingBuffer::new(STAMP_SLOTS)
+/// The play times beside the ring, one per block that had one; `slots` entries
+/// ([`STAMP_SLOTS`] on a device).
+pub fn stamps(slots: usize) -> (rtrb::Producer<Stamp>, rtrb::Consumer<Stamp>) {
+    rtrb::RingBuffer::new(slots.max(1))
 }
 
 /// The ring between the pump and the feeder: `channels` interleaved samples per frame,
@@ -306,12 +311,18 @@ impl Process for Sink {
         // SAFETY: every slot of the chunk was written above.
         unsafe { chunk.commit_all() };
         if let Some(ns) = block.play_at() {
-            // A full stamp ring (a feeder a long way behind) loses this one: the feeder carries
-            // the last play time on by the sample count until the next.
-            let _ = self.stamps.push(Stamp {
-                frame: self.written,
-                ns,
-            });
+            // A full stamp ring (a feeder a long way behind) loses this one, counted: the feeder
+            // carries the last play time on by the sample count until the next.
+            if self
+                .stamps
+                .push(Stamp {
+                    frame: self.written,
+                    ns,
+                })
+                .is_err()
+            {
+                self.feed.stamps_dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
         self.written += frames as u64;
     }
@@ -347,6 +358,12 @@ pub struct Feeder {
     anchor: Option<Stamp>,
     /// Where the last chunk's stamp continues (its stamp + its frames), for the jump check.
     continues: Option<u64>,
+    /// Chunks handed with no play time (the system clock) since the last one with a play time.
+    unstamped: u64,
+    /// Whether a chunk ever carried a play time.
+    stamped_once: bool,
+    /// `stamps_dropped` last logged.
+    dropped_logged: u64,
     planes: Vec<Vec<f32>>,
     ptrs: Vec<*const f32>,
     feed: Arc<Feed>,
@@ -377,6 +394,9 @@ impl Feeder {
             read: 0,
             anchor: None,
             continues: None,
+            unstamped: 0,
+            stamped_once: false,
+            dropped_logged: 0,
             planes: vec![vec![0.0; MAX_CHUNK]; channels],
             ptrs: vec![std::ptr::null(); channels],
             feed,
@@ -390,7 +410,9 @@ impl Feeder {
     }
 
     /// The play time of frame `read` (its block's, plus the frames before it in the block), 0
-    /// without one; a jump off the last chunk's continuation is counted and logged (obs#53).
+    /// without one (plugin.c then stamps with os_gettime_ns). A jump off the last chunk's
+    /// continuation, the switch between the two clocks, a lost or a bad play time are counted
+    /// and logged (obs#53).
     fn stamp(&mut self, frames: usize) -> u64 {
         while let Ok(s) = self.stamps.peek() {
             if s.frame > self.read {
@@ -399,15 +421,64 @@ impl Feeder {
             self.anchor = Some(*s);
             let _ = self.stamps.pop();
         }
-        let Some(a) = self.anchor else {
-            return 0;
+        let dropped = self.feed.stamps_dropped.load(Ordering::Relaxed);
+        if dropped > self.dropped_logged {
+            log(
+                LOG_WARNING,
+                &format!(
+                    "dante-input timing: {} play time(s) could not be queued (the feeder fell behind); chunks run on by the sample count until the next (obs#53, {dropped} in all)",
+                    dropped - self.dropped_logged,
+                ),
+            );
+            self.dropped_logged = dropped;
+        }
+        let ts = match self.anchor {
+            None => 0,
+            Some(a) => {
+                let off = i64::try_from(self.frames_ns(self.read - a.frame)).ok();
+                match off.and_then(|o| a.ns.checked_add(o)).map(u64::try_from) {
+                    Some(Ok(ts)) if ts != 0 => ts,
+                    _ => {
+                        let bad = self.feed.bad_stamps.fetch_add(1, Ordering::Relaxed) + 1;
+                        if bad <= 10 || bad.is_multiple_of(100) {
+                            log(
+                                LOG_WARNING,
+                                &format!(
+                                    "dante-input timing: a block's play time {} ns is no time on OBS's clock; the system clock stamps it (obs#53, {bad} in all)",
+                                    a.ns,
+                                ),
+                            );
+                        }
+                        0
+                    }
+                }
+            }
         };
-        let ns =
-            a.ns.saturating_add(self.frames_ns(self.read - a.frame) as i64);
-        let ts = u64::try_from(ns).unwrap_or(0);
+        if ts == 0 {
+            if self.stamped_once && self.unstamped == 0 {
+                log(
+                    LOG_WARNING,
+                    "dante-input timing: no play time from dlink; the system clock stamps the chunks until it returns (obs#53)",
+                );
+            }
+            self.unstamped += 1;
+            self.continues = None;
+            return 0;
+        }
+        if self.unstamped > 0 || !self.stamped_once {
+            log(
+                LOG_INFO,
+                &format!(
+                    "dante-input timing: chunks carry dlink's play time from here on ({} chunk(s) before it were stamped by the system clock) (obs#53)",
+                    self.unstamped,
+                ),
+            );
+            self.unstamped = 0;
+            self.stamped_once = true;
+        }
         if let Some(cont) = self.continues {
             let off = ts.abs_diff(cont);
-            if ts != 0 && off > STAMP_JUMP_NS {
+            if off > STAMP_JUMP_NS {
                 let jumps = self.feed.stamp_jumps.fetch_add(1, Ordering::Relaxed) + 1;
                 if jumps <= 10 || jumps.is_multiple_of(100) {
                     log(
@@ -421,7 +492,7 @@ impl Feeder {
                 }
             }
         }
-        self.continues = (ts != 0).then(|| ts + self.frames_ns(frames as u64));
+        self.continues = Some(ts.saturating_add(self.frames_ns(frames as u64)));
         ts
     }
 
@@ -549,7 +620,7 @@ impl DanteInput {
         let gate = Gate::new();
         let rate_frames = usize::try_from(rate).unwrap_or(usize::MAX);
         let (producer, consumer) = ring(n, rate_frames.saturating_mul(RING_SECONDS));
-        let (stamp_in, stamp_out) = stamps();
+        let (stamp_in, stamp_out) = stamps(STAMP_SLOTS);
         let sink = Sink::new(producer, stamp_in, n, Arc::clone(&feed));
         let feeder = Feeder::new(
             cb,

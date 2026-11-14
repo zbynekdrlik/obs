@@ -32,10 +32,20 @@ const RATE: u32 = 48_000;
 
 /// A sink and a feeder over a ring of `frames` frames of `channels` at [`RATE`].
 fn pair(seen: &SeenBox, channels: usize, frames: usize) -> (Sink, Feeder, Arc<Feed>, Arc<Gate>) {
+    pair_with(seen, channels, frames, STAMP_SLOTS)
+}
+
+/// [`pair`] with a stamp ring of `slots` entries.
+fn pair_with(
+    seen: &SeenBox,
+    channels: usize,
+    frames: usize,
+    slots: usize,
+) -> (Sink, Feeder, Arc<Feed>, Arc<Gate>) {
     let feed = Arc::new(Feed::default());
     let gate = Gate::new();
     let (p, c) = ring(channels, frames);
-    let (sp, sc) = stamps();
+    let (sp, sc) = stamps(slots);
     let sink = Sink::new(p, sp, channels, Arc::clone(&feed));
     let feeder = Feeder::new(
         record,
@@ -160,28 +170,29 @@ fn the_stamps_follow_a_clock_drift_block_by_block_with_no_step() {
     let seen_box = SeenBox::default();
     let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 48_000);
     let t0: i64 = 1_000_000_000;
-    // 600 ppm (a hundredfold the real drift, to see it in 50 blocks): each block's play time is
-    // 128 frames * (1 + 600e-6) after the last.
-    let step = frames_ns(128) as f64 * (1.0 + 600e-6);
-    let mut last = 0u64;
+    // 6000 ppm (a thousandfold the real drift, to see it in 50 blocks): each block's play time is
+    // 128 frames * (1 + 6000e-6) after the last, 16 us more than the sample count a block.
+    let step = frames_ns(128) as f64 * (1.0 + 6000e-6);
+    let mut pushed = Vec::new();
     for k in 0..50 {
         let ns = t0 + (step * k as f64).round() as i64;
         push_at(&mut sink, 128, &[0.0; 128], ns);
-        last = ns as u64;
+        pushed.push(ns as u64);
         // One block a drain: each chunk is one block.
         assert_eq!(feeder.drain(), Some(128));
     }
     let seen = seen_box.lock().unwrap().clone();
-    assert_eq!(seen.len(), 50);
+    let got: Vec<u64> = seen.iter().map(|s| s.3).collect();
     assert_eq!(
-        seen[49].3, last,
-        "the last stamp is the last block's play time"
+        got, pushed,
+        "every chunk is its block's play time, never a count from the start"
     );
-    // 50 blocks counted from the first: 49 * 2.666 ms = 130.6 ms; the play time is 78 us later.
-    let counted = seen[0].3 + frames_ns(128 * 49);
+    // 49 blocks counted from the first would be 130.6 ms; the play times are 784 us later.
+    let counted = pushed[0] + frames_ns(128 * 49);
     assert!(
-        last > counted + 70_000,
-        "the stamps follow the drift: {last} vs {counted}"
+        pushed[49] > counted + 700_000,
+        "the stamps follow the drift: {} vs {counted}",
+        pushed[49]
     );
     assert_eq!(
         feed.stamp_jumps.load(Ordering::Relaxed),
@@ -221,6 +232,66 @@ fn a_play_time_off_its_continuation_by_more_than_1_ms_counts_a_jump() {
     assert_eq!(feeder.drain(), Some(128));
     assert_eq!(feed.stamp_jumps.load(Ordering::Relaxed), 1);
     assert_eq!(seen_box.lock().unwrap()[2].3, jumped as u64);
+}
+
+/// obs#53 review: a block the full sample ring drops takes its play time with it; the next block
+/// that lands is stamped with its own play time, not one counted on from the dropped block.
+#[test]
+fn a_dropped_block_s_play_time_never_stamps_the_next_block() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 6);
+    let t0: i64 = 3_000_000_000;
+    push_at(&mut sink, 4, &[0.0; 4], t0);
+    // 4 of 6 frames used: this one is dropped.
+    push_at(&mut sink, 4, &[0.0; 4], t0 + 7_000_000);
+    assert_eq!(feed.dropped.load(Ordering::Relaxed), 4);
+    assert_eq!(feeder.drain(), Some(4));
+    let t2 = t0 + 9_000_000;
+    push_at(&mut sink, 4, &[0.0; 4], t2);
+    assert_eq!(feeder.drain(), Some(4));
+    let got: Vec<u64> = seen_box.lock().unwrap().iter().map(|s| s.3).collect();
+    assert_eq!(got, [t0 as u64, t2 as u64]);
+}
+
+/// obs#53 review: a full stamp ring counts the lost play time; the chunk runs on by the sample
+/// count from the last one.
+#[test]
+fn a_full_stamp_ring_counts_the_lost_play_time() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair_with(&seen_box, 1, 64, 1);
+    let t0: i64 = 4_000_000_000;
+    push_at(&mut sink, 4, &[0.0; 4], t0);
+    push_at(&mut sink, 4, &[0.0; 4], t0 + 1_000_000);
+    assert_eq!(feed.stamps_dropped.load(Ordering::Relaxed), 1);
+    assert_eq!(feeder.drain(), Some(8));
+    assert_eq!(seen_box.lock().unwrap()[0].3, t0 as u64);
+}
+
+/// obs#53 review: a negative play time is no time on OBS's clock: counted, handed as 0 (the
+/// plugin stamps it with the system clock).
+#[test]
+fn a_negative_play_time_is_counted_and_handed_as_0() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 64);
+    push_at(&mut sink, 4, &[0.0; 4], -7);
+    assert_eq!(feeder.drain(), Some(4));
+    assert_eq!(seen_box.lock().unwrap()[0].3, 0);
+    assert_eq!(feed.bad_stamps.load(Ordering::Relaxed), 1);
+}
+
+/// obs#53 review: chunks before the media clock carry 0 (the system clock); the first play time
+/// after them is taken as it is, not checked against a system-clock continuation.
+#[test]
+fn the_first_play_time_after_system_clock_chunks_is_no_jump() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 64);
+    push(&mut sink, 4, &[0.0; 4]);
+    assert_eq!(feeder.drain(), Some(4));
+    push_at(&mut sink, 4, &[0.0; 4], 6_000_000_000);
+    assert_eq!(feeder.drain(), Some(4));
+    let got: Vec<u64> = seen_box.lock().unwrap().iter().map(|s| s.3).collect();
+    assert_eq!(got, [0, 6_000_000_000]);
+    assert_eq!(feed.stamp_jumps.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -297,7 +368,7 @@ unsafe extern "C" fn slow(_: *mut c_void, _: *const *const f32, _: u32, _: u32, 
 fn obs_holding_the_callback_never_lengthens_the_pump_s_block() {
     let feed = Arc::new(Feed::default());
     let (p, c) = ring(2, 4800);
-    let (sp, sc) = stamps();
+    let (sp, sc) = stamps(STAMP_SLOTS);
     let mut sink = Sink::new(p, sp, 2, Arc::clone(&feed));
     let mut feeder = Feeder::new(
         slow,

@@ -11,22 +11,57 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-/// Code lines only: `//` and `/* ... */` comments dropped.
+/// Code only: `//` and `/* ... */` comments dropped, string and char literals kept whole (a `//`
+/// or `/*` inside a literal is code).
 fn code(src: &str) -> String {
     let mut out = String::new();
-    let mut rest = src;
-    while let Some(i) = rest.find("/*") {
-        out.push_str(&rest[..i]);
-        rest = match rest[i..].find("*/") {
-            Some(j) => &rest[i + j + 2..],
-            None => "",
-        };
+    let mut it = src.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '"' | '\'' => {
+                out.push(c);
+                while let Some(d) = it.next() {
+                    out.push(d);
+                    if d == '\\' {
+                        if let Some(e) = it.next() {
+                            out.push(e);
+                        }
+                    } else if d == c {
+                        break;
+                    }
+                }
+            }
+            '/' if it.peek() == Some(&'/') => {
+                for d in it.by_ref() {
+                    if d == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if it.peek() == Some(&'*') => {
+                it.next();
+                let mut prev = ' ';
+                for d in it.by_ref() {
+                    if prev == '*' && d == '/' {
+                        break;
+                    }
+                    if d == '\n' {
+                        out.push('\n');
+                    }
+                    prev = d;
+                }
+            }
+            _ => out.push(c),
+        }
     }
-    out.push_str(rest);
-    out.lines()
-        .map(|l| l.split("//").next().unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n")
+    out
+}
+
+#[test]
+fn the_code_reader_keeps_literals_and_drops_comments() {
+    let src = "a = \"http://x /* y */\"; // gone\nb = '/'; /* gone\n too */ c";
+    assert_eq!(code(src), "a = \"http://x /* y */\"; \nb = '/'; \n c");
 }
 
 #[test]
@@ -36,7 +71,11 @@ fn the_plugin_stamps_with_the_handed_play_time_and_never_re_anchors() {
         plugin.contains("audio.timestamp = timestamp_ns ? timestamp_ns : os_gettime_ns();"),
         "obs#53: on_audio stamps with the feeder's play time, the system clock only without one"
     );
-    for gone in ["DANTE_INPUT_RESYNC_NS", "next_ts", "re-anchored on the system clock"] {
+    for gone in [
+        "DANTE_INPUT_RESYNC_NS",
+        "next_ts",
+        "re-anchored on the system clock",
+    ] {
         assert!(
             !plugin.contains(gone),
             "obs#53: plugin.c still re-anchors its stamps (`{gone}`)"
