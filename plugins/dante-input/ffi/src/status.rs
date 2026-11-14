@@ -87,6 +87,9 @@ pub struct Status {
     /// Samples the pump read before their flow's first sample (the OBS-start burst, a new flow's
     /// start): never audio OBS was owed, so apart from rx_holes (dlink v0.6.126, dstack #234).
     pub start_holes: u64,
+    /// TX blocks that did not start where the last ended: dlink's player re-primed (v0.6.136,
+    /// dstack#303, obs#56).
+    pub tx_resyncs: u64,
 }
 
 impl Status {
@@ -106,7 +109,7 @@ impl Status {
              rx_holes={} rx_written_late={} late_blocks={} rebootstraps={} max_process_us={} \
              obs_dropped={} max_obs_us={} wire_late={} wake_delay_us={} wake_delay_peak_us={} \
              tx_track={} tx_played={} tx_underruns={} tx_recentres={} tx_overflows={} tx_ppm={:.1} \
-             tx_priming={} rx_reordered={} start_holes={}",
+             tx_priming={} rx_reordered={} start_holes={} tx_resyncs={}",
             if self.media_clock { "media" } else { "free" },
             u8::from(self.holdover),
             self.clock_polls,
@@ -139,6 +142,7 @@ impl Status {
             u8::from(self.tx_priming),
             self.rx_reordered,
             self.start_holes,
+            self.tx_resyncs,
         );
         s
     }
@@ -152,6 +156,7 @@ impl Status {
         self.tx_overflows = c.overflows;
         self.tx_ppm_tenths = (c.ppm * 10.0).round() as i64;
         self.tx_priming = c.priming;
+        self.tx_resyncs = c.resyncs;
     }
 
     /// Reads the device's counts from `media`.
