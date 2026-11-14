@@ -82,13 +82,21 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
         assert!(line.contains(field), "{field} missing: {line}");
     }
     // obs#45 (dstack #278): reorders apart from loss; obs#47 (dstack v0.6.126): the start
-    // burst apart from the holes, the last token. Both counts.
-    let (head, start_holes) = line
+    // burst apart from the holes; obs#56 (dlink v0.6.136): the TX resyncs, the last token. All
+    // counts.
+    let (rest, resyncs) = line
+        .rsplit_once(" tx_resyncs=")
+        .unwrap_or_else(|| panic!("tx_resyncs missing: {line}"));
+    assert!(
+        resyncs.parse::<u64>().is_ok(),
+        "tx_resyncs is the last token, a count: {line}"
+    );
+    let (head, start_holes) = rest
         .rsplit_once(" start_holes=")
-        .unwrap_or_else(|| panic!("start_holes missing: {line}"));
+        .unwrap_or_else(|| panic!("start_holes missing before tx_resyncs: {line}"));
     assert!(
         start_holes.parse::<u64>().is_ok(),
-        "start_holes is the last token, a count: {line}"
+        "start_holes comes right before tx_resyncs, a count: {line}"
     );
     let reordered = head
         .rsplit_once(" rx_reordered=")

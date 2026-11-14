@@ -332,6 +332,7 @@ mod tests {
             tx_priming: false,
             rx_reordered: 20,
             start_holes: 21,
+            tx_resyncs: 0,
         };
         assert_eq!(
             st.line(),
@@ -369,7 +370,7 @@ mod tests {
             st.line().ends_with(
                 " max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000 \
                  tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
-                 rx_reordered=0 start_holes=0"
+                 rx_reordered=0 start_holes=0 tx_resyncs=0"
             ),
             "{}",
             st.line()
@@ -444,7 +445,10 @@ mod tests {
         );
         let line = st.line();
         assert!(line.contains(" rx_loss=16 rx_gaps=1 rx_late=3 "), "{line}");
-        assert!(line.ends_with(" rx_reordered=10 start_holes=0"), "{line}");
+        assert!(
+            line.ends_with(" rx_reordered=10 start_holes=0 tx_resyncs=0"),
+            "{line}"
+        );
     }
 
     /// obs#47 (dlink v0.6.126, dstack #234): the rings' counts add up; the start burst is apart
@@ -469,7 +473,10 @@ mod tests {
         );
         let line = st.line();
         assert!(line.contains(" rx_holes=12 rx_written_late=4 "), "{line}");
-        assert!(line.ends_with(" rx_reordered=0 start_holes=3424"), "{line}");
+        assert!(
+            line.ends_with(" rx_reordered=0 start_holes=3424 tx_resyncs=0"),
+            "{line}"
+        );
     }
 
     /// obs#41: the TX's counts land on the line; the ppm rounds to a tenth.
@@ -478,7 +485,7 @@ mod tests {
         let mut st = Status::default();
         assert!(st.line().ends_with(
             "tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
-             rx_reordered=0 start_holes=0"
+             rx_reordered=0 start_holes=0 tx_resyncs=0"
         ));
         st.tx(crate::tx::TxCounts {
             track: 1,
@@ -488,11 +495,12 @@ mod tests {
             overflows: 3,
             ppm: 4.26,
             priming: true,
+            resyncs: 2,
         });
         assert!(
             st.line().ends_with(
                 "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1 \
-                 rx_reordered=0 start_holes=0"
+                 rx_reordered=0 start_holes=0 tx_resyncs=2"
             ),
             "{}",
             st.line()
