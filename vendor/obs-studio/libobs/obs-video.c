@@ -28,9 +28,9 @@
 
 #include "obs.h"
 #include "obs-internal.h"
+#include <string.h> /* obs#30: the tick audit's strrchr and strcmp */
 #if !defined(_WIN32)
-#include <dlfcn.h>  /* obs#30: the tick audit names a tick callback by its symbol */
-#include <string.h> /* obs#30: strrchr for the callback's module */
+#include <dlfcn.h> /* obs#30: the tick audit names a tick callback by its symbol */
 #endif
 #include "graphics/vec4.h"
 #include "media-io/format-conversion.h"
@@ -114,6 +114,87 @@ static inline double tick_audit_ms(uint64_t ns)
 	return (double)ns / 1000000.0;
 }
 
+/* obs#30: v0.4.32 on strih-snv showed one 130 ms tick_sources made of the first ticks of 66 sources,
+ * none over the bar. A breakdown names the source types with the largest tick sums: the first
+ * TICK_AUDIT_KEEP sources' times are kept each call (on the stack), summed by id only when logged. */
+#define TICK_AUDIT_KEEP 512
+#define TICK_AUDIT_TYPES 32
+#define TICK_AUDIT_TOP 5
+#define TICK_AUDIT_NOT_TICKED UINT64_MAX
+
+struct tick_audit_type {
+	const char *id;
+	uint64_t ns;
+	uint32_t n;
+};
+
+static void tick_audit_by_type(obs_source_t *const *sources, const uint64_t *took, size_t num, char *out,
+			       size_t out_size)
+{
+	struct tick_audit_type types[TICK_AUDIT_TYPES];
+	size_t ntypes = 0;
+	uint64_t other_ns = 0;
+	uint32_t other_n = 0;
+
+	for (size_t i = 0; i < num; i++) {
+		if (took[i] == TICK_AUDIT_NOT_TICKED)
+			continue;
+		const char *id = obs_source_get_id(sources[i]);
+		if (!id)
+			id = "?";
+		size_t t = 0;
+		while (t < ntypes && strcmp(types[t].id, id) != 0)
+			t++;
+		if (t == ntypes) {
+			if (ntypes == TICK_AUDIT_TYPES) {
+				other_ns += took[i];
+				other_n++;
+				continue;
+			}
+			types[ntypes].id = id;
+			types[ntypes].ns = 0;
+			types[ntypes].n = 0;
+			ntypes++;
+		}
+		types[t].ns += took[i];
+		types[t].n++;
+	}
+
+	size_t len = 0;
+	if (!ntypes && !other_n) {
+		snprintf(out, out_size, "none");
+		return;
+	}
+	out[0] = '\0';
+	for (size_t k = 0; k < TICK_AUDIT_TOP && k < ntypes; k++) {
+		size_t best = k;
+		for (size_t t = k + 1; t < ntypes; t++) {
+			if (types[t].ns > types[best].ns)
+				best = t;
+		}
+		struct tick_audit_type swap = types[k];
+		types[k] = types[best];
+		types[best] = swap;
+		int w = snprintf(out + len, out_size - len, "%s%s %.1f ms (%u)", k ? ", " : "", types[k].id,
+				 tick_audit_ms(types[k].ns), types[k].n);
+		if (w < 0 || (size_t)w >= out_size - len)
+			goto truncated;
+		len += (size_t)w;
+	}
+	if (other_n) {
+		int w = snprintf(out + len, out_size - len, ", other types %.1f ms (%u)", tick_audit_ms(other_ns),
+				 other_n);
+		if (w < 0 || (size_t)w >= out_size - len)
+			goto truncated;
+	}
+	return;
+
+truncated:
+	/* end on a whole marker, not partway through a name */
+	if (out_size >= 4)
+		snprintf(out + out_size - 4, 4, "...");
+}
+
 static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 {
 	struct obs_core_data *data = &obs->data;
@@ -124,6 +205,9 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 	uint64_t audit_cb_lock, audit_cb_run, audit_src_lock, audit_list, audit_ticks = 0, audit_releases;
 	uint64_t audit_slowest = 0;
 	char audit_slowest_name[64] = "";
+	uint64_t audit_took[TICK_AUDIT_KEEP];
+	char audit_types[384] = "not taken (the ticks did not pass the bar)";
+	uint64_t audit_by_type = 0;
 	size_t audit_callbacks;
 
 	if (!last_time)
@@ -188,6 +272,8 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 			const uint64_t took = os_gettime_ns() - audit_start;
 			source_profiler_source_tick_end(s, start);
 			audit_ticks += took;
+			if (i < TICK_AUDIT_KEEP)
+				audit_took[i] = took;
 			if (took > audit_slowest) {
 				audit_slowest = took;
 				snprintf(audit_slowest_name, sizeof(audit_slowest_name), "%s",
@@ -197,7 +283,18 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 				blog(LOG_INFO, "tick-audit: source '%s' (%s) video tick took %.1f ms (over %d ms; obs#30)",
 				     obs_source_get_name(s), obs_source_get_id(s), tick_audit_ms(took),
 				     TICK_AUDIT_SLOW_MS);
+		} else if (i < TICK_AUDIT_KEEP) {
+			audit_took[i] = TICK_AUDIT_NOT_TICKED;
 		}
+	}
+
+	/* the types while the sources are still held, only for a call on its way over the bar */
+	const uint64_t by_type_start = os_gettime_ns();
+	if (by_type_start - audit_begin > TICK_AUDIT_SLOW_NS && tick_audit_breakdown_lines < TICK_AUDIT_MAX_LINES) {
+		const size_t kept = data->sources_to_tick.num < TICK_AUDIT_KEEP ? data->sources_to_tick.num
+										  : TICK_AUDIT_KEEP;
+		tick_audit_by_type(data->sources_to_tick.array, audit_took, kept, audit_types, sizeof(audit_types));
+		audit_by_type = os_gettime_ns() - by_type_start;
 	}
 
 	/* The releases apart from the ticks, timed as one phase: a source's last reference destroys
@@ -213,11 +310,12 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 		blog(LOG_INFO,
 		     "tick-audit: tick_sources took %.1f ms: callbacks lock %.1f ms, callbacks %.1f ms (%zu), "
 		     "sources lock %.1f ms, list %.1f ms (%zu sources), ticks %.1f ms (slowest '%s' %.1f ms), "
-		     "releases %.1f ms (over %d ms; obs#30)",
+		     "releases %.1f ms, audit %.1f ms, by type: %s (over %d ms; obs#30)",
 		     tick_audit_ms(audit_total), tick_audit_ms(audit_cb_lock), tick_audit_ms(audit_cb_run),
 		     audit_callbacks, tick_audit_ms(audit_src_lock), tick_audit_ms(audit_list),
 		     data->sources_to_tick.num, tick_audit_ms(audit_ticks), audit_slowest_name,
-		     tick_audit_ms(audit_slowest), tick_audit_ms(audit_releases), TICK_AUDIT_SLOW_MS);
+		     tick_audit_ms(audit_slowest), tick_audit_ms(audit_releases), tick_audit_ms(audit_by_type), audit_types,
+		     TICK_AUDIT_SLOW_MS);
 
 	return cur_time;
 }
