@@ -28,3 +28,8 @@ paths:
 - `obs_startup` needs an X display: run under `xvfb-run -a`, as the texture-encode test does.
 - Without `obs_reset_video`/audio, `obs_wait_for_destroy_queue` returns at once and does nothing. A released source is destroyed later on libobs's destruction thread. Wait for the source's "destroy" signal, with a bound (`tests/av-sync-measure-hold`).
 - libobs lists a removed source until it is destroyed. `obs_get_source_by_name` returns it, and a new source with that name gets renamed ("mbc 2"). Check `obs_source_removed`.
+
+# libobs tick audit (obs#30)
+
+- `tick_sources` in `libobs/obs-video.c` logs `tick-audit:` for a source's or tick callback's video tick over 20 ms: the source's name and id, or the callback's symbol and module (dladdr; an address on Windows). It logs at most 64 lines a process, then one line. OBS's profiler does not split `tick_sources`, so read these lines to name a start stall. `tests/tick-audit` checks them.
+- OBS writes `== Profiler Results ==` at exit. A short run's profile is mostly the start: `tick_sources` max vs p99 tells a one-off tick stall from a render one.
