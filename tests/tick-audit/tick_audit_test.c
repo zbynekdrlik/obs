@@ -10,6 +10,10 @@
  *   - a fast source and a 10 ms one (under the 20 ms bar) are not named for their own time: a line
  *     naming either may only come from a real stall of the runner, so it must read 20 ms or more;
  *   - a tick callback that takes 45 ms is named by its symbol;
+ *   - a slow tick_sources whose time is outside any single tick is broken into phases: many short
+ *     ticks adding up show in its ticks sum, another thread holding the sources lock (as
+ *     obs_enum_sources does across its callbacks) shows in its sources lock wait (v0.4.31 on
+ *     strih-snv named no single tick over 20 ms while tick_sources still stalled);
  *   - at most 64 slow ticks are logged, then one line says further ones are not.
  *
  *   tick-audit-test <libobs data dir>   (the SDK's share/obs/libobs/, which holds the effects)
@@ -176,6 +180,45 @@ static void register_ticker(const char *id)
 	obs_register_source(&info);
 }
 
+/* the value after `key` in each kept `tick_sources took` line: the largest one */
+static double breakdown_max(const char *key)
+{
+	double best = -1.0;
+	pthread_mutex_lock(&log_mutex);
+	for (size_t i = 0; i < line_count && i < MAX_LINES; i++) {
+		if (!strstr(lines[i], "tick-audit: tick_sources took "))
+			continue;
+		const char *at = strstr(lines[i], key);
+		if (!at)
+			continue;
+		double v = atof(at + strlen(key));
+		if (v > best)
+			best = v;
+	}
+	pthread_mutex_unlock(&log_mutex);
+	return best;
+}
+
+/* ---- another thread holds the sources lock: obs_enum_sources keeps it across its callbacks ---- */
+
+static volatile long enum_slow_left;
+
+static bool slow_enum(void *param, obs_source_t *source)
+{
+	(void)param;
+	(void)source;
+	if (os_atomic_dec_long(&enum_slow_left) == 0)
+		os_sleep_ms(60);
+	return true;
+}
+
+static void *enum_thread(void *param)
+{
+	(void)param;
+	obs_enum_sources(slow_enum, NULL);
+	return NULL;
+}
+
 /* ---- a tick callback slow once ---- */
 
 static volatile long callback_slow_left = 1;
@@ -251,6 +294,31 @@ int main(int argc, char **argv)
 	audit_ms("tick callback tick_audit_slow_callback (tick-audit-test)", 45.0, 1000.0, &in, &out);
 	expect(in == 1 && out == 0, "the slow tick callback is named by its symbol and module, 45 ms or more");
 
+	/* Many short ticks adding up: 12 sources of 4 ms for 3 ticks each, ~48 ms a tick_sources, no
+	 * single tick over the bar. */
+	obs_source_t *shorts[12];
+	for (size_t i = 0; i < 12; i++) {
+		char name[32];
+		snprintf(name, sizeof(name), "short %zu", i);
+		shorts[i] = ticker("test_fast", name, 4, 3);
+	}
+	os_sleep_ms(1000);
+	audit_ms("source 'short ", 20.0, 1000.0, &in, &out);
+	expect(in + out == 0, "a 4 ms tick is not named on its own");
+	double ticks = breakdown_max("ticks ");
+	fprintf(stderr, "largest ticks sum: %.1f ms\n", ticks);
+	expect(ticks >= 30.0, "short ticks adding up show in a tick_sources breakdown's ticks sum");
+
+	/* Another thread holds the sources lock for 60 ms. */
+	enum_slow_left = 1;
+	pthread_t enumerator;
+	pthread_create(&enumerator, NULL, enum_thread, NULL);
+	pthread_join(enumerator, NULL);
+	os_sleep_ms(200);
+	double lock_wait = breakdown_max("sources lock ");
+	fprintf(stderr, "largest sources lock wait: %.1f ms\n", lock_wait);
+	expect(lock_wait >= 30.0, "a held sources lock shows in a tick_sources breakdown's sources lock wait");
+
 	/* The cap: a source slow on every tick fills the 64 lines, then one line says so. */
 	obs_source_t *always = ticker("test_slow_always", "slow always", 21, UINT32_MAX);
 	os_sleep_ms(4000);
@@ -261,6 +329,8 @@ int main(int argc, char **argv)
 	       "one line says further slow ticks are not logged");
 
 	obs_remove_tick_callback(tick_audit_slow_callback, NULL);
+	for (size_t i = 0; i < 12; i++)
+		obs_source_release(shorts[i]);
 	obs_source_release(always);
 	obs_source_release(under);
 	obs_source_release(fast);
