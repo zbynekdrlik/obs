@@ -18,6 +18,18 @@ pub const TRACKS: u32 = 6;
 /// producer chunk (dstack #247).
 pub const OBS_CHUNK_FRAMES: u64 = 1024;
 
+/// How the RX audio handed to OBS is stamped (obs#53, obs#56).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RxStamps {
+    /// Each chunk's play time from dlink (dstack#295): follows the media clock's drift.
+    #[default]
+    PlayAt,
+    /// A sample count from the first play time: no play-time jitter, but it drifts from the media
+    /// clock (~21 ms an hour on stream-snv). For the dstack#303 bisect only.
+    Count,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Subscription {
@@ -71,6 +83,9 @@ pub struct InputConfig {
     pub tx: Vec<String>,
     /// The OBS audio track the TX carries, 1 to 6; track 1 unless set. Only with `tx`.
     pub tx_track: Option<u32>,
+    /// How the RX audio is stamped for OBS: `play_at` unless set (obs#56).
+    #[serde(default)]
+    pub rx_stamps: RxStamps,
 }
 
 impl InputConfig {

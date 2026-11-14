@@ -1,7 +1,9 @@
 [package]
 name = "dante-input-ffi"
-version = "0.4.34"
+version = "0.4.35"
 edition = "2024"
+# Let-chains (src/lib.rs Sink::process, obs#53).
+rust-version = "1.88"
 license = "GPL-3.0-or-later"
 publish = false
 description = "The C ABI under the OBS dante_input source: a dlink device (dstack) whose RX blocks reach OBS"

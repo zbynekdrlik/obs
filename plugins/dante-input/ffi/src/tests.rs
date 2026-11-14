@@ -72,6 +72,13 @@ fn frames_ns(frames: u64) -> u64 {
     frames * 1_000_000_000 / u64::from(RATE)
 }
 
+/// One block with its media start (app frames) and its play time `ns`.
+fn push_media(sink: &mut Sink, frames: usize, input: &[f64], start: u64, ns: i64) {
+    let mut out: [f64; 0] = [];
+    let mut block = Block::new(frames, input, &mut out).at(start).played_at(ns);
+    sink.process(&mut block);
+}
+
 fn push(sink: &mut Sink, frames: usize, input: &[f64]) {
     let mut out: [f64; 0] = [];
     let mut block = Block::new(frames, input, &mut out);
@@ -292,6 +299,226 @@ fn the_first_play_time_after_system_clock_chunks_is_no_jump() {
     let got: Vec<u64> = seen_box.lock().unwrap().iter().map(|s| s.3).collect();
     assert_eq!(got, [0, 6_000_000_000]);
     assert_eq!(feed.stamp_jumps.load(Ordering::Relaxed), 0);
+}
+
+/// obs#53 (stream-snv 14.11.2026 17:11:03): the pump woke late and skipped 8 blocks (512 app frames,
+/// 10.667 ms); the next block's play time was correctly 10.667 ms later, but it was handed right
+/// after the last one, so OBS's timeline lost 10.667 ms and the stamp-placed ASRC slewed the audio
+/// for ~11 s. A skip in the blocks' media time is filled with exactly that much silence: OBS's
+/// timeline stays contiguous, the stamps never jump.
+#[test]
+fn a_skip_in_media_time_is_filled_with_silence_and_the_stamps_stay_contiguous() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 4800);
+    let t0: i64 = 7_000_000_000;
+    push_media(&mut sink, 128, &[1.0; 128], 9_600, t0);
+    // 512 frames skipped: the next block starts at 9_600 + 128 + 512.
+    push_media(
+        &mut sink,
+        128,
+        &[1.0; 128],
+        10_240,
+        t0 + frames_ns(640) as i64,
+    );
+    assert_eq!(feeder.drain(), Some(768));
+    let seen = seen_box.lock().unwrap().clone();
+    let samples: Vec<f32> = seen.iter().flat_map(|s| s.2[0].clone()).collect();
+    let mut want = vec![1.0f32; 128];
+    want.extend(vec![0.0f32; 512]);
+    want.extend(vec![1.0f32; 128]);
+    assert_eq!(
+        samples, want,
+        "the skip is silence, the blocks around it whole"
+    );
+    let stamps: Vec<u64> = seen.iter().map(|s| s.3).collect();
+    // The second chunk starts at frame 480 (MAX_CHUNK), inside the silence: block 1's play time
+    // carried on by 480 frames, the timeline contiguous through the skip.
+    assert_eq!(stamps, [t0 as u64, t0 as u64 + frames_ns(480)]);
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 512);
+    assert_eq!(feed.gaps.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        feed.stamp_jumps.load(Ordering::Relaxed),
+        0,
+        "a filled skip is no jump"
+    );
+}
+
+/// obs#53 review: two channels: the silence fills every channel of the skipped frames.
+#[test]
+fn a_skip_is_filled_on_every_channel() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 2, 4800);
+    push_media(&mut sink, 4, &[1.0; 8], 0, 1_000_000_000);
+    push_media(
+        &mut sink,
+        4,
+        &[1.0; 8],
+        4 + 3,
+        1_000_000_000 + frames_ns(7) as i64,
+    );
+    assert_eq!(feeder.drain(), Some(11));
+    let seen = seen_box.lock().unwrap().clone();
+    let want = [1.0f32, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+    assert_eq!(seen[0].2[0], want);
+    assert_eq!(seen[0].2[1], want);
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 3);
+}
+
+/// obs#53 review: a skip of exactly GAP_FILL_MAX_FRAMES is filled; one frame more is not.
+#[test]
+fn a_skip_of_exactly_the_bound_is_filled() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 48_000);
+    push_media(&mut sink, 4, &[1.0; 4], 0, 1_000_000_000);
+    push_media(
+        &mut sink,
+        4,
+        &[1.0; 4],
+        4 + GAP_FILL_MAX_FRAMES,
+        2_000_000_000,
+    );
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), GAP_FILL_MAX_FRAMES);
+    assert!(feeder.drain().is_some());
+}
+
+/// obs#53 review: a skip the full ring has no room for is counted apart (not filled, not dropped
+/// audio); the block after it still lands.
+#[test]
+fn a_skip_the_full_ring_cannot_take_is_counted_unfilled() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 12);
+    push_media(&mut sink, 4, &[1.0; 4], 0, 1_000_000_000);
+    // 10 frames skipped: 8 frames of room left, the silence does not fit; the block does.
+    push_media(
+        &mut sink,
+        4,
+        &[1.0; 4],
+        14,
+        1_000_000_000 + frames_ns(14) as i64,
+    );
+    assert_eq!(feed.gaps_unfilled.load(Ordering::Relaxed), 1);
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 0);
+    assert_eq!(feed.dropped.load(Ordering::Relaxed), 0);
+    assert_eq!(feeder.drain(), Some(8));
+}
+
+/// obs#53 review: a block the full ring drops is filled with silence by the next block once the
+/// ring has room, so OBS's timeline keeps its frames.
+#[test]
+fn a_block_the_full_ring_dropped_is_filled_by_the_next_block() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 6);
+    push_media(&mut sink, 4, &[1.0; 4], 0, 1_000_000_000);
+    // 4 of 6 frames used: this block is dropped.
+    push_media(
+        &mut sink,
+        4,
+        &[1.0; 4],
+        4,
+        1_000_000_000 + frames_ns(4) as i64,
+    );
+    assert_eq!(feed.dropped.load(Ordering::Relaxed), 4);
+    assert_eq!(feeder.drain(), Some(4));
+    // The next block: the dropped block's 4 frames are filled first.
+    push_media(
+        &mut sink,
+        2,
+        &[1.0; 2],
+        8,
+        1_000_000_000 + frames_ns(8) as i64,
+    );
+    assert_eq!(feeder.drain(), Some(6));
+    let samples: Vec<f32> = seen_box
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s.2[0].clone())
+        .collect();
+    assert_eq!(samples, [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 4);
+    assert_eq!(feed.stamp_jumps.load(Ordering::Relaxed), 0);
+}
+
+/// obs#56 (dstack#303 bisect): with `rx_stamps = "count"` the chunks are stamped by the sample
+/// count from the first play time; later play times (drifting here at 6000 ppm) are not followed.
+#[test]
+fn counting_stamps_by_the_sample_count_from_the_first_play_time() {
+    let seen_box = SeenBox::default();
+    let (mut sink, feeder, _feed, _gate) = pair(&seen_box, 1, 48_000);
+    let mut feeder = feeder.counting();
+    let t0: i64 = 1_000_000_000;
+    let step = frames_ns(128) as f64 * (1.0 + 6000e-6);
+    for k in 0..10 {
+        push_at(
+            &mut sink,
+            128,
+            &[0.0; 128],
+            t0 + (step * k as f64).round() as i64,
+        );
+        assert_eq!(feeder.drain(), Some(128));
+    }
+    let got: Vec<u64> = seen_box.lock().unwrap().iter().map(|s| s.3).collect();
+    let want: Vec<u64> = (0..10).map(|k| t0 as u64 + frames_ns(128 * k)).collect();
+    assert_eq!(got, want);
+}
+
+/// obs#56 review: counting keeps the diagnostics: before the first play time it hands 0, a bad
+/// first play time is counted, and a skip is still filled with silence.
+#[test]
+fn counting_keeps_the_zero_start_the_bad_stamp_count_and_the_fill() {
+    let seen_box = SeenBox::default();
+    let (mut sink, feeder, feed, _gate) = pair(&seen_box, 1, 4800);
+    let mut feeder = feeder.counting();
+    push(&mut sink, 4, &[0.0; 4]);
+    assert_eq!(feeder.drain(), Some(4));
+    push_media(&mut sink, 4, &[1.0; 4], 0, -7);
+    assert_eq!(feeder.drain(), Some(4));
+    assert_eq!(feed.bad_stamps.load(Ordering::Relaxed), 1);
+    push_media(&mut sink, 4, &[1.0; 4], 10, 1_000_000_000);
+    assert_eq!(feeder.drain(), Some(10));
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 6);
+    push_media(
+        &mut sink,
+        4,
+        &[1.0; 4],
+        14,
+        1_000_000_000 + frames_ns(4) as i64,
+    );
+    assert_eq!(feeder.drain(), Some(4));
+    let got: Vec<u64> = seen_box.lock().unwrap().iter().map(|s| s.3).collect();
+    // No play time (0), a bad one (0), the gap chunk still on the bad one (0); then the good play
+    // time (frame 14) is the count's new origin: the chunk at frame 18 counts 4 frames from it.
+    assert_eq!(got, [0, 0, 0, 1_000_000_000 + frames_ns(4)]);
+    assert!(feed.bad_stamps.load(Ordering::Relaxed) >= 1);
+}
+
+/// obs#53: a backward media start (a schedule started again) has nothing to fill.
+#[test]
+fn a_backward_media_start_is_not_filled() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 4800);
+    push_media(&mut sink, 128, &[1.0; 128], 1_000, 1_000_000_000);
+    push_media(&mut sink, 128, &[1.0; 128], 500, 1_010_000_000);
+    assert_eq!(feeder.drain(), Some(256));
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 0);
+}
+
+/// obs#53: a forward jump past [`GAP_FILL_MAX_FRAMES`] is a schedule started again, not a skip:
+/// no second of silence is written.
+#[test]
+fn a_media_jump_past_the_fill_bound_is_not_filled() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 4800);
+    push_media(&mut sink, 128, &[1.0; 128], 0, 1_000_000_000);
+    push_media(
+        &mut sink,
+        128,
+        &[1.0; 128],
+        128 + GAP_FILL_MAX_FRAMES + 1,
+        5_000_000_000,
+    );
+    assert_eq!(feeder.drain(), Some(256));
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 0);
 }
 
 #[test]
