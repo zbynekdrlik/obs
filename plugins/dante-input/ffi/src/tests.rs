@@ -72,6 +72,13 @@ fn frames_ns(frames: u64) -> u64 {
     frames * 1_000_000_000 / u64::from(RATE)
 }
 
+/// One block with its media start (app frames) and its play time `ns`.
+fn push_media(sink: &mut Sink, frames: usize, input: &[f64], start: u64, ns: i64) {
+    let mut out: [f64; 0] = [];
+    let mut block = Block::new(frames, input, &mut out).at(start).played_at(ns);
+    sink.process(&mut block);
+}
+
 fn push(sink: &mut Sink, frames: usize, input: &[f64]) {
     let mut out: [f64; 0] = [];
     let mut block = Block::new(frames, input, &mut out);
@@ -292,6 +299,75 @@ fn the_first_play_time_after_system_clock_chunks_is_no_jump() {
     let got: Vec<u64> = seen_box.lock().unwrap().iter().map(|s| s.3).collect();
     assert_eq!(got, [0, 6_000_000_000]);
     assert_eq!(feed.stamp_jumps.load(Ordering::Relaxed), 0);
+}
+
+/// obs#53 (stream-snv 14.11.2026 17:11:03): the pump woke late and skipped 8 blocks (512 app frames,
+/// 10.667 ms); the next block's play time was correctly 10.667 ms later, but it was handed right
+/// after the last one, so OBS's timeline lost 10.667 ms and the stamp-placed ASRC slewed the audio
+/// for ~11 s. A skip in the blocks' media time is filled with exactly that much silence: OBS's
+/// timeline stays contiguous, the stamps never jump.
+#[test]
+fn a_skip_in_media_time_is_filled_with_silence_and_the_stamps_stay_contiguous() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 4800);
+    let t0: i64 = 7_000_000_000;
+    push_media(&mut sink, 128, &[1.0; 128], 9_600, t0);
+    // 512 frames skipped: the next block starts at 9_600 + 128 + 512.
+    push_media(
+        &mut sink,
+        128,
+        &[1.0; 128],
+        10_240,
+        t0 + frames_ns(640) as i64,
+    );
+    assert_eq!(feeder.drain(), Some(768));
+    let seen = seen_box.lock().unwrap().clone();
+    let samples: Vec<f32> = seen.iter().flat_map(|s| s.2[0].clone()).collect();
+    let mut want = vec![1.0f32; 128];
+    want.extend(vec![0.0f32; 512]);
+    want.extend(vec![1.0f32; 128]);
+    assert_eq!(
+        samples, want,
+        "the skip is silence, the blocks around it whole"
+    );
+    let stamps: Vec<u64> = seen.iter().map(|s| s.3).collect();
+    assert_eq!(stamps, [t0 as u64, t0 as u64 + frames_ns(480)]);
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 512);
+    assert_eq!(feed.gaps.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        feed.stamp_jumps.load(Ordering::Relaxed),
+        0,
+        "a filled skip is no jump"
+    );
+}
+
+/// obs#53: a backward media start (a schedule started again) has nothing to fill.
+#[test]
+fn a_backward_media_start_is_not_filled() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 4800);
+    push_media(&mut sink, 128, &[1.0; 128], 1_000, 1_000_000_000);
+    push_media(&mut sink, 128, &[1.0; 128], 500, 1_010_000_000);
+    assert_eq!(feeder.drain(), Some(256));
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 0);
+}
+
+/// obs#53: a forward jump past [`GAP_FILL_MAX_FRAMES`] is a schedule started again, not a skip:
+/// no second of silence is written.
+#[test]
+fn a_media_jump_past_the_fill_bound_is_not_filled() {
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 4800);
+    push_media(&mut sink, 128, &[1.0; 128], 0, 1_000_000_000);
+    push_media(
+        &mut sink,
+        128,
+        &[1.0; 128],
+        128 + GAP_FILL_MAX_FRAMES + 1,
+        5_000_000_000,
+    );
+    assert_eq!(feeder.drain(), Some(256));
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 0);
 }
 
 #[test]
