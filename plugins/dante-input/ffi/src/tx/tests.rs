@@ -213,3 +213,26 @@ fn a_block_off_the_last_one_s_end_resyncs_the_player_once() {
     }
     assert_eq!(tx_in.counts().resyncs, 1, "{:?}", tx_in.counts());
 }
+
+/// obs#56 review: a block wider than CHUNK is filled in pieces, and each piece passes its own
+/// start (the block's start + the frames before it): contiguous 2048-frame blocks never resync,
+/// so a piece passing the block's start again would read as a backward start and count one.
+#[test]
+fn a_block_filled_in_pieces_passes_each_piece_s_start() {
+    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let input: [f64; 0] = [];
+    let mut start = 0u64;
+    let mut sent = 0;
+    for _ in 0..20 {
+        for _ in 0..2 {
+            let (l, r) = obs_chunk(sent);
+            tx_in.push(&[&l, &r], 1024);
+            sent += 1024;
+        }
+        let mut output = vec![0.0; 2048 * 2];
+        let mut block = Block::new(2048, &input, &mut output).at(start);
+        tx_out.fill(&mut block);
+        start += 2048;
+    }
+    assert_eq!(tx_in.counts().resyncs, 0, "{:?}", tx_in.counts());
+}
