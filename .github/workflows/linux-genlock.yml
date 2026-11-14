@@ -758,6 +758,20 @@ jobs:
           export LD_LIBRARY_PATH="$(dirname "$libobs")"
           xvfb-run -a build/tick-audit-test "$data/"
 
+      # obs#57 (release gate) / obs#56 (dstack#303): OBS's audio thread feeds dante-input's TX through
+      # the raw audio callback; a 10-25 ms stall there drops dlink's TX player out. With a directly
+      # stamped source (smooth, pair-jittered, drifting) the tick gap stays under 30 ms.
+      - name: Test OBS's audio tick cadence at the TX tap (obs#57)
+        working-directory: tests/audio-cadence
+        run: |
+          set -euo pipefail
+          libobs="$(find "$GITHUB_WORKSPACE/obs-sdk" -name 'libobs.so*' -type f -print -quit)"
+          if [ -z "$libobs" ]; then echo "ERROR: no libobs.so in obs-sdk"; exit 1; fi
+          cmake -B build -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk" -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+          export LD_LIBRARY_PATH="$(dirname "$libobs")"
+          xvfb-run -a build/audio-cadence-test
+
       # camera-box issue 1495 (stream-snv 9.11.2026): the A/V-sync dock let go of a removed `mbc`
       # neither at its 5 s lookup nor at the removal, so it was never destroyed and CreateInput refused
       # the name until OBS restarted. The dock's hold (camera-box-measure-hold.hpp) through real libobs.
