@@ -81,8 +81,10 @@ pub const STAMP_JUMP_NS: u64 = 1_000_000;
 pub const STAMP_SLOTS: usize = 8192;
 
 /// obs#53: the largest skip in the blocks' media time (app frames) filled with silence; a larger or
-/// backward jump is a schedule started again, not a skip. 1 s at up to 96 kHz.
-pub const GAP_FILL_MAX_FRAMES: u64 = 96_000;
+/// backward jump is a schedule started again, not a skip. 0.1 s at 96 kHz, 0.2 s at 48 kHz (a pump
+/// skip is a few blocks: 10.7 ms on stream-snv), and a bounded write on the pump thread: at 64
+/// channels 614 400 samples, well under a block period.
+pub const GAP_FILL_MAX_FRAMES: u64 = 9_600;
 pub type LogCb = unsafe extern "C" fn(level: c_int, msg: *const c_char);
 
 static LOG: OnceLock<LogCb> = OnceLock::new();
@@ -245,6 +247,8 @@ pub struct Feed {
     pub gaps: AtomicU64,
     /// Their frames (app rate).
     pub gap_frames: AtomicU64,
+    /// Skips the full ring had no room to fill: OBS's timeline lost their frames (obs#53).
+    pub gaps_unfilled: AtomicU64,
 }
 
 /// A block's play time (dlink's `Block::play_at`, ns on OBS's clock) at its first frame's index in
@@ -305,7 +309,7 @@ impl Sink {
             return;
         };
         let Ok(mut chunk) = self.ring.write_chunk_uninit(count * n) else {
-            self.feed.dropped.fetch_add(frames, Ordering::Relaxed);
+            self.feed.gaps_unfilled.fetch_add(1, Ordering::Relaxed);
             return;
         };
         let (a, b) = chunk.as_mut_slices();
@@ -330,7 +334,10 @@ impl Process for Sink {
         {
             self.fill(st - want);
         }
-        self.next_start = start.map(|st| st + frames as u64);
+        // The timeline is written up to this block's start now (a skip filled, or a schedule
+        // started again). A block the full ring drops leaves it there, so the next block fills the
+        // dropped frames with silence if the ring has room by then (obs#53).
+        self.next_start = start;
         let n = self.channels;
         let have = block.inputs().min(n);
         let Ok(mut chunk) = self.ring.write_chunk_uninit(frames * n) else {
@@ -339,6 +346,7 @@ impl Process for Sink {
                 .fetch_add(frames as u64, Ordering::Relaxed);
             return;
         };
+        self.next_start = start.map(|st| st + frames as u64);
         let (a, b) = chunk.as_mut_slices();
         for (i, slot) in a.iter_mut().chain(b.iter_mut()).enumerate() {
             let (f, c) = (i / n, i % n);
@@ -407,6 +415,8 @@ pub struct Feeder {
     dropped_logged: u64,
     /// `gaps` last logged.
     gaps_logged: u64,
+    /// `gaps_unfilled` last logged.
+    unfilled_logged: u64,
     planes: Vec<Vec<f32>>,
     ptrs: Vec<*const f32>,
     feed: Arc<Feed>,
@@ -441,6 +451,7 @@ impl Feeder {
             stamped_once: false,
             dropped_logged: 0,
             gaps_logged: 0,
+            unfilled_logged: 0,
             planes: vec![vec![0.0; MAX_CHUNK]; channels],
             ptrs: vec![std::ptr::null(); channels],
             feed,
@@ -464,6 +475,17 @@ impl Feeder {
             }
             self.anchor = Some(*s);
             let _ = self.stamps.pop();
+        }
+        let unfilled = self.feed.gaps_unfilled.load(Ordering::Relaxed);
+        if unfilled > self.unfilled_logged {
+            log(
+                LOG_WARNING,
+                &format!(
+                    "dante-input timing: {} skip(s) found the ring full and were not filled with silence; OBS's timeline lost them (obs#53, {unfilled} in all)",
+                    unfilled - self.unfilled_logged,
+                ),
+            );
+            self.unfilled_logged = unfilled;
         }
         let gaps = self.feed.gaps.load(Ordering::Relaxed);
         if gaps > self.gaps_logged {
