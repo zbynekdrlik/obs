@@ -375,10 +375,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install the harness dependencies (apt)
         # libjansson-dev: drm_output_outputs_1424 links the lifted config grammar against jansson.
+        # libsimde-dev: the vban_source_* harness compiles vendor/obs-vban's vban-source.c, which
+        # includes libobs's util/sse-intrin.h (simde/x86/sse2.h); camera-box issue 1439, obs#50.
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential libjansson-dev
+          sudo apt-get install -y --no-install-recommends build-essential libjansson-dev libsimde-dev
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
