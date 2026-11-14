@@ -22,6 +22,7 @@ paths:
 - dlink's per-flow reads are per slot (`media.rx.lane(slot)` for 0..32). The line sums the counts and takes the worst slot for delays (`Status::flow`). A `last_*` value is dlink's last heartbeat second, not the print interval.
 - v0.4.27 appended the TX tokens `tx_track tx_played tx_underruns tx_recentres tx_overflows tx_ppm tx_priming` (obs#41). They read 0 on a device without TX.
 - v0.4.29 appended `rx_reordered` (obs#45, dlink v0.6.125, dstack #278): packets that filled a hole another packet opened. Since that pin `rx_gaps`/`rx_loss` count only holes still open at playout, so a reorder is no longer loss. dlink logs the wake delay's minute p50/p99/p99.9/max and the network latency itself (`RX flow timing in the last minute`); they are not tokens.
+- v0.4.30 appended `start_holes` (obs#47, dlink v0.6.126, dstack #234; camera-box asked for that name, no `rx_` prefix): ring samples read before the flow's first sample, the OBS-start burst. `rx_holes` holds only a running flow's holes since then. dlink logs `RX holes in the last minute ...` per flow and the write delay on the timing line itself.
 
 # dante-input TX
 

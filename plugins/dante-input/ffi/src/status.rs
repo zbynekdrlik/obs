@@ -9,9 +9,12 @@
 //! the kernel's receive stamp, which is wall clock (CLOCK_REALTIME): a forward step of it between a
 //! receive and the pass reads as a false wake delay, and stays in wake_delay_peak_us for the run.
 //! Since dlink v0.6.125 (dstack #278) a reordered packet fills the hole its overtaker opened and
-//! counts in rx_reordered, last on the line (obs#45); rx_gaps / rx_loss count only the holes still
-//! open at playout. The wake delay's minute percentiles are not on the line: dlink logs them once a
-//! minute per flow (`RX flow timing in the last minute ...`, dstack #234), through our logger.
+//! counts in rx_reordered, appended after tx_priming (obs#45); rx_gaps / rx_loss count only the
+//! holes still open at playout. Since dlink v0.6.126 a ring hole read before its flow's first
+//! sample (the OBS-start burst) counts in start_holes, appended after rx_reordered (obs#47), not
+//! in rx_holes. The wake and write delays' minute percentiles are not on the line: dlink logs them
+//! once a minute per flow (`RX flow timing in the last minute ...`, dstack #234), through our
+//! logger.
 
 use std::fmt::Write as _;
 
@@ -81,6 +84,9 @@ pub struct Status {
     /// (dlink v0.6.125, dstack #278). rx_gaps / rx_loss count only the holes still open at
     /// playout, so a reorder no longer reads as loss (camera-box issue 1508).
     pub rx_reordered: u64,
+    /// Samples the pump read before their flow's first sample (the OBS-start burst, a new flow's
+    /// start): never audio OBS was owed, so apart from rx_holes (dlink v0.6.126, dstack #234).
+    pub start_holes: u64,
 }
 
 impl Status {
@@ -100,7 +106,7 @@ impl Status {
              rx_holes={} rx_written_late={} late_blocks={} rebootstraps={} max_process_us={} \
              obs_dropped={} max_obs_us={} wire_late={} wake_delay_us={} wake_delay_peak_us={} \
              tx_track={} tx_played={} tx_underruns={} tx_recentres={} tx_overflows={} tx_ppm={:.1} \
-             tx_priming={} rx_reordered={}",
+             tx_priming={} rx_reordered={} start_holes={}",
             if self.media_clock { "media" } else { "free" },
             u8::from(self.holdover),
             self.clock_polls,
@@ -132,6 +138,7 @@ impl Status {
             self.tx_ppm_tenths as f64 / 10.0,
             u8::from(self.tx_priming),
             self.rx_reordered,
+            self.start_holes,
         );
         s
     }
@@ -178,8 +185,11 @@ impl Status {
         }
         for ring in media.rx.rings().iter() {
             let c = ring.counters();
-            st.rx_holes += c.holes;
-            st.rx_written_late += c.late;
+            st.ring(Ring {
+                holes: c.holes,
+                written_late: c.late,
+                start_holes: c.start_holes,
+            });
         }
         if let Some(p) = media.engine() {
             st.pump(Pump {
@@ -202,6 +212,13 @@ impl Status {
         self.rx_gaps += l.gaps;
         self.rx_late += l.late;
         self.rx_reordered += l.reordered;
+    }
+
+    /// One channel ring's counts: they add up over the rings.
+    pub fn ring(&mut self, r: Ring) {
+        self.rx_holes += r.holes;
+        self.rx_written_late += r.written_late;
+        self.start_holes += r.start_holes;
     }
 
     /// One flow slot's RX timing: wire_late adds up, the wake delays keep the worst flow's.
@@ -233,6 +250,17 @@ pub struct Lane {
     pub late: u64,
     /// Packets that filled a hole: reordered, not lost.
     pub reordered: u64,
+}
+
+/// One channel ring's counts (dstack's ring Counters, which dlink does not name).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Ring {
+    /// Samples read that no packet had written, once the flow ran (since dlink v0.6.126,
+    /// dstack #234).
+    pub holes: u64,
+    pub written_late: u64,
+    /// Samples read before the flow's first sample (dlink v0.6.126, dstack #234).
+    pub start_holes: u64,
 }
 
 /// One flow slot's RX timing (dlink v0.6.101, dstack #234).
@@ -298,6 +326,7 @@ mod tests {
             tx_ppm_tenths: -125,
             tx_priming: false,
             rx_reordered: 20,
+            start_holes: 21,
         };
         assert_eq!(
             st.line(),
@@ -307,7 +336,7 @@ mod tests {
              rebootstraps=10 max_process_us=11 obs_dropped=12 max_obs_us=13 \
              wire_late=14 wake_delay_us=15 wake_delay_peak_us=16 \
              tx_track=1 tx_played=96000 tx_underruns=17 tx_recentres=18 tx_overflows=19 \
-             tx_ppm=-12.5 tx_priming=0 rx_reordered=20"
+             tx_ppm=-12.5 tx_priming=0 rx_reordered=20 start_holes=21"
         );
     }
 
@@ -334,7 +363,8 @@ mod tests {
         assert!(
             st.line().ends_with(
                 " max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000 \
-                 tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 rx_reordered=0"
+                 tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
+                 rx_reordered=0 start_holes=0"
             ),
             "{}",
             st.line()
@@ -409,7 +439,32 @@ mod tests {
         );
         let line = st.line();
         assert!(line.contains(" rx_loss=16 rx_gaps=1 rx_late=3 "), "{line}");
-        assert!(line.ends_with(" rx_reordered=10"), "{line}");
+        assert!(line.ends_with(" rx_reordered=10 start_holes=0"), "{line}");
+    }
+
+    /// obs#47 (dlink v0.6.126, dstack #234): the rings' counts add up; the start burst is apart
+    /// from the holes.
+    #[test]
+    fn the_rings_counts_add_up_and_start_holes_are_not_holes() {
+        let mut st = Status::default();
+        st.ring(Ring {
+            holes: 0,
+            written_late: 0,
+            start_holes: 3324,
+        });
+        st.ring(Ring {
+            holes: 12,
+            written_late: 4,
+            start_holes: 100,
+        });
+        st.ring(Ring::default());
+        assert_eq!(
+            (st.rx_holes, st.rx_written_late, st.start_holes),
+            (12, 4, 3424)
+        );
+        let line = st.line();
+        assert!(line.contains(" rx_holes=12 rx_written_late=4 "), "{line}");
+        assert!(line.ends_with(" rx_reordered=0 start_holes=3424"), "{line}");
     }
 
     /// obs#41: the TX's counts land on the line; the ppm rounds to a tenth.
@@ -418,7 +473,7 @@ mod tests {
         let mut st = Status::default();
         assert!(st.line().ends_with(
             "tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
-             rx_reordered=0"
+             rx_reordered=0 start_holes=0"
         ));
         st.tx(crate::tx::TxCounts {
             track: 1,
@@ -431,7 +486,8 @@ mod tests {
         });
         assert!(
             st.line().ends_with(
-                "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1 rx_reordered=0"
+                "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1 \
+                 rx_reordered=0 start_holes=0"
             ),
             "{}",
             st.line()
