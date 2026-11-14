@@ -1422,11 +1422,32 @@ static void async_tick(obs_source_t *source)
 	pthread_mutex_unlock(&source->async_mutex);
 }
 
+/* obs#30: whether this tick may run a pending deferred update: always outside tick_sources, the
+ * first of every frame (progress), and the rest while the frame's budget lasts. */
+static bool deferred_update_allowed(void)
+{
+	struct obs_core_video *video = &obs->video;
+	if (video->deferred_update_deadline_ns && video->deferred_updates_this_tick > 0 &&
+	    os_gettime_ns() >= video->deferred_update_deadline_ns) {
+		video->deferred_updates_postponed_this_tick++;
+		return false;
+	}
+	video->deferred_updates_this_tick++;
+	return true;
+}
+
 void obs_source_video_tick(obs_source_t *source, float seconds)
 {
 	bool now_showing, now_active;
 
 	if (!obs_source_valid(source, "obs_source_video_tick"))
+		return;
+
+	/* obs#30: an OBS start ran every source's deferred update in one tick_sources (15 FreeType2 text
+	 * sources, ~130 ms on strih-snv: 6-7 program frames lagged, 2-3 JPEG XS frames dropped). Past the
+	 * frame's budget, a source with an update pending skips this whole tick, so its update still runs
+	 * before its first video_tick (OBS's order), a frame or a few later. */
+	if (os_atomic_load_long(&source->defer_update_count) > 0 && !deferred_update_allowed())
 		return;
 
 	if (source->info.type == OBS_SOURCE_TYPE_TRANSITION)

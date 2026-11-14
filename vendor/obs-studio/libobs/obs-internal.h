@@ -504,6 +504,12 @@ extern void obs_free_video_mix(struct obs_core_video_mix *video);
 extern void obs_video_mix_start_gpu_encoding(struct obs_core_video_mix *video);
 
 struct obs_core_video {
+	/* obs#30: the deferred-update budget of the tick_sources in progress (0 outside it): a source
+	 * whose update is still pending once it is spent skips that frame's tick (obs-source.c). Only the
+	 * graphics thread reads or writes these. */
+	uint64_t deferred_update_deadline_ns;
+	uint32_t deferred_updates_this_tick;
+	uint32_t deferred_updates_postponed_this_tick;
 	graphics_t *graphics;
 	gs_effect_t *default_effect;
 	gs_effect_t *default_rect_effect;
