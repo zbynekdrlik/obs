@@ -11,7 +11,19 @@
  *                                           reaches the device's TX FIFO (the status line's tx_*
  *                                           tokens move), unload untaps it before the stop.
  *
- * The caller writes HOME/.camera-box/dante-input.toml for the last two. Exit 0 = every check held. */
+ *   module_test <dante-input.so> soak       obs#57's release gate (dstack docs/ci-peer.md): the config
+ *                                           has tx, test_clock_ppm and an RX subscribed to a running
+ *                                           `dstack-dev peer` (DANTE_PEER_STATUS names its status
+ *                                           JSON). OBS plays a 440 Hz tone on track 1 into the TX; a
+ *                                           dante_input source (track 2 only) takes the peer's tone.
+ *                                           After the settle, DANTE_SOAK_SECONDS (600 unless set) of
+ *                                           real time: no TX underrun, re-centre or resync, no RX
+ *                                           hole, loss or gap, no pump underrun, no play-time step,
+ *                                           stamp jump or unfilled gap, no peer tone gap; the play
+ *                                           time's deviation under 1 ms, tx_ppm and the peer's
+ *                                           play_at_ppm within the skew + 2 ppm.
+ *
+ * The caller writes HOME/.camera-box/dante-input.toml for the last three. Exit 0 = every check held. */
 
 #include <obs.h>
 #include <util/base.h>
@@ -19,6 +31,7 @@
 #include <util/platform.h>
 #include <util/threading.h>
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -86,6 +99,190 @@ static unsigned long long last_value(const char *token)
 	return v;
 }
 
+/* The value of ` <token>=` (a decimal, maybe negative) in the last status line that has it. */
+static double last_double(const char *token)
+{
+	double v = 0.0;
+	pthread_mutex_lock(&logged_mutex);
+	const char *p = logged.array;
+	while (p && (p = strstr(p, token)) != NULL) {
+		p += strlen(token);
+		v = strtod(p, NULL);
+	}
+	pthread_mutex_unlock(&logged_mutex);
+	return v;
+}
+
+static bool logged_within(const char *s, int ms);
+
+/* ---- obs#57's soak ---- */
+
+/* The peer's own part of its status JSON (before "device"), or NULL; the caller frees it. */
+static char *peer_part(void)
+{
+	const char *path = getenv("DANTE_PEER_STATUS");
+	char *text = path ? os_quick_read_utf8_file(path) : NULL;
+	if (!text)
+		return NULL;
+	char *device = strstr(text, "\"device\"");
+	if (device)
+		*device = '\0';
+	return text;
+}
+
+/* The number after `"key":` in `json` (spaces allowed), or -1 when absent. */
+static double json_number(const char *json, const char *key)
+{
+	char quoted[64];
+	snprintf(quoted, sizeof(quoted), "\"%s\"", key);
+	const char *p = json ? strstr(json, quoted) : NULL;
+	if (!p)
+		return -1.0;
+	p = strchr(p + strlen(quoted), ':');
+	return p ? strtod(p + 1, NULL) : -1.0;
+}
+
+static bool peer_locked(void)
+{
+	char *json = peer_part();
+	bool locked = json && (strstr(json, "\"locked\": true") || strstr(json, "\"locked\":true"));
+	bfree(json);
+	return locked;
+}
+
+/* A 440 Hz tone at -12 dBFS, OBS's track 1 into dante-input's TX: steady for the peer's check. */
+static const char *tone_name(void *type_data)
+{
+	(void)type_data;
+	return "soak tone";
+}
+
+static void *tone_create(obs_data_t *settings, obs_source_t *source)
+{
+	(void)settings;
+	(void)source;
+	return bzalloc(1);
+}
+
+static void tone_destroy(void *data)
+{
+	bfree(data);
+}
+
+static volatile bool tone_stop;
+static obs_source_t *tone_source;
+
+static void *tone_loop(void *param)
+{
+	(void)param;
+	float plane[480];
+	const uint64_t t0 = os_gettime_ns();
+	uint64_t frame = 0;
+	for (uint64_t k = 0; !tone_stop; k++) {
+		const uint64_t due = t0 + k * 480ULL * 1000000000ULL / 48000ULL;
+		if (due > os_gettime_ns())
+			os_sleepto_ns(due);
+		for (int i = 0; i < 480; i++, frame++)
+			plane[i] = 0.25f * (float)sin(2.0 * M_PI * 440.0 * (double)frame / 48000.0);
+		struct obs_source_audio a = {0};
+		a.data[0] = (const uint8_t *)plane;
+		a.data[1] = (const uint8_t *)plane;
+		a.frames = 480;
+		a.speakers = SPEAKERS_STEREO;
+		a.format = AUDIO_FORMAT_FLOAT_PLANAR;
+		a.samples_per_sec = 48000;
+		a.timestamp = due;
+		obs_source_output_audio(tone_source, &a);
+	}
+	return NULL;
+}
+
+/* The status line's counters that must not rise during the soak. */
+static const char *const soak_counters[] = {
+	" tx_underruns=", " tx_recentres=", " tx_resyncs=",  " rx_holes=",    " rx_loss=",
+	" rx_gaps=",      " underruns=",    " play_at_steps=", " stamp_jumps=", " gaps_unfilled=",
+};
+#define SOAK_COUNTERS (sizeof(soak_counters) / sizeof(soak_counters[0]))
+
+static void soak(double skew_ppm)
+{
+	struct obs_source_info tone = {0};
+	tone.id = "soak_tone";
+	tone.type = OBS_SOURCE_TYPE_INPUT;
+	tone.output_flags = OBS_SOURCE_AUDIO;
+	tone.get_name = tone_name;
+	tone.create = tone_create;
+	tone.destroy = tone_destroy;
+	obs_register_source(&tone);
+	tone_source = obs_source_create("soak_tone", "soak tone", NULL, NULL);
+	obs_source_set_audio_mixers(tone_source, 1);
+	obs_set_output_source(1, tone_source);
+	pthread_t tone_thread;
+	expect(pthread_create(&tone_thread, NULL, tone_loop, NULL) == 0, "the tone thread starts");
+
+	/* The peer's tone through dante-input into OBS, on track 2 only (the TX carries one tone). */
+	obs_source_t *dante = obs_source_create("dante_input", "Dante soak", NULL, NULL);
+	expect(dante != NULL, "a dante_input source is created");
+	obs_source_set_audio_mixers(dante, 2);
+	obs_set_output_source(2, dante);
+
+	expect(logged_has("(device running)"), "the device runs");
+	expect(logged_within(" tx_priming=0", 20000), "the TX player primed on OBS's tone");
+	bool locked = false;
+	for (int waited = 0; waited < 60000 && !locked; waited += 500) {
+		locked = peer_locked() && last_value(" rx_packets=") > 0;
+		if (!locked)
+			os_sleep_ms(500);
+	}
+	expect(locked, "the peer's RX locked on dante-input's TX and dante-input receives the peer");
+	os_sleep_ms(15000); /* the settle: the status line every 10 s from 30 s on, the ASRCs lock */
+
+	unsigned long long before[SOAK_COUNTERS];
+	for (size_t i = 0; i < SOAK_COUNTERS; i++)
+		before[i] = last_value(soak_counters[i]);
+	char *json = peer_part();
+	const double gaps_before = json_number(json, "tone_gaps");
+	bfree(json);
+	const char *window_env = getenv("DANTE_SOAK_SECONDS");
+	const int window = window_env ? atoi(window_env) : 600;
+	fprintf(stderr, "soak: %d s from here (skew %.1f ppm)\n", window, skew_ppm);
+	os_sleep_ms((uint32_t)window * 1000 + 11000); /* + one 10 s status line */
+
+	for (size_t i = 0; i < SOAK_COUNTERS; i++) {
+		const unsigned long long after = last_value(soak_counters[i]);
+		char what[160];
+		snprintf(what, sizeof(what), "soak: %s did not rise (%llu then %llu)", soak_counters[i] + 1, before[i],
+			 after);
+		expect(after == before[i], what);
+	}
+	const unsigned long long dev = last_value(" play_at_max_dev_us=");
+	char what[160];
+	snprintf(what, sizeof(what), "soak: play_at_max_dev_us %llu under 1000", dev);
+	expect(dev < 1000, what);
+	const double tx_ppm = last_double(" tx_ppm=");
+	snprintf(what, sizeof(what), "soak: tx_ppm %.1f settled within the skew + 2 (|%.1f| <= %.1f)", tx_ppm, tx_ppm,
+		 fabs(skew_ppm) + 2.0);
+	expect(fabs(tx_ppm) <= fabs(skew_ppm) + 2.0, what);
+	json = peer_part();
+	const double gaps_after = json_number(json, "tone_gaps");
+	const double peer_ppm = json_number(json, "play_at_ppm");
+	const bool still_locked = json && (strstr(json, "\"locked\": true") || strstr(json, "\"locked\":true"));
+	bfree(json);
+	snprintf(what, sizeof(what), "soak: the peer's tone_gaps did not rise (%.0f then %.0f)", gaps_before,
+		 gaps_after);
+	expect(gaps_before >= 0 && gaps_after == gaps_before, what);
+	expect(still_locked, "soak: the peer's RX still locked at the end");
+	snprintf(what, sizeof(what), "soak: the peer's play_at_ppm %.2f within the skew %.1f ± 2", peer_ppm, skew_ppm);
+	expect(fabs(peer_ppm - skew_ppm) <= 2.0, what);
+
+	tone_stop = true;
+	pthread_join(tone_thread, NULL);
+	obs_set_output_source(1, NULL);
+	obs_set_output_source(2, NULL);
+	obs_source_release(tone_source);
+	obs_source_release(dante);
+}
+
 /* `s` logged within `ms` (libobs destroys a released source on another thread). */
 static bool logged_within(const char *s, int ms)
 {
@@ -100,7 +297,7 @@ static bool logged_within(const char *s, int ms)
 int main(int argc, char **argv)
 {
 	if (argc != 3) {
-		fprintf(stderr, "usage: %s <dante-input.so> absent|bad-iface|running|running-tx\n", argv[0]);
+		fprintf(stderr, "usage: %s <dante-input.so> absent|bad-iface|running|running-tx|soak\n", argv[0]);
 		return 2;
 	}
 	const char *so = argv[1];
@@ -162,6 +359,9 @@ int main(int argc, char **argv)
 		fprintf(stderr, "tx_played %llu then %llu\n", first, later);
 		expect(last_value(" tx_overflows=") == 0 && logged_has(" tx_overflows="),
 		       "no OBS frame was dropped at the FIFO (the last status line)");
+	} else if (strcmp(mode, "soak") == 0) {
+		const char *skew = getenv("DANTE_SOAK_SKEW_PPM");
+		soak(skew ? atof(skew) : 6.0);
 	} else {
 		fprintf(stderr, "unknown mode %s\n", mode);
 		return 2;
