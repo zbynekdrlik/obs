@@ -212,6 +212,29 @@ static double breakdown_max(size_t from, const char *part, const char *key)
 	return best;
 }
 
+/* the largest |value after key_a - value after key_b| over kept breakdown lines from `from` holding
+ * `part`; -1 when none holds both */
+static double breakdown_gap(size_t from, const char *part, const char *key_a, const char *key_b)
+{
+	double worst = -1.0;
+	pthread_mutex_lock(&log_mutex);
+	for (size_t i = from; i < line_count && i < MAX_LINES; i++) {
+		if (!strstr(lines[i], "tick-audit: tick_sources took ") || !strstr(lines[i], part))
+			continue;
+		const char *a = strstr(lines[i], key_a);
+		const char *b = strstr(lines[i], key_b);
+		if (!a || !b)
+			continue;
+		double gap = atof(a + strlen(key_a)) - atof(b + strlen(key_b));
+		if (gap < 0)
+			gap = -gap;
+		if (gap > worst)
+			worst = gap;
+	}
+	pthread_mutex_unlock(&log_mutex);
+	return worst;
+}
+
 /* ---- another thread holds the sources lock: obs_enum_sources keeps it across its callbacks ---- */
 
 static volatile long enum_slow_left;
@@ -328,6 +351,10 @@ int main(int argc, char **argv)
 	expect(by_type >= 30.0, "the breakdown sums the ticks by source type, the short sources' type first");
 	expect(count_lines("tick-audit: tick_sources took", "by type: test_short ", " ms (12)", NULL) >= 1,
 	       "the type's sum carries its count of sources (12)");
+	double gap = breakdown_gap(from, "(slowest 'short ", "by type: test_short ", "ticks ");
+	fprintf(stderr, "largest |test_short sum - ticks sum| in one line: %.1f ms\n", gap);
+	expect(gap >= 0.0 && gap <= 1.0,
+	       "the short sources' type sum is that line's ticks sum (the other sources tick in no time)");
 
 	/* Another thread holds the sources lock for 300 ms: a tick_sources starting in it waits at least
 	 * 300 ms less one 33 ms frame and any lateness of the video thread. Only lines logged from here

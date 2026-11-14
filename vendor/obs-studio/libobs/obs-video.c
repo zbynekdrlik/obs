@@ -120,6 +120,7 @@ static inline double tick_audit_ms(uint64_t ns)
 #define TICK_AUDIT_KEEP 512
 #define TICK_AUDIT_TYPES 32
 #define TICK_AUDIT_TOP 5
+#define TICK_AUDIT_NOT_TICKED UINT64_MAX
 
 struct tick_audit_type {
 	const char *id;
@@ -136,7 +137,7 @@ static void tick_audit_by_type(obs_source_t *const *sources, const uint64_t *too
 	uint32_t other_n = 0;
 
 	for (size_t i = 0; i < num; i++) {
-		if (obs_source_removed(sources[i]))
+		if (took[i] == TICK_AUDIT_NOT_TICKED)
 			continue;
 		const char *id = obs_source_get_id(sources[i]);
 		if (!id)
@@ -160,6 +161,10 @@ static void tick_audit_by_type(obs_source_t *const *sources, const uint64_t *too
 	}
 
 	size_t len = 0;
+	if (!ntypes && !other_n) {
+		snprintf(out, out_size, "none");
+		return;
+	}
 	out[0] = '\0';
 	for (size_t k = 0; k < TICK_AUDIT_TOP && k < ntypes; k++) {
 		size_t best = k;
@@ -173,11 +178,21 @@ static void tick_audit_by_type(obs_source_t *const *sources, const uint64_t *too
 		int w = snprintf(out + len, out_size - len, "%s%s %.1f ms (%u)", k ? ", " : "", types[k].id,
 				 tick_audit_ms(types[k].ns), types[k].n);
 		if (w < 0 || (size_t)w >= out_size - len)
-			return;
+			goto truncated;
 		len += (size_t)w;
 	}
-	if (other_n)
-		snprintf(out + len, out_size - len, ", other types %.1f ms (%u)", tick_audit_ms(other_ns), other_n);
+	if (other_n) {
+		int w = snprintf(out + len, out_size - len, ", other types %.1f ms (%u)", tick_audit_ms(other_ns),
+				 other_n);
+		if (w < 0 || (size_t)w >= out_size - len)
+			goto truncated;
+	}
+	return;
+
+truncated:
+	/* end on a whole marker, not partway through a name */
+	if (out_size >= 4)
+		snprintf(out + out_size - 4, 4, "...");
 }
 
 static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
@@ -191,7 +206,8 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 	uint64_t audit_slowest = 0;
 	char audit_slowest_name[64] = "";
 	uint64_t audit_took[TICK_AUDIT_KEEP];
-	char audit_types[384] = "-";
+	char audit_types[384] = "not taken (the ticks did not pass the bar)";
+	uint64_t audit_by_type = 0;
 	size_t audit_callbacks;
 
 	if (!last_time)
@@ -268,16 +284,17 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 				     obs_source_get_name(s), obs_source_get_id(s), tick_audit_ms(took),
 				     TICK_AUDIT_SLOW_MS);
 		} else if (i < TICK_AUDIT_KEEP) {
-			audit_took[i] = 0;
+			audit_took[i] = TICK_AUDIT_NOT_TICKED;
 		}
 	}
 
 	/* the types while the sources are still held, only for a call on its way over the bar */
-	if (os_gettime_ns() - audit_begin > TICK_AUDIT_SLOW_NS &&
-	    tick_audit_breakdown_lines <= TICK_AUDIT_MAX_LINES) {
+	const uint64_t by_type_start = os_gettime_ns();
+	if (by_type_start - audit_begin > TICK_AUDIT_SLOW_NS && tick_audit_breakdown_lines < TICK_AUDIT_MAX_LINES) {
 		const size_t kept = data->sources_to_tick.num < TICK_AUDIT_KEEP ? data->sources_to_tick.num
 										  : TICK_AUDIT_KEEP;
 		tick_audit_by_type(data->sources_to_tick.array, audit_took, kept, audit_types, sizeof(audit_types));
+		audit_by_type = os_gettime_ns() - by_type_start;
 	}
 
 	/* The releases apart from the ticks, timed as one phase: a source's last reference destroys
@@ -293,11 +310,11 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 		blog(LOG_INFO,
 		     "tick-audit: tick_sources took %.1f ms: callbacks lock %.1f ms, callbacks %.1f ms (%zu), "
 		     "sources lock %.1f ms, list %.1f ms (%zu sources), ticks %.1f ms (slowest '%s' %.1f ms), "
-		     "releases %.1f ms, by type: %s (over %d ms; obs#30)",
+		     "releases %.1f ms, audit %.1f ms, by type: %s (over %d ms; obs#30)",
 		     tick_audit_ms(audit_total), tick_audit_ms(audit_cb_lock), tick_audit_ms(audit_cb_run),
 		     audit_callbacks, tick_audit_ms(audit_src_lock), tick_audit_ms(audit_list),
 		     data->sources_to_tick.num, tick_audit_ms(audit_ticks), audit_slowest_name,
-		     tick_audit_ms(audit_slowest), tick_audit_ms(audit_releases), audit_types,
+		     tick_audit_ms(audit_slowest), tick_audit_ms(audit_releases), tick_audit_ms(audit_by_type), audit_types,
 		     TICK_AUDIT_SLOW_MS);
 
 	return cur_time;
