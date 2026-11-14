@@ -14,6 +14,9 @@
  *     ticks adding up show in its ticks sum, another thread holding the sources lock (as
  *     obs_enum_sources does across its callbacks) shows in its sources lock wait (v0.4.31 on
  *     strih-snv named no single tick over 20 ms while tick_sources still stalled);
+ *   - a breakdown sums the ticks by source type: the 12 short sources' type shows with its count
+ *     and their sum (v0.4.32 on strih-snv: 130 ms over the first ticks of 66 sources, no single
+ *     source over the bar);
  *   - at most 64 slow ticks and, apart, 64 breakdowns are logged; each kind then says once that
  *     further ones are not.
  *
@@ -285,6 +288,7 @@ int main(int argc, char **argv)
 	register_ticker("test_fast");
 	register_ticker("test_slow_always");
 	register_ticker("test_under_bar");
+	register_ticker("test_short");
 
 	/* A source slow on its first 2 ticks (60 ms, as a first tick at an OBS start), a fast one and
 	 * a tick callback slow once (45 ms). */
@@ -311,7 +315,7 @@ int main(int argc, char **argv)
 	for (size_t i = 0; i < 12; i++) {
 		char name[32];
 		snprintf(name, sizeof(name), "short %zu", i);
-		shorts[i] = ticker("test_fast", name, 4, 3);
+		shorts[i] = ticker("test_short", name, 4, 3);
 	}
 	os_sleep_ms(1000);
 	audit_ms("source 'short ", 20.0, 1000.0, &in, &out);
@@ -319,6 +323,11 @@ int main(int argc, char **argv)
 	double ticks = breakdown_max(from, "(slowest 'short ", "ticks ");
 	fprintf(stderr, "largest ticks sum: %.1f ms\n", ticks);
 	expect(ticks >= 30.0, "short ticks adding up show in a tick_sources breakdown's ticks sum, none over the bar");
+	double by_type = breakdown_max(from, "(slowest 'short ", "by type: test_short ");
+	fprintf(stderr, "largest test_short type sum: %.1f ms\n", by_type);
+	expect(by_type >= 30.0, "the breakdown sums the ticks by source type, the short sources' type first");
+	expect(count_lines("tick-audit: tick_sources took", "by type: test_short ", " ms (12)", NULL) >= 1,
+	       "the type's sum carries its count of sources (12)");
 
 	/* Another thread holds the sources lock for 300 ms: a tick_sources starting in it waits at least
 	 * 300 ms less one 33 ms frame and any lateness of the video thread. Only lines logged from here
