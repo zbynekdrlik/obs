@@ -36,7 +36,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.118: fixed flow ports from the device's slot in the dstack flow range 29800-31847 (dstack #264, owner 13.11.2026), so one generic Dante-leg filter fits every PC; an unset rx_port_base now means the slot's own block. A device whose ARC port is no slot's (4440-4471) must set both bases. RX status names the transmitter (dstack #266).
 # v0.6.125: a reordered RX packet fills its hole and counts as reordered, so gaps/gap_frames (rx_gaps/rx_loss) count only holes still open at playout (dstack #278, camera-box issue 1508); a once-a-minute INFO line per RX flow gives the wake delay p50/p99/p99.9/max and the network latency (dstack #234, camera-box issue 1510). RxCounts gains reordered. No latency change.
 # v0.6.126: a ring hole read before its flow's first sample counts as start_holes, not holes, so rx_holes no longer holds the OBS-start burst; the minute timing line adds the write delay, and a minute line names each flow's holes (dstack #234, camera-box issue 1510). Counters gains start_holes. No latency change.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.126" }
+# v0.6.132: each RX block carries its play time in the app clock (Block::play_at, CLOCK_MONOTONIC / QPC ns = os_gettime_ns): the block's first sample + P + (c), recomputed per block from a fresh media/monotonic pair, so stamps follow the media-vs-monotonic drift continuously (dstack#295, obs#53, camera-box issue 1527). Passes v0.6.127-0.6.131. No latency change.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.132" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
