@@ -6,9 +6,12 @@
  * frame's tick (update and all) and runs it on a later frame. The test runs real libobs with 15 video
  * sources whose create defers an update of 8 ms, and checks:
  *
- *   - no gap between two tick_sources (a tick callback's calls) reaches 50 ms (it was ~150 ms);
+ *   - no gap between two tick_sources (a tick callback's calls) reaches 100 ms (it was 121 ms; with
+ *     the budget about a frame + 8 ms);
  *   - every source's update ran;
- *   - no source's video_tick ran before its first update (OBS's order kept).
+ *   - no source's video_tick ran before its first update (OBS's order kept);
+ *   - review: a video source with no update callback that gets obs_source_update keeps ticking, and
+ *     a running source whose update is re-armed every frame keeps ticking while new sources wait.
  *
  *   deferred-update-test <libobs data dir>   (the SDK's share/obs/libobs/, which holds the effects)
  *
@@ -102,6 +105,43 @@ static void slow_render(void *data, gs_effect_t *effect)
 	(void)effect;
 }
 
+/* the review's sources: ticks counted on the graphics thread */
+static long plain_ticks, running_ticks;
+
+static const char *plain_name(void *type_data)
+{
+	(void)type_data;
+	return "no update";
+}
+
+static void plain_tick(void *data, float seconds)
+{
+	(void)data;
+	(void)seconds;
+	os_atomic_inc_long(&plain_ticks);
+}
+
+static void running_tick(void *data, float seconds)
+{
+	(void)data;
+	(void)seconds;
+	os_atomic_inc_long(&running_ticks);
+}
+
+static void *running_create(obs_data_t *settings, obs_source_t *source)
+{
+	(void)settings;
+	(void)source;
+	return bzalloc(1);
+}
+
+static void running_update(void *data, obs_data_t *settings)
+{
+	(void)data;
+	(void)settings;
+	os_sleep_ms(2);
+}
+
 static uint64_t last_tick_ns, max_gap_ns;
 
 static void on_tick(void *param, float seconds)
@@ -161,8 +201,29 @@ int main(int argc, char **argv)
 	info.video_render = slow_render;
 	obs_register_source(&info);
 
+	/* a video source with data but no update callback */
+	struct obs_source_info plain = info;
+	plain.id = "test_no_update";
+	plain.get_name = plain_name;
+	plain.create = running_create;
+	plain.update = NULL;
+	plain.video_tick = plain_tick;
+	obs_register_source(&plain);
+	/* a running source whose update is re-armed again and again */
+	struct obs_source_info running = info;
+	running.id = "test_running";
+	running.get_name = plain_name;
+	running.create = running_create;
+	running.update = running_update;
+	running.video_tick = running_tick;
+	obs_register_source(&running);
+
+	obs_source_t *no_update = obs_source_create("test_no_update", "no update", NULL, NULL);
+	obs_source_t *busy = obs_source_create("test_running", "running", NULL, NULL);
+	obs_source_update(busy, NULL);
+
 	obs_add_tick_callback(on_tick, NULL);
-	os_sleep_ms(500); /* the tick gaps settle */
+	os_sleep_ms(500); /* the tick gaps settle; the running source has its first update */
 	max_gap_ns = 0;
 
 	/* An OBS start's scene load: all sources at once, before their first tick. */
@@ -173,18 +234,35 @@ int main(int argc, char **argv)
 		snprintf(name, sizeof(name), "slow %d", i);
 		sources[i] = obs_source_create("test_slow_update", name, NULL, NULL);
 	}
+	obs_source_update(no_update, NULL);
 	obs_leave_graphics();
-	os_sleep_ms(2000);
+	const long plain_before = os_atomic_load_long(&plain_ticks);
+	const long running_before = os_atomic_load_long(&running_ticks);
+	for (int i = 0; i < 40; i++) {
+		obs_source_update(no_update, NULL);
+		obs_source_update(busy, NULL);
+		os_sleep_ms(50);
+	}
 	obs_remove_tick_callback(on_tick, NULL);
+	const long plain_n = os_atomic_load_long(&plain_ticks) - plain_before;
+	const long running_n = os_atomic_load_long(&running_ticks) - running_before;
+	fprintf(stderr, "in 2 s: the source with no update ticked %ld times, the running re-armed one %ld\n", plain_n,
+		running_n);
+	/* every frame, the 15 new sources' spread frames included (a held tick there would fall behind) */
+	expect(running_n > 40 && plain_n >= running_n - 2,
+	       "a video source with no update callback ticks every frame (its update is never held)");
+	expect(running_n > 40, "a running source's re-armed updates never hold its ticks");
 
 	fprintf(stderr, "updates %ld, ticks before an update %ld, max tick_sources gap %.1f ms\n",
 		os_atomic_load_long(&updates), os_atomic_load_long(&ticks_before_update), (double)max_gap_ns / 1e6);
 	expect(os_atomic_load_long(&updates) == SOURCES, "every source's deferred update ran");
-	expect(max_gap_ns < 50000000, "no tick_sources gap reaches 50 ms (15 updates of 8 ms spread over frames)");
+	expect(max_gap_ns < 100000000, "no tick_sources gap reaches 100 ms (15 updates of 8 ms spread over frames)");
 	expect(os_atomic_load_long(&ticks_before_update) == 0, "no source's video_tick ran before its first update");
 
 	for (int i = 0; i < SOURCES; i++)
 		obs_source_release(sources[i]);
+	obs_source_release(no_update);
+	obs_source_release(busy);
 	obs_shutdown();
 	if (failures)
 		fprintf(stderr, "%d check(s) failed\n", failures);

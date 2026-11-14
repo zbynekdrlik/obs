@@ -69,10 +69,7 @@ static uint32_t tick_audit_lines;
 static uint32_t tick_audit_breakdown_lines;
 static uint32_t tick_audit_postponed_lines;
 
-/* obs#30: the deferred updates one tick_sources runs, ms: past it, the rest wait a frame (the first
- * of every frame always runs). A quarter of a 30 fps frame. */
-#define DEFERRED_UPDATE_BUDGET_MS 8
-#define DEFERRED_UPDATE_BUDGET_NS ((uint64_t)DEFERRED_UPDATE_BUDGET_MS * 1000000ULL)
+
 
 /* room for one more line of a kind: its own budget, and one line when it runs out */
 static bool tick_audit_budget(uint32_t *lines, const char *what)
@@ -269,8 +266,9 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 	/* ------------------------------------- */
 	/* call the tick function of each source */
 
-	/* obs#30: the frame's deferred-update budget (obs-source.c obs_source_video_tick) */
-	obs->video.deferred_update_deadline_ns = os_gettime_ns() + DEFERRED_UPDATE_BUDGET_NS;
+	/* obs#30: the frame's first-update budget (obs-source.c obs_source_video_tick) */
+	obs->video.deferred_update_budget_armed = true;
+	obs->video.deferred_update_spent_ns = 0;
 	obs->video.deferred_updates_this_tick = 0;
 	obs->video.deferred_updates_postponed_this_tick = 0;
 
@@ -308,12 +306,13 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 		audit_by_type = os_gettime_ns() - by_type_start;
 	}
 
-	obs->video.deferred_update_deadline_ns = 0;
+	obs->video.deferred_update_budget_armed = false;
 	if (obs->video.deferred_updates_postponed_this_tick &&
-	    tick_audit_budget(&tick_audit_postponed_lines, "deferred-update postponements"))
+	    tick_audit_budget(&tick_audit_postponed_lines, "first-update postponements"))
 		blog(LOG_INFO,
-		     "tick-audit: %u deferred update(s) ran, %u wait for a later frame (budget %d ms a frame; obs#30)",
-		     obs->video.deferred_updates_this_tick, obs->video.deferred_updates_postponed_this_tick,
+		     "tick-audit: new sources' first updates took %.1f ms this frame; %u new source(s) wait for a "
+		     "later frame (budget %d ms of first updates a frame; obs#30)",
+		     tick_audit_ms(obs->video.deferred_update_spent_ns), obs->video.deferred_updates_postponed_this_tick,
 		     DEFERRED_UPDATE_BUDGET_MS);
 
 	/* The releases apart from the ticks, timed as one phase: a source's last reference destroys

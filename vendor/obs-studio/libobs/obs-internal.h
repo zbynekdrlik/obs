@@ -503,11 +503,17 @@ extern struct obs_core_video_mix *obs_create_video_mix(struct obs_video_info *ov
 extern void obs_free_video_mix(struct obs_core_video_mix *video);
 extern void obs_video_mix_start_gpu_encoding(struct obs_core_video_mix *video);
 
+/* obs#30: the time new sources' first (deferred) updates may take in one tick_sources, ms: past it,
+ * the rest wait a frame (the first of every frame always runs). A quarter of a 30 fps frame. */
+#define DEFERRED_UPDATE_BUDGET_MS 8
+#define DEFERRED_UPDATE_BUDGET_NS ((uint64_t)DEFERRED_UPDATE_BUDGET_MS * 1000000ULL)
+
 struct obs_core_video {
-	/* obs#30: the deferred-update budget of the tick_sources in progress (0 outside it): a source
-	 * whose update is still pending once it is spent skips that frame's tick (obs-source.c). Only the
-	 * graphics thread reads or writes these. */
-	uint64_t deferred_update_deadline_ns;
+	/* obs#30: the first-update budget of the tick_sources in progress (unarmed outside it): the time
+	 * spent in sources' first deferred updates this frame; a new source whose first update is still
+	 * pending once it is spent skips that frame's tick (obs-source.c). Graphics thread only. */
+	bool deferred_update_budget_armed;
+	uint64_t deferred_update_spent_ns;
 	uint32_t deferred_updates_this_tick;
 	uint32_t deferred_updates_postponed_this_tick;
 	graphics_t *graphics;
@@ -976,6 +982,9 @@ struct obs_source {
 
 	/* signals to call the source update in the video thread */
 	long defer_update_count;
+	/* obs#30: the source's first deferred update ran (graphics thread only); until it has, the
+	 * frame's deferred-update budget may postpone its tick (obs-source.c). */
+	bool first_deferred_update_done;
 
 	/* ensures show/hide are only called once */
 	volatile long show_refs;
