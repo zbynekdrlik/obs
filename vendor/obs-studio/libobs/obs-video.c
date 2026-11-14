@@ -66,19 +66,26 @@
 #define TICK_AUDIT_SLOW_NS ((uint64_t)TICK_AUDIT_SLOW_MS * 1000000ULL)
 #define TICK_AUDIT_MAX_LINES 64
 static uint32_t tick_audit_lines;
+static uint32_t tick_audit_breakdown_lines;
+
+/* room for one more line of a kind: its own budget, and one line when it runs out */
+static bool tick_audit_budget(uint32_t *lines, const char *what)
+{
+	if (*lines < TICK_AUDIT_MAX_LINES) {
+		(*lines)++;
+		return true;
+	}
+	if (*lines == TICK_AUDIT_MAX_LINES) {
+		(*lines)++;
+		blog(LOG_INFO, "tick-audit: %d %s logged; further ones are not logged (obs#30)", TICK_AUDIT_MAX_LINES,
+		     what);
+	}
+	return false;
+}
 
 static bool tick_audit_room(void)
 {
-	if (tick_audit_lines < TICK_AUDIT_MAX_LINES) {
-		tick_audit_lines++;
-		return true;
-	}
-	if (tick_audit_lines == TICK_AUDIT_MAX_LINES) {
-		tick_audit_lines++;
-		blog(LOG_INFO, "tick-audit: %d slow video ticks logged; further ones are not logged (obs#30)",
-		     TICK_AUDIT_MAX_LINES);
-	}
-	return false;
+	return tick_audit_budget(&tick_audit_lines, "slow video ticks");
 }
 
 static void tick_audit_callback(void (*tick)(void *param, float seconds), uint64_t took_ns)
@@ -114,7 +121,7 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 	uint64_t delta_time;
 	float seconds;
 	const uint64_t audit_begin = os_gettime_ns();
-	uint64_t audit_cb_lock, audit_cb_run, audit_src_lock, audit_list, audit_ticks = 0, audit_releases = 0;
+	uint64_t audit_cb_lock, audit_cb_run, audit_src_lock, audit_list, audit_ticks = 0, audit_releases;
 	uint64_t audit_slowest = 0;
 	char audit_slowest_name[64] = "";
 	size_t audit_callbacks;
@@ -152,7 +159,7 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 
 	da_clear(data->sources_to_tick);
 
-	audit_mark = audit_now;
+	audit_mark = os_gettime_ns();
 	pthread_mutex_lock(&data->sources_mutex);
 	audit_now = os_gettime_ns();
 	audit_src_lock = audit_now - audit_mark;
@@ -191,13 +198,18 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 				     obs_source_get_name(s), obs_source_get_id(s), tick_audit_ms(took),
 				     TICK_AUDIT_SLOW_MS);
 		}
-		const uint64_t release_start = os_gettime_ns();
-		obs_source_release(s);
-		audit_releases += os_gettime_ns() - release_start;
 	}
 
+	/* The releases apart from the ticks, timed as one phase: a source's last reference destroys
+	 * there. Two clock reads a frame instead of two a source. */
+	const uint64_t release_start = os_gettime_ns();
+	for (size_t i = 0; i < data->sources_to_tick.num; i++)
+		obs_source_release(data->sources_to_tick.array[i]);
+	audit_releases = os_gettime_ns() - release_start;
+
 	const uint64_t audit_total = os_gettime_ns() - audit_begin;
-	if (audit_total > TICK_AUDIT_SLOW_NS && tick_audit_room())
+	if (audit_total > TICK_AUDIT_SLOW_NS &&
+	    tick_audit_budget(&tick_audit_breakdown_lines, "slow tick_sources breakdowns"))
 		blog(LOG_INFO,
 		     "tick-audit: tick_sources took %.1f ms: callbacks lock %.1f ms, callbacks %.1f ms (%zu), "
 		     "sources lock %.1f ms, list %.1f ms (%zu sources), ticks %.1f ms (slowest '%s' %.1f ms), "

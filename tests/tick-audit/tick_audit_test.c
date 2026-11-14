@@ -14,7 +14,8 @@
  *     ticks adding up show in its ticks sum, another thread holding the sources lock (as
  *     obs_enum_sources does across its callbacks) shows in its sources lock wait (v0.4.31 on
  *     strih-snv named no single tick over 20 ms while tick_sources still stalled);
- *   - at most 64 slow ticks are logged, then one line says further ones are not.
+ *   - at most 64 slow ticks and, apart, 64 breakdowns are logged; each kind then says once that
+ *     further ones are not.
  *
  *   tick-audit-test <libobs data dir>   (the SDK's share/obs/libobs/, which holds the effects)
  *
@@ -180,12 +181,21 @@ static void register_ticker(const char *id)
 	obs_register_source(&info);
 }
 
-/* the value after `key` in each kept `tick_sources took` line holding `part`: the largest one */
-static double breakdown_max(const char *part, const char *key)
+static size_t lines_now(void)
+{
+	pthread_mutex_lock(&log_mutex);
+	size_t n = line_count;
+	pthread_mutex_unlock(&log_mutex);
+	return n;
+}
+
+/* the value after `key` in each kept `tick_sources took` line from index `from` holding `part`: the
+ * largest one */
+static double breakdown_max(size_t from, const char *part, const char *key)
 {
 	double best = -1.0;
 	pthread_mutex_lock(&log_mutex);
-	for (size_t i = 0; i < line_count && i < MAX_LINES; i++) {
+	for (size_t i = from; i < line_count && i < MAX_LINES; i++) {
 		if (!strstr(lines[i], "tick-audit: tick_sources took ") || !strstr(lines[i], part))
 			continue;
 		const char *at = strstr(lines[i], key);
@@ -208,7 +218,7 @@ static bool slow_enum(void *param, obs_source_t *source)
 	(void)param;
 	(void)source;
 	if (os_atomic_dec_long(&enum_slow_left) == 0)
-		os_sleep_ms(100);
+		os_sleep_ms(300);
 	return true;
 }
 
@@ -296,6 +306,7 @@ int main(int argc, char **argv)
 
 	/* Many short ticks adding up: 12 sources of 4 ms for 3 ticks each, ~48 ms a tick_sources, no
 	 * single tick over the bar. */
+	size_t from = lines_now();
 	obs_source_t *shorts[12];
 	for (size_t i = 0; i < 12; i++) {
 		char name[32];
@@ -305,29 +316,36 @@ int main(int argc, char **argv)
 	os_sleep_ms(1000);
 	audit_ms("source 'short ", 20.0, 1000.0, &in, &out);
 	expect(in + out == 0, "a 4 ms tick is not named on its own");
-	double ticks = breakdown_max("(slowest 'short ", "ticks ");
+	double ticks = breakdown_max(from, "(slowest 'short ", "ticks ");
 	fprintf(stderr, "largest ticks sum: %.1f ms\n", ticks);
 	expect(ticks >= 30.0, "short ticks adding up show in a tick_sources breakdown's ticks sum, none over the bar");
 
-	/* Another thread holds the sources lock for 100 ms: a tick_sources starting in it waits at least
-	 * 100 ms less one 33 ms frame. */
+	/* Another thread holds the sources lock for 300 ms: a tick_sources starting in it waits at least
+	 * 300 ms less one 33 ms frame and any lateness of the video thread. Only lines logged from here
+	 * count. */
+	from = lines_now();
 	enum_slow_left = 1;
 	pthread_t enumerator;
 	pthread_create(&enumerator, NULL, enum_thread, NULL);
 	pthread_join(enumerator, NULL);
 	os_sleep_ms(200);
-	double lock_wait = breakdown_max("tick_sources took", "sources lock ");
+	double lock_wait = breakdown_max(from, "tick_sources took", "sources lock ");
 	fprintf(stderr, "largest sources lock wait: %.1f ms\n", lock_wait);
 	expect(lock_wait >= 50.0, "a held sources lock shows in a tick_sources breakdown's sources lock wait");
 
 	/* The cap: a source slow on every tick fills the 64 lines, then one line says so. */
 	obs_source_t *always = ticker("test_slow_always", "slow always", 21, UINT32_MAX);
 	os_sleep_ms(4000);
-	size_t audit_lines = count_lines("tick-audit:", "took", NULL);
-	fprintf(stderr, "tick-audit lines naming a tick: %zu\n", audit_lines);
+	size_t breakdowns = count_lines("tick-audit: tick_sources took", NULL);
+	size_t audit_lines = count_lines("tick-audit:", "took", NULL) - breakdowns;
+	fprintf(stderr, "tick-audit lines naming a tick: %zu, breakdowns: %zu\n", audit_lines, breakdowns);
 	expect(audit_lines == 64, "at most 64 slow ticks are logged");
 	expect(count_lines("tick-audit:", "64 slow video ticks logged; further ones are not logged", NULL) == 1,
 	       "one line says further slow ticks are not logged");
+	expect(breakdowns == 64, "breakdowns have a budget of their own: 64");
+	expect(count_lines("tick-audit:", "64 slow tick_sources breakdowns logged; further ones are not logged",
+			   NULL) == 1,
+	       "one line says further breakdowns are not logged");
 
 	obs_remove_tick_callback(tick_audit_slow_callback, NULL);
 	for (size_t i = 0; i < 12; i++)
