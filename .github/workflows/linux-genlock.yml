@@ -739,6 +739,21 @@ jobs:
           export LD_LIBRARY_PATH="$(dirname "$libobs")"
           xvfb-run -a build/ws-graphics-test "$data/"
 
+      # obs#30: every strih OBS start lost frames to one 70-117 ms tick_sources (a source's or a tick
+      # callback's video tick on the graphics thread). libobs's tick audit names a tick over 20 ms.
+      - name: Test the libobs tick audit names a slow video tick (obs#30)
+        working-directory: tests/tick-audit
+        run: |
+          set -euo pipefail
+          libobs="$(find "$GITHUB_WORKSPACE/obs-sdk" -name 'libobs.so*' -type f | head -1)"
+          if [ -z "$libobs" ]; then echo "ERROR: no libobs.so in obs-sdk"; exit 1; fi
+          data="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs"
+          if [ ! -f "$data/default.effect" ]; then echo "ERROR: no libobs effects in $data"; exit 1; fi
+          cmake -B build -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk" -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+          export LD_LIBRARY_PATH="$(dirname "$libobs")"
+          xvfb-run -a build/tick-audit-test "$data/"
+
       # camera-box issue 1495 (stream-snv 9.11.2026): the A/V-sync dock let go of a removed `mbc`
       # neither at its 5 s lookup nor at the removal, so it was never destroyed and CreateInput refused
       # the name until OBS restarted. The dock's hold (camera-box-measure-hold.hpp) through real libobs.
