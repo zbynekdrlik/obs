@@ -336,7 +336,7 @@ mod tests {
              rebootstraps=10 max_process_us=11 obs_dropped=12 max_obs_us=13 \
              wire_late=14 wake_delay_us=15 wake_delay_peak_us=16 \
              tx_track=1 tx_played=96000 tx_underruns=17 tx_recentres=18 tx_overflows=19 \
-             tx_ppm=-12.5 tx_priming=0 rx_reordered=20 start_holes=21"
+             tx_ppm=-12.5 tx_priming=0 rx_reordered=20 start_holes=21 tx_resyncs=0"
         );
     }
 
