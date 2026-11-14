@@ -1,6 +1,6 @@
 [package]
 name = "dante-input-ffi"
-version = "0.4.35"
+version = "0.4.36"
 edition = "2024"
 # Let-chains (src/lib.rs Sink::process, obs#53).
 rust-version = "1.88"
@@ -39,7 +39,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.125: a reordered RX packet fills its hole and counts as reordered, so gaps/gap_frames (rx_gaps/rx_loss) count only holes still open at playout (dstack #278, camera-box issue 1508); a once-a-minute INFO line per RX flow gives the wake delay p50/p99/p99.9/max and the network latency (dstack #234, camera-box issue 1510). RxCounts gains reordered. No latency change.
 # v0.6.126: a ring hole read before its flow's first sample counts as start_holes, not holes, so rx_holes no longer holds the OBS-start burst; the minute timing line adds the write delay, and a minute line names each flow's holes (dstack #234, camera-box issue 1510). Counters gains start_holes. No latency change.
 # v0.6.132: each RX block carries its play time in the app clock (Block::play_at, CLOCK_MONOTONIC / QPC ns = os_gettime_ns): the block's first sample + P + (c), recomputed per block from a fresh media/monotonic pair, so stamps follow the media-vs-monotonic drift continuously (dstack#295, obs#53, camera-box issue 1527). Passes v0.6.127-0.6.131. No latency change.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.132" }
+# v0.6.135: play_at's media/app clock pair is filtered (a torn pair over 50 us rejected, the slew bounded, a persistent step taken on the 3rd wake), so its +-1-2 ms pair jitter is gone (dstack#295); status engine.play_at_rejected, INFO `play_at: torn clock pair reads rejected in the last minute`, WARN `play_at: the media clock's offset from the app's clock stepped`. For the dstack#303 bisect (b), obs#56; not dstack's production tag. Passes v0.6.133 (arc_rx_fpp Option, no literal here) and v0.6.134. No latency change.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.135" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
