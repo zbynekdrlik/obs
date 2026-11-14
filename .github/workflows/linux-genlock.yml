@@ -745,7 +745,7 @@ jobs:
         working-directory: tests/tick-audit
         run: |
           set -euo pipefail
-          libobs="$(find "$GITHUB_WORKSPACE/obs-sdk" -name 'libobs.so*' -type f | head -1)"
+          libobs="$(find "$GITHUB_WORKSPACE/obs-sdk" -name 'libobs.so*' -type f -print -quit)"
           if [ -z "$libobs" ]; then echo "ERROR: no libobs.so in obs-sdk"; exit 1; fi
           data="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs"
           if [ ! -f "$data/default.effect" ]; then echo "ERROR: no libobs effects in $data"; exit 1; fi

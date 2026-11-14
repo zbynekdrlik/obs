@@ -7,7 +7,8 @@
  * test runs real libobs and libobs-opengl and checks:
  *
  *   - a source whose tick takes 60 ms is named, with its id and the time;
- *   - a fast source is not named;
+ *   - a fast source and a 10 ms one (under the 20 ms bar) are not named for their own time: a line
+ *     naming either may only come from a real stall of the runner, so it must read 20 ms or more;
  *   - a tick callback that takes 45 ms is named by its symbol;
  *   - at most 64 slow ticks are logged, then one line says further ones are not.
  *
@@ -51,6 +52,8 @@ static void log_line(int level, const char *fmt, va_list args, void *param)
 	pthread_mutex_lock(&log_mutex);
 	if (line_count < MAX_LINES)
 		lines[line_count++] = strdup(line);
+	else if (line_count++ == MAX_LINES)
+		fprintf(stderr, "WARNING: the test keeps %d log lines; later ones are not checked\n", MAX_LINES);
 	pthread_mutex_unlock(&log_mutex);
 }
 
@@ -59,7 +62,7 @@ static size_t count_lines(const char *first, ...)
 {
 	size_t n = 0;
 	pthread_mutex_lock(&log_mutex);
-	for (size_t i = 0; i < line_count; i++) {
+	for (size_t i = 0; i < line_count && i < MAX_LINES; i++) {
 		bool all = true;
 		va_list parts;
 		va_start(parts, first);
@@ -75,6 +78,26 @@ static size_t count_lines(const char *first, ...)
 	}
 	pthread_mutex_unlock(&log_mutex);
 	return n;
+}
+
+/* the ms of each kept `tick-audit:` line holding `part`: counts those in [min_ms, max_ms) and those
+ * outside it */
+static void audit_ms(const char *part, double min_ms, double max_ms, size_t *in, size_t *out)
+{
+	*in = 0;
+	*out = 0;
+	pthread_mutex_lock(&log_mutex);
+	for (size_t i = 0; i < line_count && i < MAX_LINES; i++) {
+		if (!strstr(lines[i], "tick-audit:") || !strstr(lines[i], part))
+			continue;
+		const char *took = strstr(lines[i], "took ");
+		double ms = took ? atof(took + 5) : -1.0;
+		if (ms >= min_ms && ms < max_ms)
+			(*in)++;
+		else
+			(*out)++;
+	}
+	pthread_mutex_unlock(&log_mutex);
 }
 
 /* ---- sources whose video tick takes a set time ---- */
@@ -208,19 +231,25 @@ int main(int argc, char **argv)
 	register_ticker("test_slow_once");
 	register_ticker("test_fast");
 	register_ticker("test_slow_always");
+	register_ticker("test_under_bar");
 
 	/* A source slow on its first 2 ticks (60 ms, as a first tick at an OBS start), a fast one and
 	 * a tick callback slow once (45 ms). */
 	obs_source_t *slow = ticker("test_slow_once", "slow one", 60, 2);
 	obs_source_t *fast = ticker("test_fast", "fast one", 0, 0);
+	obs_source_t *under = ticker("test_under_bar", "under the bar", 10, 5);
 	obs_add_tick_callback(tick_audit_slow_callback, NULL);
 	os_sleep_ms(1500);
 
-	expect(count_lines("tick-audit:", "source 'slow one'", "(test_slow_once)", "video tick took 6", NULL) == 2,
-	       "the slow source's 2 slow ticks are named, with its id and ~60 ms");
-	expect(count_lines("tick-audit:", "'fast one'", NULL) == 0, "the fast source is not named");
-	expect(count_lines("tick-audit:", "tick callback", "tick_audit_slow_callback", "took 4", NULL) == 1,
-	       "the slow tick callback is named by its symbol, ~45 ms");
+	size_t in, out;
+	audit_ms("source 'slow one' (test_slow_once) video tick", 60.0, 1000.0, &in, &out);
+	expect(in == 2 && out == 0, "the slow source's 2 slow ticks are named, with its id and 60 ms or more");
+	audit_ms("'fast one'", 20.0, 1000.0, &in, &out);
+	expect(out == 0, "the fast source is not named for its own time");
+	audit_ms("'under the bar'", 20.0, 1000.0, &in, &out);
+	expect(out == 0, "a 10 ms tick, under the 20 ms bar, is not named for its own time");
+	audit_ms("tick callback tick_audit_slow_callback (tick-audit-test)", 45.0, 1000.0, &in, &out);
+	expect(in == 1 && out == 0, "the slow tick callback is named by its symbol and module, 45 ms or more");
 
 	/* The cap: a source slow on every tick fills the 64 lines, then one line says so. */
 	obs_source_t *always = ticker("test_slow_always", "slow always", 21, UINT32_MAX);
@@ -233,6 +262,7 @@ int main(int argc, char **argv)
 
 	obs_remove_tick_callback(tick_audit_slow_callback, NULL);
 	obs_source_release(always);
+	obs_source_release(under);
 	obs_source_release(fast);
 	obs_source_release(slow);
 	obs_shutdown();

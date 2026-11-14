@@ -29,7 +29,8 @@
 #include "obs.h"
 #include "obs-internal.h"
 #if !defined(_WIN32)
-#include <dlfcn.h> /* obs#30: the tick audit names a tick callback by its symbol */
+#include <dlfcn.h>  /* obs#30: the tick audit names a tick callback by its symbol */
+#include <string.h> /* obs#30: strrchr for the callback's module */
 #endif
 #include "graphics/vec4.h"
 #include "media-io/format-conversion.h"
@@ -59,8 +60,10 @@
  * tick_sources (p99 0.4-0.7 ms), a source's or a tick callback's video tick on this graphics thread,
  * which OBS's profiler does not split. The tick audit names any one tick over TICK_AUDIT_SLOW_NS
  * (over half a 30 fps frame). Log only: at most TICK_AUDIT_MAX_LINES lines for the process, then one
- * line that says so. Only the graphics thread touches tick_audit_lines. */
-#define TICK_AUDIT_SLOW_NS 20000000ULL
+ * line that says so. Only the graphics thread touches tick_audit_lines (tick_sources has one caller,
+ * the graphics thread loop). Cost: two os_gettime_ns per callback and per source a frame. */
+#define TICK_AUDIT_SLOW_MS 20
+#define TICK_AUDIT_SLOW_NS ((uint64_t)TICK_AUDIT_SLOW_MS * 1000000ULL)
 #define TICK_AUDIT_MAX_LINES 64
 static uint32_t tick_audit_lines;
 
@@ -86,12 +89,13 @@ static void tick_audit_callback(void (*tick)(void *param, float seconds), uint64
 	if (dladdr((void *)(uintptr_t)tick, &info) && info.dli_sname) {
 		const char *module = info.dli_fname ? strrchr(info.dli_fname, '/') : NULL;
 		module = module ? module + 1 : (info.dli_fname ? info.dli_fname : "?");
-		blog(LOG_INFO, "tick-audit: tick callback %s (%s) took %.1f ms (over 20 ms; obs#30)", info.dli_sname,
-		     module, ms);
+		blog(LOG_INFO, "tick-audit: tick callback %s (%s) took %.1f ms (over %d ms; obs#30)", info.dli_sname,
+		     module, ms, TICK_AUDIT_SLOW_MS);
 		return;
 	}
 #endif
-	blog(LOG_INFO, "tick-audit: tick callback %p took %.1f ms (over 20 ms; obs#30)", (void *)(uintptr_t)tick, ms);
+	blog(LOG_INFO, "tick-audit: tick callback %p took %.1f ms (over %d ms; obs#30)", (void *)(uintptr_t)tick, ms,
+	     TICK_AUDIT_SLOW_MS);
 }
 
 static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
@@ -153,8 +157,9 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 			const uint64_t took = os_gettime_ns() - audit_start;
 			source_profiler_source_tick_end(s, start);
 			if (took > TICK_AUDIT_SLOW_NS && tick_audit_room())
-				blog(LOG_INFO, "tick-audit: source '%s' (%s) video tick took %.1f ms (over 20 ms; obs#30)",
-				     obs_source_get_name(s), obs_source_get_id(s), (double)took / 1000000.0);
+				blog(LOG_INFO, "tick-audit: source '%s' (%s) video tick took %.1f ms (over %d ms; obs#30)",
+				     obs_source_get_name(s), obs_source_get_id(s), (double)took / 1000000.0,
+				     TICK_AUDIT_SLOW_MS);
 		}
 		obs_source_release(s);
 	}
