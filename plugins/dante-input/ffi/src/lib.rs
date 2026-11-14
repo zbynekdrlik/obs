@@ -79,6 +79,10 @@ pub const STAMP_JUMP_NS: u64 = 1_000_000;
 
 /// Play-time entries the pump can queue ahead of the feeder (one per block).
 pub const STAMP_SLOTS: usize = 8192;
+
+/// obs#53: the largest skip in the blocks' media time (app frames) filled with silence; a larger or
+/// backward jump is a schedule started again, not a skip. 1 s at up to 96 kHz.
+pub const GAP_FILL_MAX_FRAMES: u64 = 96_000;
 pub type LogCb = unsafe extern "C" fn(level: c_int, msg: *const c_char);
 
 static LOG: OnceLock<LogCb> = OnceLock::new();
@@ -237,6 +241,10 @@ pub struct Feed {
     pub stamps_dropped: AtomicU64,
     /// Play times that were negative or overflowed: handed as 0 (the system clock) (obs#53).
     pub bad_stamps: AtomicU64,
+    /// Skips in the blocks' media time (blocks the engine skipped) filled with silence (obs#53).
+    pub gaps: AtomicU64,
+    /// Their frames (app rate).
+    pub gap_frames: AtomicU64,
 }
 
 /// A block's play time (dlink's `Block::play_at`, ns on OBS's clock) at its first frame's index in
@@ -266,6 +274,8 @@ pub struct Sink {
     stamps: rtrb::Producer<Stamp>,
     /// Frames queued so far: the next block's first frame index.
     written: u64,
+    /// The media start the next block continues at (the last block's start + its frames).
+    next_start: Option<u64>,
     channels: usize,
     feed: Arc<Feed>,
 }
@@ -281,15 +291,46 @@ impl Sink {
             ring,
             stamps,
             written: 0,
+            next_start: None,
             channels,
             feed,
         }
+    }
+
+    /// obs#53: `frames` frames of silence for blocks the engine skipped, so OBS's timeline stays
+    /// contiguous (its stamp-placed ASRC would otherwise see the next block early and slew).
+    fn fill(&mut self, frames: u64) {
+        let n = self.channels;
+        let Ok(count) = usize::try_from(frames) else {
+            return;
+        };
+        let Ok(mut chunk) = self.ring.write_chunk_uninit(count * n) else {
+            self.feed.dropped.fetch_add(frames, Ordering::Relaxed);
+            return;
+        };
+        let (a, b) = chunk.as_mut_slices();
+        for slot in a.iter_mut().chain(b.iter_mut()) {
+            slot.write(0.0);
+        }
+        // SAFETY: every slot of the chunk was written above.
+        unsafe { chunk.commit_all() };
+        self.written += frames;
+        self.feed.gaps.fetch_add(1, Ordering::Relaxed);
+        self.feed.gap_frames.fetch_add(frames, Ordering::Relaxed);
     }
 }
 
 impl Process for Sink {
     fn process(&mut self, block: &mut Block<'_>) {
         let frames = block.frames();
+        let start = block.start();
+        if let (Some(st), Some(want)) = (start, self.next_start)
+            && st > want
+            && st - want <= GAP_FILL_MAX_FRAMES
+        {
+            self.fill(st - want);
+        }
+        self.next_start = start.map(|st| st + frames as u64);
         let n = self.channels;
         let have = block.inputs().min(n);
         let Ok(mut chunk) = self.ring.write_chunk_uninit(frames * n) else {
@@ -364,6 +405,8 @@ pub struct Feeder {
     stamped_once: bool,
     /// `stamps_dropped` last logged.
     dropped_logged: u64,
+    /// `gaps` last logged.
+    gaps_logged: u64,
     planes: Vec<Vec<f32>>,
     ptrs: Vec<*const f32>,
     feed: Arc<Feed>,
@@ -397,6 +440,7 @@ impl Feeder {
             unstamped: 0,
             stamped_once: false,
             dropped_logged: 0,
+            gaps_logged: 0,
             planes: vec![vec![0.0; MAX_CHUNK]; channels],
             ptrs: vec![std::ptr::null(); channels],
             feed,
@@ -420,6 +464,19 @@ impl Feeder {
             }
             self.anchor = Some(*s);
             let _ = self.stamps.pop();
+        }
+        let gaps = self.feed.gaps.load(Ordering::Relaxed);
+        if gaps > self.gaps_logged {
+            let frames = self.feed.gap_frames.load(Ordering::Relaxed);
+            log(
+                LOG_WARNING,
+                &format!(
+                    "dante-input timing: the device skipped blocks; {} gap(s) filled with silence so OBS's timeline stays contiguous ({frames} frames, {:.3} ms in all; obs#53)",
+                    gaps - self.gaps_logged,
+                    self.frames_ns(frames) as f64 / 1e6,
+                ),
+            );
+            self.gaps_logged = gaps;
         }
         let dropped = self.feed.stamps_dropped.load(Ordering::Relaxed);
         if dropped > self.dropped_logged {
@@ -484,7 +541,7 @@ impl Feeder {
                     log(
                         LOG_WARNING,
                         &format!(
-                            "dante-input timing: a block's play time is {:.3} ms {} its continuation; OBS follows it (obs#53, {jumps} jump(s))",
+                            "dante-input timing: a block's play time is {:.3} ms {} its continuation; OBS's stamp-placed ASRC moves the audio to it at 1 ms/s only if it is 10 ms or more and persists 1 s (obs#53, {jumps} jump(s))",
                             off as f64 / 1e6,
                             if ts > cont { "after" } else { "before" },
                         ),
