@@ -10,7 +10,11 @@
  *   - the jitter plus 6 ppm drift (stream-snv's media clock vs CLOCK_MONOTONIC).
  *
  * Each must keep every tick-to-tick gap under 30 ms and the mean within 0.05 ms of 1024 frames
- * (21.333 ms).
+ * (21.333 ms). 30 ms is the bound on purpose: dlink's TX player dropped out on 10-25 ms writer stalls,
+ * so a gap of 31 ms or more is the failure gated here (CI's runs: max 21.4-21.5 ms). A fourth case
+ * stalls one tick for 40 ms inside the callback and must read it, so the gate is shown able to fail.
+ * The tick counters are written under libobs's audio input_mutex (media-io/audio-io.c), which
+ * obs_remove_raw_audio_callback also takes, so they are read after removal in order.
  *
  *   audio-cadence-test
  *
@@ -22,6 +26,7 @@
 #include <util/threading.h>
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -68,7 +73,7 @@ enum stamps { SMOOTH, JITTER, JITTER_DRIFT };
 struct run {
 	obs_source_t *source;
 	enum stamps stamps;
-	volatile bool stop;
+	atomic_bool stop;
 };
 
 static void *push_loop(void *param)
@@ -78,7 +83,7 @@ static void *push_loop(void *param)
 	for (int i = 0; i < 128; i++)
 		plane[i] = (float)(i % 32) / 64.0f;
 	const uint64_t t0 = os_gettime_ns() + 20000000;
-	for (uint64_t k = 0; !r->stop; k++) {
+	for (uint64_t k = 0; !atomic_load(&r->stop); k++) {
 		const uint64_t due = t0 + k * 128ULL * 1000000000ULL / 48000ULL;
 		if (due > os_gettime_ns())
 			os_sleepto_ns(due);
@@ -104,6 +109,8 @@ static void *push_loop(void *param)
 
 /* the raw audio callback's tick gaps, after the first 50 ticks (the mix settling) */
 static uint64_t last_ns, ticks, max_gap_ns, gap_sum_ns, counted;
+/* the negative control: tick 200 sleeps this long inside the callback */
+static uint32_t stall_ms;
 
 static void on_tick(void *param, size_t mix_idx, struct audio_data *data)
 {
@@ -119,14 +126,22 @@ static void on_tick(void *param, size_t mix_idx, struct audio_data *data)
 		counted++;
 	}
 	last_ns = now;
+	if (stall_ms && ticks == 200)
+		os_sleep_ms(stall_ms);
 }
 
-static void run_case(enum stamps stamps, const char *name)
+/* One case, 10 s: the ticks' max gap (ns) and mean (ms); false when it could not run. */
+static bool measure(enum stamps stamps, const char *name, uint64_t *max_gap, double *mean_ms)
 {
 	last_ns = ticks = max_gap_ns = gap_sum_ns = counted = 0;
 	struct run r = {0};
 	r.stamps = stamps;
+	atomic_init(&r.stop, false);
 	r.source = obs_source_create("cadence_pusher", name, NULL, NULL);
+	if (!r.source) {
+		expect(false, "the pusher source is created");
+		return false;
+	}
 	obs_set_output_source(0, r.source);
 	struct audio_convert_info conv = {0};
 	conv.samples_per_sec = 48000;
@@ -134,22 +149,38 @@ static void run_case(enum stamps stamps, const char *name)
 	conv.speakers = SPEAKERS_STEREO;
 	obs_add_raw_audio_callback(0, &conv, on_tick, NULL);
 	pthread_t thread;
-	pthread_create(&thread, NULL, push_loop, &r);
-	os_sleep_ms(10000);
-	r.stop = true;
-	pthread_join(thread, NULL);
+	const bool started = pthread_create(&thread, NULL, push_loop, &r) == 0;
+	if (started) {
+		os_sleep_ms(10000);
+		atomic_store(&r.stop, true);
+		pthread_join(thread, NULL);
+	}
 	obs_remove_raw_audio_callback(0, on_tick, NULL);
 	obs_set_output_source(0, NULL);
 	obs_source_release(r.source);
-
-	const double mean_ms = counted ? (double)gap_sum_ns / 1e6 / (double)counted : 0.0;
-	fprintf(stderr, "%s: %llu ticks, mean %.3f ms, max gap %.3f ms\n", name, (unsigned long long)counted, mean_ms,
-		(double)max_gap_ns / 1e6);
+	if (!started) {
+		expect(false, "the pusher thread starts");
+		return false;
+	}
+	*max_gap = max_gap_ns;
+	*mean_ms = counted ? (double)gap_sum_ns / 1e6 / (double)counted : 0.0;
+	fprintf(stderr, "%s: %llu ticks, mean %.3f ms, max gap %.3f ms\n", name, (unsigned long long)counted, *mean_ms,
+		(double)*max_gap / 1e6);
 	char what[160];
 	snprintf(what, sizeof(what), "%s: ticks came (%llu)", name, (unsigned long long)counted);
 	expect(counted > 300, what);
+	return counted > 300;
+}
+
+static void run_case(enum stamps stamps, const char *name)
+{
+	uint64_t max_gap;
+	double mean_ms;
+	if (!measure(stamps, name, &max_gap, &mean_ms))
+		return;
+	char what[160];
 	snprintf(what, sizeof(what), "%s: every tick gap under 30 ms", name);
-	expect(max_gap_ns < 30000000, what);
+	expect(max_gap < 30000000, what);
 	snprintf(what, sizeof(what), "%s: the mean tick is 1024 frames at 48 kHz (21.333 ms +- 0.05)", name);
 	expect(mean_ms > 21.283 && mean_ms < 21.383, what);
 }
@@ -178,6 +209,14 @@ int main(void)
 	run_case(SMOOTH, "smooth stamps");
 	run_case(JITTER, "pair-jittered stamps");
 	run_case(JITTER_DRIFT, "pair-jittered stamps + 6 ppm drift");
+
+	/* The negative control: one tick stalled 40 ms is read as a gap of 35 ms or more. */
+	stall_ms = 40;
+	uint64_t max_gap;
+	double mean_ms;
+	if (measure(SMOOTH, "a 40 ms stall (the control)", &max_gap, &mean_ms))
+		expect(max_gap >= 35000000, "the control: a 40 ms stall in a tick is read as a gap over 35 ms");
+	stall_ms = 0;
 
 	obs_shutdown();
 	if (failures)

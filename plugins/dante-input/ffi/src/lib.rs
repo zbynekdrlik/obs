@@ -537,10 +537,13 @@ impl Feeder {
         let ts = match base {
             None => 0,
             Some(a) => {
+                // A play time of 0 or less is no time on OBS's clock, whatever frames follow it.
                 let off = i64::try_from(self.frames_ns(self.read - a.frame)).ok();
                 match off.and_then(|o| a.ns.checked_add(o)).map(u64::try_from) {
-                    Some(Ok(ts)) if ts != 0 => ts,
+                    Some(Ok(ts)) if ts != 0 && a.ns > 0 => ts,
                     _ => {
+                        // A bad base is not kept: the next play time becomes the count's origin.
+                        self.count_from = None;
                         let bad = self.feed.bad_stamps.fetch_add(1, Ordering::Relaxed) + 1;
                         if bad <= 10 || bad.is_multiple_of(100) {
                             log(

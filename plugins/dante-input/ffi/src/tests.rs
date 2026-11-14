@@ -477,8 +477,19 @@ fn counting_keeps_the_zero_start_the_bad_stamp_count_and_the_fill() {
     push_media(&mut sink, 4, &[1.0; 4], 10, 1_000_000_000);
     assert_eq!(feeder.drain(), Some(10));
     assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 6);
+    push_media(
+        &mut sink,
+        4,
+        &[1.0; 4],
+        14,
+        1_000_000_000 + frames_ns(4) as i64,
+    );
+    assert_eq!(feeder.drain(), Some(4));
     let got: Vec<u64> = seen_box.lock().unwrap().iter().map(|s| s.3).collect();
-    assert_eq!(got[..2], [0, 0]);
+    // No play time (0), a bad one (0), the gap chunk still on the bad one (0); then the good play
+    // time (frame 14) is the count's new origin: the chunk at frame 18 counts 4 frames from it.
+    assert_eq!(got, [0, 0, 0, 1_000_000_000 + frames_ns(4)]);
+    assert!(feed.bad_stamps.load(Ordering::Relaxed) >= 1);
 }
 
 /// obs#53: a backward media start (a schedule started again) has nothing to fill.
