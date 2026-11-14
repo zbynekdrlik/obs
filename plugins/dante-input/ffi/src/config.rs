@@ -18,6 +18,10 @@ pub const TRACKS: u32 = 6;
 /// producer chunk (dstack #247).
 pub const OBS_CHUNK_FRAMES: u64 = 1024;
 
+/// obs#57: the test clock's skew bound, ppm (dlink takes ±1000; its play-time filter follows a rate
+/// gap up to about 100 ppm, dstack's docs/ci-peer.md says keep within ±50).
+pub const MAX_TEST_CLOCK_PPM: f64 = 50.0;
+
 /// How the RX audio handed to OBS is stamped (obs#53, obs#56).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +90,9 @@ pub struct InputConfig {
     /// How the RX audio is stamped for OBS: `play_at` unless set (obs#56).
     #[serde(default)]
     pub rx_stamps: RxStamps,
+    /// TEST ONLY (obs#57 soak, dstack#305): the device runs on the system clock skewed this many
+    /// ppm (dlink `Config::test_clock_ppm`), with no PTP. Never on a production device.
+    pub test_clock_ppm: Option<f64>,
 }
 
 impl InputConfig {
@@ -140,6 +147,13 @@ impl InputConfig {
             if s.rx == 0 || s.rx > n {
                 problems.push(format!("subscribe: rx {} is not one of 1..={n}", s.rx));
             }
+        }
+        if let Some(ppm) = self.test_clock_ppm
+            && !(ppm.is_finite() && ppm.abs() <= MAX_TEST_CLOCK_PPM)
+        {
+            problems.push(format!(
+                "test_clock_ppm: {ppm} is not within ±{MAX_TEST_CLOCK_PPM} ppm"
+            ));
         }
         let t = self.tx.len();
         if self.tx.iter().any(|n| n.trim().is_empty()) {
@@ -252,6 +266,9 @@ impl InputConfig {
         }
         for s in &self.subscribe {
             c = c.subscribe(s.rx, s.tx_channel.clone(), s.tx_device.clone());
+        }
+        if let Some(ppm) = self.test_clock_ppm {
+            c = c.test_clock_ppm(ppm);
         }
         c
     }

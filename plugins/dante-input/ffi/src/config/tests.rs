@@ -458,3 +458,25 @@ fn rx_stamps_is_play_at_unless_set_to_count() {
     let e = InputConfig::load(&p).unwrap_err();
     assert!(e.contains("unknown variant `arrival`"), "{e}");
 }
+
+/// obs#57 (dstack#305): `test_clock_ppm` (TEST ONLY) puts the device on the system clock with that
+/// skew; unset it is not set; outside ±50 ppm it is refused.
+#[test]
+fn test_clock_ppm_is_test_only_and_bounded() {
+    let (_d, p) = write(GOOD);
+    let cfg = InputConfig::load(&p).unwrap();
+    assert_eq!(cfg.test_clock_ppm, None);
+    let (_d, p) = write(&format!("test_clock_ppm = 6.0\n{GOOD}"));
+    let cfg = InputConfig::load(&p).unwrap();
+    assert_eq!(cfg.test_clock_ppm, Some(6.0));
+    assert_eq!(
+        cfg.dlink(48_000).clock(dlink::Clock::Dsync),
+        dlink::Clock::System
+    );
+    let (_d, p) = write(&format!("test_clock_ppm = 60.0\n{GOOD}"));
+    let e = InputConfig::load(&p).unwrap_err();
+    assert!(
+        e.contains("test_clock_ppm: 60 is not within ±50 ppm"),
+        "{e}"
+    );
+}

@@ -24,6 +24,7 @@ paths:
 - v0.4.29 appended `rx_reordered` (obs#45, dlink v0.6.125, dstack #278): packets that filled a hole another packet opened. Since that pin `rx_gaps`/`rx_loss` count only holes still open at playout, so a reorder is no longer loss. dlink logs the wake delay's minute p50/p99/p99.9/max and the network latency itself (`RX flow timing in the last minute`); they are not tokens.
 - v0.4.30 appended `start_holes` (obs#47, dlink v0.6.126, dstack #234; camera-box asked for that name, no `rx_` prefix): ring samples read before the flow's first sample, the OBS-start burst. `rx_holes` holds only a running flow's holes since then. dlink logs `RX holes in the last minute ...` per flow and the write delay on the timing line itself.
 - v0.4.37 appended `tx_resyncs` (obs#56, dlink v0.6.136, dstack#303): TX blocks that did not start where the last ended, re-primed by dlink's player. `TxOut::fill` passes each piece's start (`Block::start()` + the frames before it) to `Player::fill_at`; `fill_with` never resyncs.
+- v0.4.39 appended `play_at_steps play_at_max_dev_us stamp_jumps gaps_unfilled` (obs#57's gate counters: dlink v0.6.137's PumpView, dante-input's Feed). `test_clock_ppm` (±50, TEST ONLY) puts the device on dlink's skewed system clock for the CI soak with `dstack-dev peer` (dstack docs/ci-peer.md); never set on a box.
 
 # dante-input audio stamps
 
