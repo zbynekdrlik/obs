@@ -417,6 +417,10 @@ pub struct Feeder {
     gaps_logged: u64,
     /// `gaps_unfilled` last logged.
     unfilled_logged: u64,
+    /// obs#56: stamp by the sample count from the first play time (`rx_stamps = "count"`).
+    counting: bool,
+    /// The first play time, the count's origin.
+    count_from: Option<Stamp>,
     planes: Vec<Vec<f32>>,
     ptrs: Vec<*const f32>,
     feed: Arc<Feed>,
@@ -452,11 +456,20 @@ impl Feeder {
             dropped_logged: 0,
             gaps_logged: 0,
             unfilled_logged: 0,
+            counting: false,
+            count_from: None,
             planes: vec![vec![0.0; MAX_CHUNK]; channels],
             ptrs: vec![std::ptr::null(); channels],
             feed,
             gate,
         }
+    }
+
+    /// obs#56 (dstack#303 bisect): stamp each chunk by the sample count from the first play time
+    /// instead of its own play time (`rx_stamps = "count"`).
+    pub fn counting(mut self) -> Feeder {
+        self.counting = true;
+        self
     }
 
     /// ns of `frames` frames at the app rate.
@@ -475,6 +488,19 @@ impl Feeder {
             }
             self.anchor = Some(*s);
             let _ = self.stamps.pop();
+        }
+        if self.counting {
+            if self.count_from.is_none() {
+                self.count_from = self.anchor;
+            }
+            return match self.count_from {
+                Some(a) => i64::try_from(self.frames_ns(self.read - a.frame))
+                    .ok()
+                    .and_then(|o| a.ns.checked_add(o))
+                    .and_then(|ns| u64::try_from(ns).ok())
+                    .unwrap_or(0),
+                None => 0,
+            };
         }
         let unfilled = self.feed.gaps_unfilled.load(Ordering::Relaxed);
         if unfilled > self.unfilled_logged {
@@ -710,6 +736,21 @@ impl DanteInput {
             rate,
             Arc::clone(&feed),
             Arc::clone(&gate),
+        );
+        let feeder = match cfg.rx_stamps {
+            config::RxStamps::PlayAt => feeder,
+            config::RxStamps::Count => feeder.counting(),
+        };
+        log(
+            LOG_INFO,
+            &format!(
+                "dante-input start: RX stamps {} (rx_stamps; obs#53, obs#56)",
+                match cfg.rx_stamps {
+                    config::RxStamps::PlayAt => "play_at: each chunk's play time from dlink",
+                    config::RxStamps::Count =>
+                        "count: the sample count from the first play time (the dstack#303 bisect)",
+                },
+            ),
         );
         let (tx_in, tx_out) = match cfg.tx_track() {
             0 => (None, None),

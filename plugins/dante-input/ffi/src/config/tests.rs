@@ -443,3 +443,18 @@ fn the_flow_bases_reach_the_device_and_unset_they_leave_dlink_s_slot_block() {
         (Some(31000), Some(31032))
     );
 }
+
+/// obs#56 (dstack#303): the RX stamps are dlink's play times unless `rx_stamps` says `count`;
+/// any other value is refused.
+#[test]
+fn rx_stamps_is_play_at_unless_set_to_count() {
+    let (_d, p) = write(GOOD);
+    assert_eq!(InputConfig::load(&p).unwrap().rx_stamps, RxStamps::PlayAt);
+    let (_d, p) = write(&format!("rx_stamps = \"count\"\n{GOOD}"));
+    assert_eq!(InputConfig::load(&p).unwrap().rx_stamps, RxStamps::Count);
+    let (_d, p) = write(&format!("rx_stamps = \"play_at\"\n{GOOD}"));
+    assert_eq!(InputConfig::load(&p).unwrap().rx_stamps, RxStamps::PlayAt);
+    let (_d, p) = write(&format!("rx_stamps = \"arrival\"\n{GOOD}"));
+    let e = InputConfig::load(&p).unwrap_err();
+    assert!(e.contains("unknown variant `arrival`"), "{e}");
+}

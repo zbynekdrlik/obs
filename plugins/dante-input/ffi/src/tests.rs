@@ -439,6 +439,29 @@ fn a_block_the_full_ring_dropped_is_filled_by_the_next_block() {
     assert_eq!(feed.stamp_jumps.load(Ordering::Relaxed), 0);
 }
 
+/// obs#56 (dstack#303 bisect): with `rx_stamps = "count"` the chunks are stamped by the sample
+/// count from the first play time; later play times (drifting here at 6000 ppm) are not followed.
+#[test]
+fn counting_stamps_by_the_sample_count_from_the_first_play_time() {
+    let seen_box = SeenBox::default();
+    let (mut sink, feeder, _feed, _gate) = pair(&seen_box, 1, 48_000);
+    let mut feeder = feeder.counting();
+    let t0: i64 = 1_000_000_000;
+    let step = frames_ns(128) as f64 * (1.0 + 6000e-6);
+    for k in 0..10 {
+        push_at(
+            &mut sink,
+            128,
+            &[0.0; 128],
+            t0 + (step * k as f64).round() as i64,
+        );
+        assert_eq!(feeder.drain(), Some(128));
+    }
+    let got: Vec<u64> = seen_box.lock().unwrap().iter().map(|s| s.3).collect();
+    let want: Vec<u64> = (0..10).map(|k| t0 as u64 + frames_ns(128 * k)).collect();
+    assert_eq!(got, want);
+}
+
 /// obs#53: a backward media start (a schedule started again) has nothing to fill.
 #[test]
 fn a_backward_media_start_is_not_filled() {
