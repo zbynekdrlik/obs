@@ -24,6 +24,11 @@ paths:
 - v0.4.29 appended `rx_reordered` (obs#45, dlink v0.6.125, dstack #278): packets that filled a hole another packet opened. Since that pin `rx_gaps`/`rx_loss` count only holes still open at playout, so a reorder is no longer loss. dlink logs the wake delay's minute p50/p99/p99.9/max and the network latency itself (`RX flow timing in the last minute`); they are not tokens.
 - v0.4.30 appended `start_holes` (obs#47, dlink v0.6.126, dstack #234; camera-box asked for that name, no `rx_` prefix): ring samples read before the flow's first sample, the OBS-start burst. `rx_holes` holds only a running flow's holes since then. dlink logs `RX holes in the last minute ...` per flow and the write delay on the timing line itself.
 
+# dante-input audio stamps
+
+- Since v0.4.34 (obs#53, dlink v0.6.132, dstack#295) each chunk handed to OBS is stamped with dlink's per-block play time (`Block::play_at`, os_gettime_ns's clock) plus the frames before it in the block. The pump queues `(first frame, play time)` beside the sample ring and the feeder stamps from it; `timestamp_ns` 0 (no media clock yet) makes plugin.c use `os_gettime_ns()`.
+- Never stamp by a sample count from a start point: the Dante media clock and CLOCK_MONOTONIC run ~6 ppm apart (21 ms an hour on stream-snv), and this fork's ASRC places a directly stamped source exactly at its stamp (STAMP basis), so any stamp re-anchor is an A/V step (camera-box issue 1527). A chunk more than 1 ms off its continuation is a WARN `dante-input timing: a block's play time is … its continuation`.
+
 # dante-input TX
 
 - `tx` sends one OBS track (`tx_track`, from 1) on the same device (obs#41). OBS's mix runs on OBS's clock and Dante on PTP, so the mix goes through `dlink::bridge`: plugin.c's raw audio callback writes the `Fifo` on OBS's audio thread, and `TxOut::fill` reads it through the ASRC `Player` in the pump. Do not write a ring or a converter of our own.

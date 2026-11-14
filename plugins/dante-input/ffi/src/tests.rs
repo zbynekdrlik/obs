@@ -82,7 +82,7 @@ fn the_pump_side_queues_and_the_feeder_hands_float_planes_to_obs() {
     assert_eq!(feeder.drain(), Some(8));
     let seen = seen_box.lock().unwrap().clone();
     assert_eq!(seen.len(), 1);
-    let (channels, frames, chans) = &seen[0];
+    let (channels, frames, chans, _) = &seen[0];
     assert_eq!((*channels, *frames), (2, 8));
     assert_eq!(chans[0], [0.5, -0.25, 1.0, 0.0, 0.5, -0.25, 1.0, 0.0]);
     assert_eq!(chans[1], [-1.0, 0.125, 0.75, -0.5, -1.0, 0.125, 0.75, -0.5]);
@@ -129,17 +129,23 @@ fn each_chunk_carries_the_play_time_of_its_first_frame() {
     let t0: i64 = 5_000_000_000;
     // Ten 128-frame blocks, each one 128 frames later on the app clock.
     for k in 0..10 {
-        push_at(&mut sink, 128, &[0.0; 128], t0 + (frames_ns(128 * k) as i64));
+        push_at(
+            &mut sink,
+            128,
+            &[0.0; 128],
+            t0 + (frames_ns(128 * k) as i64),
+        );
     }
     assert_eq!(feeder.drain(), Some(1280));
     let seen = seen_box.lock().unwrap().clone();
     let sizes: Vec<u32> = seen.iter().map(|s| s.1).collect();
     assert_eq!(sizes, [480, 480, 320]);
     // Chunk 1 starts at frame 0 (block 0), chunk 2 at frame 480 (block 3, frame 96 in it),
-    // chunk 3 at frame 960 (block 7, frame 64 in it).
-    let want: Vec<u64> = [0u64, 480, 960]
+    // chunk 3 at frame 960 (block 7, frame 64 in it): the block's play time plus the frames
+    // before it in the block, each rounded down to the ns as dlink's and ours are.
+    let want: Vec<u64> = [(0u64, 0u64), (3, 96), (7, 64)]
         .iter()
-        .map(|&f| t0 as u64 + frames_ns(f))
+        .map(|&(b, f)| t0 as u64 + frames_ns(128 * b) + frames_ns(f))
         .collect();
     let got: Vec<u64> = seen.iter().map(|s| s.3).collect();
     assert_eq!(got, want);
@@ -167,11 +173,21 @@ fn the_stamps_follow_a_clock_drift_block_by_block_with_no_step() {
     }
     let seen = seen_box.lock().unwrap().clone();
     assert_eq!(seen.len(), 50);
-    assert_eq!(seen[49].3, last, "the last stamp is the last block's play time");
+    assert_eq!(
+        seen[49].3, last,
+        "the last stamp is the last block's play time"
+    );
     // 50 blocks counted from the first: 49 * 2.666 ms = 130.6 ms; the play time is 78 us later.
     let counted = seen[0].3 + frames_ns(128 * 49);
-    assert!(last > counted + 70_000, "the stamps follow the drift: {last} vs {counted}");
-    assert_eq!(feed.stamp_jumps.load(Ordering::Relaxed), 0, "a drift is no jump");
+    assert!(
+        last > counted + 70_000,
+        "the stamps follow the drift: {last} vs {counted}"
+    );
+    assert_eq!(
+        feed.stamp_jumps.load(Ordering::Relaxed),
+        0,
+        "a drift is no jump"
+    );
 }
 
 /// obs#53: a block with no play time yet (no media clock) hands 0: the plugin stamps it with the

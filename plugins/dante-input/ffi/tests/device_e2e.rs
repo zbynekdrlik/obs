@@ -16,7 +16,7 @@ use dante_input_ffi::DanteInput;
 /// One device at a time: the tests share the process (and its PTP follower).
 static ONE_DEVICE: Mutex<()> = Mutex::new(());
 
-unsafe extern "C" fn drop_audio(_: *mut c_void, _: *const *const f32, _: u32, _: u32) {}
+unsafe extern "C" fn drop_audio(_: *mut c_void, _: *const *const f32, _: u32, _: u32, _: u64) {}
 
 fn iface_ip() -> (String, String) {
     let iface = std::env::var("DANTE_INPUT_TEST_IFACE")
