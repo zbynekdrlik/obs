@@ -462,6 +462,25 @@ fn counting_stamps_by_the_sample_count_from_the_first_play_time() {
     assert_eq!(got, want);
 }
 
+/// obs#56 review: counting keeps the diagnostics: before the first play time it hands 0, a bad
+/// first play time is counted, and a skip is still filled with silence.
+#[test]
+fn counting_keeps_the_zero_start_the_bad_stamp_count_and_the_fill() {
+    let seen_box = SeenBox::default();
+    let (mut sink, feeder, feed, _gate) = pair(&seen_box, 1, 4800);
+    let mut feeder = feeder.counting();
+    push(&mut sink, 4, &[0.0; 4]);
+    assert_eq!(feeder.drain(), Some(4));
+    push_media(&mut sink, 4, &[1.0; 4], 0, -7);
+    assert_eq!(feeder.drain(), Some(4));
+    assert_eq!(feed.bad_stamps.load(Ordering::Relaxed), 1);
+    push_media(&mut sink, 4, &[1.0; 4], 10, 1_000_000_000);
+    assert_eq!(feeder.drain(), Some(10));
+    assert_eq!(feed.gap_frames.load(Ordering::Relaxed), 6);
+    let got: Vec<u64> = seen_box.lock().unwrap().iter().map(|s| s.3).collect();
+    assert_eq!(got[..2], [0, 0]);
+}
+
 /// obs#53: a backward media start (a schedule started again) has nothing to fill.
 #[test]
 fn a_backward_media_start_is_not_filled() {

@@ -489,19 +489,6 @@ impl Feeder {
             self.anchor = Some(*s);
             let _ = self.stamps.pop();
         }
-        if self.counting {
-            if self.count_from.is_none() {
-                self.count_from = self.anchor;
-            }
-            return match self.count_from {
-                Some(a) => i64::try_from(self.frames_ns(self.read - a.frame))
-                    .ok()
-                    .and_then(|o| a.ns.checked_add(o))
-                    .and_then(|ns| u64::try_from(ns).ok())
-                    .unwrap_or(0),
-                None => 0,
-            };
-        }
         let unfilled = self.feed.gaps_unfilled.load(Ordering::Relaxed);
         if unfilled > self.unfilled_logged {
             log(
@@ -537,7 +524,17 @@ impl Feeder {
             );
             self.dropped_logged = dropped;
         }
-        let ts = match self.anchor {
+        // obs#56: counting stamps from the first play time; the rest of the path (the bad-stamp
+        // count, the clock switch, the jump check) is the same for both modes.
+        let base = if self.counting {
+            if self.count_from.is_none() {
+                self.count_from = self.anchor;
+            }
+            self.count_from
+        } else {
+            self.anchor
+        };
+        let ts = match base {
             None => 0,
             Some(a) => {
                 let off = i64::try_from(self.frames_ns(self.read - a.frame)).ok();
