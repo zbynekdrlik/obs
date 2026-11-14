@@ -67,6 +67,7 @@
 #define TICK_AUDIT_MAX_LINES 64
 static uint32_t tick_audit_lines;
 static uint32_t tick_audit_breakdown_lines;
+static uint32_t tick_audit_postponed_lines;
 
 /* room for one more line of a kind: its own budget, and one line when it runs out */
 static bool tick_audit_budget(uint32_t *lines, const char *what)
@@ -263,6 +264,12 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 	/* ------------------------------------- */
 	/* call the tick function of each source */
 
+	/* obs#30: the frame's first-update budget (obs-source.c obs_source_video_tick) */
+	obs->video.deferred_update_budget_armed = true;
+	obs->video.deferred_update_spent_ns = 0;
+	obs->video.first_updates_allowed_this_tick = 0;
+	obs->video.deferred_updates_postponed_this_tick = 0;
+
 	for (size_t i = 0; i < data->sources_to_tick.num; i++) {
 		obs_source_t *s = data->sources_to_tick.array[i];
 		if (!obs_source_removed(s)) {
@@ -296,6 +303,15 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 		tick_audit_by_type(data->sources_to_tick.array, audit_took, kept, audit_types, sizeof(audit_types));
 		audit_by_type = os_gettime_ns() - by_type_start;
 	}
+
+	obs->video.deferred_update_budget_armed = false;
+	if (obs->video.deferred_updates_postponed_this_tick &&
+	    tick_audit_budget(&tick_audit_postponed_lines, "first-update postponements"))
+		blog(LOG_INFO,
+		     "tick-audit: new sources' first updates took %.1f ms this frame; %u new source(s) wait for a "
+		     "later frame (budget %d ms of first updates a frame; obs#30)",
+		     tick_audit_ms(obs->video.deferred_update_spent_ns), obs->video.deferred_updates_postponed_this_tick,
+		     DEFERRED_UPDATE_BUDGET_MS);
 
 	/* The releases apart from the ticks, timed as one phase: a source's last reference destroys
 	 * there. Two clock reads a frame instead of two a source. */

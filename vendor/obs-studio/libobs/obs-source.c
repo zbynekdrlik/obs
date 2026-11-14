@@ -1119,8 +1119,15 @@ static void obs_source_deferred_update(obs_source_t *source)
 {
 	if (source->context.data && source->info.update) {
 		long count = os_atomic_load_long(&source->defer_update_count);
+		/* obs#30: a source's first update counts against the frame's budget */
+		const bool first = !source->first_deferred_update_done;
+		const uint64_t start = first ? os_gettime_ns() : 0;
 		source->info.update(source->context.data, source->context.settings);
 		os_atomic_compare_swap_long(&source->defer_update_count, count, 0);
+		if (first) {
+			source->first_deferred_update_done = true;
+			obs->video.deferred_update_spent_ns += os_gettime_ns() - start;
+		}
 		obs_source_dosignal(source, "source_update", "update");
 	}
 }
@@ -1422,11 +1429,37 @@ static void async_tick(obs_source_t *source)
 	pthread_mutex_unlock(&source->async_mutex);
 }
 
+/* obs#30: whether this tick may run a new source's first deferred update: always outside
+ * tick_sources, the first of every frame (progress), and the rest while the time the frame's first
+ * updates took stays under the budget. */
+static bool first_update_allowed(void)
+{
+	struct obs_core_video *video = &obs->video;
+	if (video->deferred_update_budget_armed && video->first_updates_allowed_this_tick > 0 &&
+	    video->deferred_update_spent_ns >= DEFERRED_UPDATE_BUDGET_NS) {
+		video->deferred_updates_postponed_this_tick++;
+		return false;
+	}
+	video->first_updates_allowed_this_tick++;
+	return true;
+}
+
 void obs_source_video_tick(obs_source_t *source, float seconds)
 {
 	bool now_showing, now_active;
 
 	if (!obs_source_valid(source, "obs_source_video_tick"))
+		return;
+
+	/* obs#30: an OBS start ran every new source's first (deferred) update in one tick_sources (15
+	 * FreeType2 text sources, ~130 ms on strih-snv: 6-7 program frames lagged, 2-3 JPEG XS frames
+	 * dropped). Past the frame's budget, a NEW source whose first update is pending skips this whole
+	 * tick, so its update still runs before its first video_tick (OBS's order), a frame or a few
+	 * later. A held source skips its WHOLE tick, on purpose: nothing of it (show/hide, async frames,
+	 * a transition's step, media actions, video_tick) runs before its settings are applied. A
+	 * running source's later updates, and a source with no update to run, are never held. */
+	if (!source->first_deferred_update_done && source->context.data && source->info.update &&
+	    os_atomic_load_long(&source->defer_update_count) > 0 && !first_update_allowed())
 		return;
 
 	if (source->info.type == OBS_SOURCE_TYPE_TRANSITION)
