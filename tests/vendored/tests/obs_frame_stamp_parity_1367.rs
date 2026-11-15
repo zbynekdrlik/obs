@@ -34,8 +34,18 @@ fn lift_line(src: &str, prefix: &str) -> String {
 }
 
 fn lift_fn(src: &str, signature: &str) -> String {
+    // The definition: `signature` at a line start whose body opens (`{`) before any `;` (a
+    // prototype ends with `;`; a wrapped parameter list is fine), not a comment that names it.
     let start = src
-        .find(signature)
+        .match_indices(signature)
+        .map(|(i, _)| i)
+        .find(|&i| {
+            let at_line_start = i == 0 || src.as_bytes()[i - 1] == b'\n';
+            let rest = &src[i..];
+            let brace = rest.find('{');
+            let semi = rest.find(';');
+            at_line_start && brace.is_some_and(|b| semi.is_none_or(|s| b < s))
+        })
         .unwrap_or_else(|| panic!("issue 1367: {NDI_OUTPUT} no longer defines `{signature}`"));
     let end = src[start..]
         .find("\n}\n")
@@ -130,7 +140,11 @@ fn the_shipped_c_frame_stamp_matches_the_rust_authority_1367() {
         .stdin(fs::File::open(&vec_file).unwrap())
         .output()
         .unwrap();
-    assert!(got.status.success());
+    assert!(
+        got.status.success(),
+        "the lifted frame stamp failed:\n{}",
+        String::from_utf8_lossy(&got.stderr)
+    );
     let c_stamps: Vec<i64> = String::from_utf8(got.stdout)
         .unwrap()
         .lines()
@@ -160,21 +174,41 @@ fn both_outputs_stamp_the_frames_own_render_tick_1367() {
 }
 
 /// obs#62: the authority the parity runs against is the vstack obs pins: the rig-core
-/// dev-dependency's tag (tests/vendored/Cargo.toml) equals vstack.pin's tag.
+/// dev-dependency's tag (tests/vendored/Cargo.toml) is vstack.pin's tag, and the commit Cargo.lock
+/// resolved it to is vstack.pin's commit (a moved tag fails).
 #[test]
 fn vstack_pin_and_rig_core_tag_agree() {
     let pin = read("vstack.pin");
-    let tag = pin
-        .lines()
-        .find_map(|l| l.strip_prefix("tag="))
-        .expect("vstack.pin has tag=");
+    let pin_value = |key: &str| {
+        pin.lines()
+            .find_map(|l| l.trim().strip_prefix(key))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| panic!("vstack.pin has no {key}"))
+    };
+    let (tag, commit) = (pin_value("tag="), pin_value("commit="));
     let cargo = read("tests/vendored/Cargo.toml");
     let line = cargo
         .lines()
-        .find(|l| l.starts_with("rig-core = "))
+        .map(str::trim)
+        .find(|l| l.starts_with("rig-core") && l.contains('='))
         .expect("tests/vendored/Cargo.toml has the rig-core dev-dependency");
+    let dep_tag = line
+        .split("tag")
+        .nth(1)
+        .and_then(|rest| rest.split('"').nth(1))
+        .unwrap_or_else(|| panic!("obs#62: no tag in `{line}`"));
+    assert_eq!(
+        dep_tag, tag,
+        "obs#62: rig-core's tag is not vstack.pin's: move them together"
+    );
+    let lock = read("tests/vendored/Cargo.lock");
+    let source = lock
+        .split("[[package]]")
+        .find(|p| p.contains("name = \"rig-core\""))
+        .and_then(|p| p.lines().find(|l| l.starts_with("source = ")))
+        .expect("Cargo.lock has rig-core's source");
     assert!(
-        line.contains(&format!("tag = \"{tag}\"")),
-        "obs#62: rig-core's tag ({line}) is not vstack.pin's {tag}: move them together"
+        source.contains(&format!("?tag={tag}#{commit}")),
+        "obs#62: Cargo.lock resolved rig-core to `{source}`, vstack.pin says {tag} at {commit}"
     );
 }
