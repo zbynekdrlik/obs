@@ -42,7 +42,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.135: play_at's media/app clock pair is filtered (a torn pair over 50 us rejected, the slew bounded, a persistent step taken on the 3rd wake), so its +-1-2 ms pair jitter is gone (dstack#295); status engine.play_at_rejected, INFO `play_at: torn clock pair reads rejected in the last minute`, WARN `play_at: the media clock's offset from the app's clock stepped`. For the dstack#303 bisect (b), obs#56; not dstack's production tag. Passes v0.6.133 (arc_rx_fpp Option, no literal here) and v0.6.134. No latency change.
 # v0.6.136: dstack#303 fix, the bridge Player resyncs a block that does not start where the last ended (fill_at with the block start), follows OBS's 1024-frame tick schedule on a re-prime, and bounds its level loop at 20 ppm once locked; passed dstack#304's release soak (Release run 43633305590). Carries v0.6.135's filtered play_at. No latency change.
 # v0.6.137: Config::test_clock_ppm (TEST ONLY: the system clock with a skew) and the dstack-dev peer for the obs#57 soak gate (dstack#305); status engine.play_at_steps / play_at_max_dev_us (PumpView); the player resyncs on a None-to-Some block start (dstack#303). Passed dstack's soak gate. No latency change.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.140" }
+# v0.6.143: dstack#303, part two: the bridge Player stamps each FIFO push and steers on the producer line, so a 128-frame level read no longer aliases with OBS's 1024-frame grid (v0.6.140 removed the floor re-centre but its loop froze, then braked at 20 ppm, obs#56). The dstack-dev peer logs each tone break. No producer API change, no latency change.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.143" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
