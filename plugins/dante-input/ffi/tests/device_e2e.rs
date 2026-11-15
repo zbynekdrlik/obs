@@ -84,9 +84,12 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
     // obs#45 (dstack #278): reorders apart from loss; obs#47 (dstack v0.6.126): the start
     // burst apart from the holes; obs#56 (dlink v0.6.136): the TX resyncs, the last token. All
     // counts.
-    // obs#57 (dlink v0.6.137): the gate's counters, appended last, each a count.
+    // obs#57 (dlink v0.6.137): the gate's counters, each a count; obs#56: the TX writer's
+    // cadence after them, last (0 without TX).
     let mut rest = line.as_str();
     for key in [
+        "tx_push_gap_max_us",
+        "tx_late_pushes",
         "gaps_unfilled",
         "stamp_jumps",
         "play_at_max_dev_us",

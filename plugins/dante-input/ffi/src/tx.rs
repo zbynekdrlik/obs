@@ -10,6 +10,8 @@
 //! buffer plus dlink's TX path later; the device logs every term at its start.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use dlink::Block;
 use dlink::bridge::{AppBuffer, Fifo, Player, Stats, fifo_for};
@@ -26,6 +28,67 @@ pub struct TxIn {
     track: u32,
     rate: u32,
     buffer: AppBuffer,
+    cadence: Cadence,
+    epoch: Instant,
+}
+
+/// obs#56: the TX writer's cadence, OBS's audio thread pushing its chunks. A push more than
+/// [`LATE_FACTOR`] times the last push's audio length after it is late: the FIFO (one chunk + one
+/// block) runs dry before it, so late pushes tracking `tx_underruns` name the writer, not the
+/// reader. One writer (`note`), one reader (`take_gap_max_us`).
+#[derive(Debug, Default)]
+pub struct Cadence {
+    last_ns: AtomicU64,
+    last_len_ns: AtomicU64,
+    late: AtomicU64,
+    gap_max_ns: AtomicU64,
+}
+
+/// A push this many times the last push's audio length after it is late (OBS pushes 1024 frames,
+/// 21.3 ms at 48 kHz, so 32 ms; the FIFO holds 22.7 ms).
+pub const LATE_FACTOR: f64 = 1.5;
+
+impl Cadence {
+    /// A push of `frames` at `rate` Hz at `now_ns` (monotonic, > 0).
+    pub fn note(&self, now_ns: u64, frames: usize, rate: u32) {
+        let last = self.last_ns.swap(now_ns, Ordering::Relaxed);
+        if last != 0 && now_ns > last {
+            let gap = now_ns - last;
+            self.gap_max_ns.fetch_max(gap, Ordering::Relaxed);
+            let len = self.last_len_ns.load(Ordering::Relaxed);
+            if len > 0 && gap as f64 > LATE_FACTOR * len as f64 {
+                self.late.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if rate > 0 {
+            let len = (frames as u128 * 1_000_000_000 / u128::from(rate)) as u64;
+            self.last_len_ns.store(len, Ordering::Relaxed);
+        }
+    }
+
+    /// Pushes later than [`LATE_FACTOR`] times the last one's length, since the start.
+    pub fn late(&self) -> u64 {
+        self.late.load(Ordering::Relaxed)
+    }
+
+    /// The largest gap between two pushes since the last take, µs, the gap still open at `now_ns`
+    /// (since the last push) included, so a writer stalled right now shows before its next push
+    /// (0: no push yet). `take` starts the next window (the status line's interval); a peek leaves
+    /// it. Only a push counts a late one (once).
+    pub fn gap_max_us(&self, take: bool, now_ns: u64) -> u64 {
+        let closed = if take {
+            self.gap_max_ns.swap(0, Ordering::Relaxed)
+        } else {
+            self.gap_max_ns.load(Ordering::Relaxed)
+        };
+        let last = self.last_ns.load(Ordering::Relaxed);
+        let open = if last != 0 {
+            now_ns.saturating_sub(last)
+        } else {
+            0
+        };
+        closed.max(open) / 1_000
+    }
 }
 
 /// The pump side: fills the device's TX outputs from the player.
@@ -81,6 +144,8 @@ pub fn tx(
             track,
             rate: obs_rate,
             buffer,
+            cadence: Cadence::default(),
+            epoch: Instant::now(),
         },
         TxOut {
             player,
@@ -114,9 +179,19 @@ impl TxIn {
         };
         let right = planes.get(1).unwrap_or(left);
         let frames = frames.min(left.len()).min(right.len());
+        // + 1: a push in the epoch's first nanosecond is not "no push yet".
+        let now_ns = self.epoch.elapsed().as_nanos() as u64 + 1;
+        self.cadence.note(now_ns, frames, self.rate);
         self.fifo.push_with(frames, |f, c| {
             f64::from(if c == 0 { left[f] } else { right[f] })
         });
+    }
+
+    /// The cadence counts (obs#56): the late pushes since the start, and the largest push gap
+    /// since the status line's last take, µs (only the status line takes).
+    pub fn cadence(&self, take: bool) -> (u64, u64) {
+        let now_ns = self.epoch.elapsed().as_nanos() as u64 + 1;
+        (self.cadence.late(), self.cadence.gap_max_us(take, now_ns))
     }
 
     pub fn counts(&self) -> TxCounts {

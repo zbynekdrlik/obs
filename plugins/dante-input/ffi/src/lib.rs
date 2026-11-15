@@ -876,7 +876,7 @@ impl DanteInput {
 
     /// The device's counts now; `None` once it is stopped.
     pub fn status(&self) -> Option<Status> {
-        status_of(&self.link, &self.feed, self.tx.as_deref())
+        status_of(&self.link, &self.feed, self.tx.as_deref(), false)
     }
 
     /// The OBS track the TX carries, from 1; 0 without TX.
@@ -947,7 +947,13 @@ impl DanteInput {
     }
 }
 
-fn status_of(link: &Mutex<Option<Link>>, feed: &Feed, tx: Option<&TxIn>) -> Option<Status> {
+/// `take`: the status line's read, which starts the next window of the per-line maxima.
+fn status_of(
+    link: &Mutex<Option<Link>>,
+    feed: &Feed,
+    tx: Option<&TxIn>,
+    take: bool,
+) -> Option<Status> {
     let guard = link.lock().ok()?;
     let l = guard.as_ref()?;
     let mut st = Status::read(l.media(), feed.delivered.load(Ordering::Relaxed));
@@ -957,6 +963,7 @@ fn status_of(link: &Mutex<Option<Link>>, feed: &Feed, tx: Option<&TxIn>) -> Opti
     st.gaps_unfilled = feed.gaps_unfilled.load(Ordering::Relaxed);
     if let Some(t) = tx {
         st.tx(t.counts());
+        (st.tx_late_pushes, st.tx_push_gap_max_us) = t.cadence(take);
     }
     Some(st)
 }
@@ -974,7 +981,7 @@ fn status_loop(
             Err(RecvTimeoutError::Timeout) => {}
             _ => return,
         }
-        let Some(st) = status_of(link, feed, tx) else {
+        let Some(st) = status_of(link, feed, tx, true) else {
             return;
         };
         log(LOG_INFO, &st.line());

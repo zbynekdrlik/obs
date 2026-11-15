@@ -155,6 +155,21 @@ static double median_of_last(const char *token, size_t n)
 	return m ? last[m / 2] : 0.0;
 }
 
+/* The largest ` <token>=` over every status line logged (0 when none). */
+static unsigned long long max_logged(const char *token)
+{
+	unsigned long long m = 0;
+	pthread_mutex_lock(&logged_mutex);
+	for (const char *p = logged.array; p && (p = strstr(p, token)) != NULL;) {
+		p += strlen(token);
+		const unsigned long long v = strtoull(p, NULL, 10);
+		if (v > m)
+			m = v;
+	}
+	pthread_mutex_unlock(&logged_mutex);
+	return m;
+}
+
 /* ---- obs#57's soak ---- */
 
 /* The peer's own object of its status JSON (from `"peer":{` on: the file puts "device" first, and
@@ -341,6 +356,7 @@ static void soak(double skew_ppm)
 	unsigned long long before[SOAK_COUNTERS];
 	for (size_t i = 0; i < SOAK_COUNTERS; i++)
 		before[i] = last_value(soak_counters[i]);
+	const unsigned long long late_before = last_value(" tx_late_pushes=");
 	char *json = peer_part();
 	const double gaps_before = json_sum(json, "tone_gaps");
 	const double blocks_before = json_number(json, "blocks");
@@ -369,6 +385,11 @@ static void soak(double skew_ppm)
 			 after);
 		expect(after == before[i], what);
 	}
+	/* obs#56: the TX writer's cadence, reported (not gated): the field's numbers come first. */
+	expect(logged_has(" tx_late_pushes=") && logged_has(" tx_push_gap_max_us="),
+	       "the status line carries the TX writer's cadence");
+	fprintf(stderr, "soak: TX writer: tx_late_pushes %llu then %llu, the largest push gap %llu us\n", late_before,
+		last_value(" tx_late_pushes="), max_logged(" tx_push_gap_max_us="));
 	const unsigned long long dev = last_value(" play_at_max_dev_us=");
 	char what[160];
 	snprintf(what, sizeof(what), "soak: play_at_max_dev_us %llu under 1000", dev);
@@ -432,6 +453,13 @@ int main(int argc, char **argv)
 	}
 	struct obs_audio_info ai = {.samples_per_sec = 48000, .speakers = SPEAKERS_STEREO};
 	expect(obs_reset_audio(&ai), "obs_reset_audio 48 kHz stereo");
+	/* obs#56: the soak runs the boxes' FIXED audio buffering (stream-snv: 0 ms) when it asks. */
+	const char *fixed = getenv("DANTE_SOAK_BUFFERING_MS");
+	if (fixed) {
+		char want[96];
+		snprintf(want, sizeof(want), "genlock-audio-buffering: FIXED %s ms", fixed);
+		expect(logged_has(want), "OBS runs the box's FIXED audio buffering (DANTE_SOAK_BUFFERING_MS)");
+	}
 
 	obs_module_t *module = NULL;
 	expect(obs_open_module(&module, so, NULL) == MODULE_SUCCESS, "obs_open_module");
