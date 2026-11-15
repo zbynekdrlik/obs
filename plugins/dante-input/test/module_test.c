@@ -103,20 +103,6 @@ static unsigned long long last_value(const char *token)
 	return v;
 }
 
-/* The value of ` <token>=` (a decimal, maybe negative) in the last status line that has it. */
-static double last_double(const char *token)
-{
-	double v = 0.0;
-	pthread_mutex_lock(&logged_mutex);
-	const char *p = logged.array;
-	while (p && (p = strstr(p, token)) != NULL) {
-		p += strlen(token);
-		v = strtod(p, NULL);
-	}
-	pthread_mutex_unlock(&logged_mutex);
-	return v;
-}
-
 static bool logged_within(const char *s, int ms);
 
 /* How many lines hold `s` (status lines: one each). */
