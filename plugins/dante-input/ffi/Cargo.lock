@@ -76,7 +76,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "dante-input-ffi"
-version = "0.4.41"
+version = "0.4.42"
 dependencies = [
  "dlink",
  "rtrb",
@@ -90,8 +90,8 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.137"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.137#8c4a888c895b20658b765a70fdb638f92118b7a4"
+version = "0.6.144"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.144#ed05358279e4f3898ec69103abb2af817bc787a3"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -102,8 +102,8 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.6.137"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.137#8c4a888c895b20658b765a70fdb638f92118b7a4"
+version = "0.6.144"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.144#ed05358279e4f3898ec69103abb2af817bc787a3"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -125,13 +125,13 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.137"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.137#8c4a888c895b20658b765a70fdb638f92118b7a4"
+version = "0.6.144"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.144#ed05358279e4f3898ec69103abb2af817bc787a3"
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.137"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.137#8c4a888c895b20658b765a70fdb638f92118b7a4"
+version = "0.6.144"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.144#ed05358279e4f3898ec69103abb2af817bc787a3"
 dependencies = [
  "rubato",
 ]
@@ -281,7 +281,7 @@ dependencies = [
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.137#8c4a888c895b20658b765a70fdb638f92118b7a4"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.144#ed05358279e4f3898ec69103abb2af817bc787a3"
 dependencies = [
  "fastrand",
  "flume",

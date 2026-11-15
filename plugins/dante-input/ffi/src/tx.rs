@@ -14,9 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use dlink::Block;
-use dlink::bridge::{AppBuffer, Fifo, Player, Stats, fifo_for};
+use dlink::bridge::{AppBuffer, Fifo, Player, Stats, chunk_ns, fifo_for};
 
-use crate::config::TX_CHANNELS;
+use crate::config::{OBS_CHUNK_FRAMES, TX_CHANNELS};
 
 /// The most frames the pump fills from the player at once (its scratch, no allocation in a block).
 pub const CHUNK: usize = 1024;
@@ -127,13 +127,35 @@ pub fn tx(
     app_rate: u32,
     buffer: AppBuffer,
 ) -> Result<(TxIn, TxOut), String> {
-    let fifo = Arc::new(fifo_for(TX_CHANNELS, obs_rate));
+    tx_on(
+        fifo_for(TX_CHANNELS, obs_rate),
+        track,
+        obs_rate,
+        app_rate,
+        buffer,
+    )
+}
+
+/// [`tx`] on a FIFO the caller made: a simulation's FIFO stamps its writes on the simulated
+/// clock (`Fifo::with_clock`), since dlink v0.6.143's player steers on the line through the
+/// writes' stamps (dstack#303, obs#56).
+fn tx_on(
+    fifo: Fifo,
+    track: u32,
+    obs_rate: u32,
+    app_rate: u32,
+    buffer: AppBuffer,
+) -> Result<(TxIn, TxOut), String> {
+    let fifo = Arc::new(fifo);
     let stats = Arc::new(Stats::default());
     let player = Player::new(
         Arc::clone(&fifo),
         obs_rate,
         app_rate,
         buffer,
+        // OBS writes 1024-frame chunks (dlink v0.6.144, dstack #317: the player follows the
+        // producer's real chunk).
+        chunk_ns(OBS_CHUNK_FRAMES, obs_rate),
         Arc::clone(&stats),
     )
     .map_err(|e| format!("the TX rate conversion {obs_rate} to {app_rate} Hz: {e}"))?;
