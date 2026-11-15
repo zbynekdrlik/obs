@@ -256,10 +256,16 @@ static void *tone_loop(void *param)
 	float plane[480];
 	const uint64_t t0 = os_gettime_ns();
 	uint64_t frame = 0;
+	/* Each block goes in 2 blocks (20 ms) before its stamp. With FIXED 0 ms buffering the mix
+	 * tick takes a source only if its buffer already covers the tick (obs-audio.c
+	 * audio_buffer_insufficient: else audio_pending, left out of that tick, no log). A block
+	 * pushed just at its stamp fell short at a host blip, and the peer heard one OBS tick of
+	 * silence (obs#56, dstack#303, run 43758185093). */
+	const uint64_t lead = 2ULL * 480ULL * 1000000000ULL / 48000ULL;
 	for (uint64_t k = 0; !atomic_load(&tone_stop); k++) {
 		const uint64_t due = t0 + k * 480ULL * 1000000000ULL / 48000ULL;
-		if (due > os_gettime_ns())
-			os_sleepto_ns(due);
+		if (due - lead > os_gettime_ns())
+			os_sleepto_ns(due - lead);
 		if (atomic_load(&tone_paused)) {
 			frame += 480 + 7; /* the tone comes back off its phase */
 			continue;
