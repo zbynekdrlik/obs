@@ -776,6 +776,10 @@ jobs:
           if kill -0 "$peer_pid" 2>/dev/null; then echo "ERROR: the peer ignored SIGINT"; kill -KILL "$peer_pid" || true; rc=1; fi
           peer_rc=0
           wait "$peer_pid" || peer_rc=$?
+          # obs#56: the peer's tone breaks with their times (dstack-dev v0.6.143+: one WARN each,
+          # target dstack::peer::tone), to set beside dante-input's status lines.
+          echo "== the peer's tone breaks"
+          grep -F "a tone break" "$RUNNER_TEMP/peer.log" || echo "(none logged)"
           echo "== the peer's log (tail)"
           tail -40 "$RUNNER_TEMP/peer.log"
           echo "== the peer's last status"
