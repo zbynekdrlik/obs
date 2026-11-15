@@ -236,3 +236,56 @@ fn a_block_filled_in_pieces_passes_each_piece_s_start() {
     }
     assert_eq!(tx_in.counts().resyncs, 0, "{:?}", tx_in.counts());
 }
+
+/// obs#56: OBS pushing a 1024-frame chunk every 21.3 ms is on time; a push over 1.5 chunk lengths
+/// after the last is late, and the largest gap is the status line's window (a take resets it).
+#[test]
+fn a_push_over_one_and_a_half_chunks_late_counts_and_the_gap_max_is_per_window() {
+    let c = Cadence::default();
+    let chunk_ns = 1024 * 1_000_000_000 / u64::from(RATE); // 21_333_333
+    let mut t = 1_000;
+    c.note(t, 1024, RATE);
+    for _ in 0..10 {
+        t += chunk_ns + 2_000_000; // jitter, still on time
+        c.note(t, 1024, RATE);
+    }
+    assert_eq!(c.late(), 0);
+    assert_eq!(c.gap_max_us(true), 23_333);
+    assert_eq!(c.gap_max_us(false), 0, "a take starts the next window");
+
+    t += chunk_ns * 3 / 2 + 1_000; // just past the bound
+    c.note(t, 1024, RATE);
+    t += chunk_ns;
+    c.note(t, 1024, RATE);
+    assert_eq!(c.late(), 1);
+    assert_eq!(c.gap_max_us(false), 32_000, "a peek leaves the window");
+    assert_eq!(c.gap_max_us(true), 32_000);
+
+    t += chunk_ns * 3 / 2 - 1_000; // just under the bound
+    c.note(t, 1024, RATE);
+    assert_eq!(c.late(), 1);
+}
+
+/// The first push has no gap; a shorter chunk sets a shorter bound for the next push.
+#[test]
+fn the_bound_follows_the_last_push_s_length() {
+    let c = Cadence::default();
+    c.note(5, 480, RATE); // 10 ms
+    assert_eq!((c.late(), c.gap_max_us(false)), (0, 0));
+    c.note(5 + 16_000_000, 1024, RATE); // 16 ms after a 10 ms push: late
+    assert_eq!(c.late(), 1);
+}
+
+/// TxIn::push feeds the cadence: two pushes give a gap, the status read takes it.
+#[test]
+fn obs_s_pushes_feed_the_cadence() {
+    let (tx_in, _out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let (l, r) = obs_chunk(0);
+    tx_in.push(&[&l, &r], l.len());
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    tx_in.push(&[&l, &r], l.len());
+    let (late, gap) = tx_in.cadence(true);
+    assert_eq!(late, 0);
+    assert!(gap >= 5_000, "gap {gap} µs");
+    assert_eq!(tx_in.cadence(true).1, 0);
+}
