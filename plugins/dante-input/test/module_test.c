@@ -36,6 +36,7 @@
 
 #include <math.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -118,6 +119,29 @@ static double last_double(const char *token)
 
 static bool logged_within(const char *s, int ms);
 
+/* How many lines hold `s` (status lines: one each). */
+static size_t count_logged(const char *s)
+{
+	size_t n = 0;
+	pthread_mutex_lock(&logged_mutex);
+	for (const char *p = logged.array; p && (p = strstr(p, s)) != NULL; p += strlen(s))
+		n++;
+	pthread_mutex_unlock(&logged_mutex);
+	return n;
+}
+
+/* Waits (up to `ms`) for a status line newer than the ones logged now. */
+static bool fresh_status_line(int ms)
+{
+	const size_t now = count_logged("dante-input status:");
+	for (int waited = 0; waited <= ms; waited += 100) {
+		if (count_logged("dante-input status:") > now)
+			return true;
+		os_sleep_ms(100);
+	}
+	return false;
+}
+
 /* ---- obs#57's soak ---- */
 
 /* The peer's own object of its status JSON (from `"peer":{` on: the file puts "device" first, and
@@ -194,8 +218,8 @@ static void tone_destroy(void *data)
 	bfree(data);
 }
 
-static volatile bool tone_stop;
-static volatile bool tone_paused;
+static atomic_bool tone_stop;
+static atomic_bool tone_paused;
 static obs_source_t *tone_source;
 
 static void *tone_loop(void *param)
@@ -204,11 +228,11 @@ static void *tone_loop(void *param)
 	float plane[480];
 	const uint64_t t0 = os_gettime_ns();
 	uint64_t frame = 0;
-	for (uint64_t k = 0; !tone_stop; k++) {
+	for (uint64_t k = 0; !atomic_load(&tone_stop); k++) {
 		const uint64_t due = t0 + k * 480ULL * 1000000000ULL / 48000ULL;
 		if (due > os_gettime_ns())
 			os_sleepto_ns(due);
-		if (tone_paused) {
+		if (atomic_load(&tone_paused)) {
 			frame += 480 + 7; /* the tone comes back off its phase */
 			continue;
 		}
@@ -289,13 +313,22 @@ static void soak(double skew_ppm)
 	}
 	expect(locked, "the peer's RX channels all locked on dante-input's TX tone and dante-input receives the peer");
 	os_sleep_ms(15000); /* the settle: the status line every 10 s from 30 s on, the ASRCs lock */
+	/* the baseline from a status line printed after the settle, not one up to 10 s old */
+	expect(fresh_status_line(12000), "a status line after the settle");
+	for (size_t i = 0; i < SOAK_COUNTERS; i++) {
+		char what[96];
+		snprintf(what, sizeof(what), "the status line carries %s", soak_counters[i] + 1);
+		expect(logged_has(soak_counters[i]), what);
+	}
 
 	unsigned long long before[SOAK_COUNTERS];
 	for (size_t i = 0; i < SOAK_COUNTERS; i++)
 		before[i] = last_value(soak_counters[i]);
 	char *json = peer_part();
 	const double gaps_before = json_sum(json, "tone_gaps");
+	const double blocks_before = json_number(json, "blocks");
 	bfree(json);
+	expect(gaps_before >= 0, "the peer's status carries tone_gaps at the start of the window");
 	const char *window_env = getenv("DANTE_SOAK_SECONDS");
 	const int window = window_env ? atoi(window_env) : 600;
 	fprintf(stderr, "soak: %d s from here (skew %.1f ppm)\n", window, skew_ppm);
@@ -303,13 +336,14 @@ static void soak(double skew_ppm)
 	if (fault && strcmp(fault, "tone_gap") == 0 && window > 25) {
 		fprintf(stderr, "soak: the negative control: OBS's tone stops 1 s, 20 s in\n");
 		os_sleep_ms(20000);
-		tone_paused = true;
+		atomic_store(&tone_paused, true);
 		os_sleep_ms(1000);
-		tone_paused = false;
-		os_sleep_ms((uint32_t)(window - 21) * 1000 + 11000);
+		atomic_store(&tone_paused, false);
+		os_sleep_ms((uint32_t)(window - 21) * 1000);
 	} else {
-		os_sleep_ms((uint32_t)window * 1000 + 11000); /* + one 10 s status line */
+		os_sleep_ms((uint32_t)window * 1000);
 	}
+	expect(fresh_status_line(12000), "a status line after the window");
 
 	for (size_t i = 0; i < SOAK_COUNTERS; i++) {
 		const unsigned long long after = last_value(soak_counters[i]);
@@ -322,23 +356,28 @@ static void soak(double skew_ppm)
 	char what[160];
 	snprintf(what, sizeof(what), "soak: play_at_max_dev_us %llu under 1000", dev);
 	expect(dev < 1000, what);
+	expect(logged_has(" play_at_max_dev_us=") && logged_has(" tx_ppm="), "the status line carries the deviation and tx_ppm");
+	/* the TX player corrects against the skew: its ppm is the skew negated (CI: -5.9 at +6) */
 	const double tx_ppm = last_double(" tx_ppm=");
-	snprintf(what, sizeof(what), "soak: tx_ppm %.1f settled within the skew + 2 (|%.1f| <= %.1f)", tx_ppm, tx_ppm,
-		 fabs(skew_ppm) + 2.0);
-	expect(fabs(tx_ppm) <= fabs(skew_ppm) + 2.0, what);
+	snprintf(what, sizeof(what), "soak: tx_ppm %.1f tracks the skew (|%.1f + %.1f| <= 2)", tx_ppm, tx_ppm, skew_ppm);
+	expect(fabs(tx_ppm + skew_ppm) <= 2.0, what);
 	json = peer_part();
 	const double gaps_after = json_sum(json, "tone_gaps");
 	const double peer_ppm = json_number(json, "play_at_ppm");
+	const double blocks_after = json_number(json, "blocks");
 	const bool still_locked = all_locked(json);
 	bfree(json);
 	snprintf(what, sizeof(what), "soak: the peer's tone_gaps did not rise (%.0f then %.0f)", gaps_before,
 		 gaps_after);
 	expect(gaps_before >= 0 && gaps_after == gaps_before, what);
 	expect(still_locked, "soak: the peer's RX still locked at the end");
+	snprintf(what, sizeof(what), "soak: the peer ran through the window (blocks %.0f then %.0f)", blocks_before,
+		 blocks_after);
+	expect(blocks_before >= 0 && blocks_after > blocks_before, what);
 	snprintf(what, sizeof(what), "soak: the peer's play_at_ppm %.2f within the skew %.1f ± 2", peer_ppm, skew_ppm);
 	expect(fabs(peer_ppm - skew_ppm) <= 2.0, what);
 
-	tone_stop = true;
+	atomic_store(&tone_stop, true);
 	pthread_join(tone_thread, NULL);
 	obs_set_output_source(1, NULL);
 	obs_set_output_source(2, NULL);

@@ -1,0 +1,5 @@
+# obs#57: the CI soak's peer, dstack-dev from dstack's release of the pinned dlink tag (ffi/Cargo.toml).
+# The CI compares the download to this sha256, not to the release's own .sha256 (a replaced
+# release asset fails). Move it with the dlink pin: tag, then the sha256 of
+# dstack-dev-<tag>-linux-x86_64.
+v0.6.137 f69dcc4f2bf9636df74d5a5535539be51f6d325751dda2ee804f10a08127c9ab

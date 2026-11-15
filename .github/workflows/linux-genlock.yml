@@ -733,8 +733,11 @@ jobs:
           mkdir -p "$peer_dir"
           asset="dstack-dev-$tag-linux-x86_64"
           curl -fsSL --retry 5 -o "$peer_dir/$asset" "https://github.com/zbynekdrlik/dstack/releases/download/$tag/$asset"
-          curl -fsSL --retry 5 -o "$peer_dir/$asset.sha256" "https://github.com/zbynekdrlik/dstack/releases/download/$tag/$asset.sha256"
-          (cd "$peer_dir" && sha256sum -c "$asset.sha256")
+          # The download against the sha256 pinned in this repo (not the release's own .sha256).
+          pin="$(awk -v t="$tag" '$1 == t {print $2}' ci/dstack-dev.pin)"
+          if [ -z "$pin" ]; then echo "ERROR: ci/dstack-dev.pin has no sha256 for $tag (move it with the dlink pin)"; exit 1; fi
+          got="$(sha256sum "$peer_dir/$asset" | cut -d' ' -f1)"
+          if [ "$got" != "$pin" ]; then echo "ERROR: $asset is $got, ci/dstack-dev.pin says $pin"; exit 1; fi
           chmod +x "$peer_dir/$asset"
           # Dante's multicast (mDNS, the info groups) on dante0, so both devices find each other there.
           sudo ip link set dante0 multicast on
@@ -747,6 +750,7 @@ jobs:
             --status "$RUNNER_TEMP/peer.json" > "$RUNNER_TEMP/peer.log" 2>&1 &
           peer_pid=$!
           rc=0
+          export DANTE_INPUT_TEST_CLOCK=1   # test_clock_ppm is refused without it (obs#57)
           HOME="$home" DANTE_PEER_STATUS="$RUNNER_TEMP/peer.json" DANTE_SOAK_SECONDS=600 DANTE_SOAK_SKEW_PPM=6 \
             DANTE_LIBOBS_DATA="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs/" \
             xvfb-run -a "$test_bin" "$so" soak || rc=$?
@@ -757,11 +761,16 @@ jobs:
             DANTE_SOAK_FAULT=tone_gap DANTE_LIBOBS_DATA="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs/" \
             xvfb-run -a "$test_bin" "$so" soak > "$RUNNER_TEMP/soak-control.log" 2>&1 || ctl_rc=$?
           grep -E "^(OK|FAIL): soak|soak:" "$RUNNER_TEMP/soak-control.log" || true
-          if [ "$ctl_rc" = 0 ] || ! grep -q "FAIL: soak: the peer's tone_gaps did not rise" "$RUNNER_TEMP/soak-control.log"; then
+          # a real rise: "(N then M)" with M > N, never a missing value
+          rise="$(sed -n "s/.*FAIL: soak: the peer's tone_gaps did not rise (\([0-9][0-9]*\) then \([0-9][0-9]*\)).*/\1 \2/p" "$RUNNER_TEMP/soak-control.log" | head -1)"
+          if [ "$ctl_rc" = 0 ] || [ -z "$rise" ] || ! awk -v r="$rise" 'BEGIN { split(r, a, " "); exit !(a[2] > a[1]) }'; then
             echo "ERROR: the negative control (a 1 s tone stop) did not fail on the peer's tone_gaps (exit $ctl_rc)"
             rc=1
           fi
-          kill -INT "$peer_pid"
+          # Stop the peer (it may have died already): SIGINT, at most 15 s for its goodbyes, then KILL.
+          kill -INT "$peer_pid" 2>/dev/null || true
+          for _ in $(seq 1 30); do kill -0 "$peer_pid" 2>/dev/null || break; sleep 0.5; done
+          if kill -0 "$peer_pid" 2>/dev/null; then echo "ERROR: the peer ignored SIGINT"; kill -KILL "$peer_pid" || true; rc=1; fi
           peer_rc=0
           wait "$peer_pid" || peer_rc=$?
           echo "== the peer's log (tail)"
