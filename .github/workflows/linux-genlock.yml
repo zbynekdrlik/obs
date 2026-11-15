@@ -759,12 +759,15 @@ jobs:
               printf '%s ' "$(date -u +%H:%M:%S.%N)"; tr -d '\n' < "$RUNNER_TEMP/peer.json" 2>/dev/null || true; echo
               sleep 1
             done ) > "$RUNNER_TEMP/peer-status.log" &
+          status_pid=$!
           python3 -u -c 'import time, datetime
           while True:
               t = time.monotonic(); time.sleep(0.001); late = (time.monotonic() - t - 0.001) * 1000
               if late > 5: print(datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S.%f"), "stall", round(late, 2), "ms", flush=True)
           ' > "$RUNNER_TEMP/stall.log" 2>&1 &
           stall_pid=$!
+          # An abort anywhere below still stops the two helpers.
+          trap 'kill "$stall_pid" "$status_pid" 2>/dev/null || true' EXIT
           rc=0
           export DANTE_INPUT_TEST_CLOCK=1   # test_clock_ppm is refused without it (obs#57)
           HOME="$home" DANTE_PEER_STATUS="$RUNNER_TEMP/peer.json" DANTE_SOAK_SECONDS=600 DANTE_SOAK_SKEW_PPM=6 \

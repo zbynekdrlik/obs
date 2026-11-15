@@ -264,7 +264,7 @@ static void *tone_loop(void *param)
 	const uint64_t lead = 2ULL * 480ULL * 1000000000ULL / 48000ULL;
 	for (uint64_t k = 0; !atomic_load(&tone_stop); k++) {
 		const uint64_t due = t0 + k * 480ULL * 1000000000ULL / 48000ULL;
-		if (due - lead > os_gettime_ns())
+		if (due > os_gettime_ns() + lead)
 			os_sleepto_ns(due - lead);
 		if (atomic_load(&tone_paused)) {
 			frame += 480 + 7; /* the tone comes back off its phase */
