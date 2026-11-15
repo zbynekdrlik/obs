@@ -22,6 +22,9 @@
  *                                           stamp jump or unfilled gap, no peer tone gap; the play
  *                                           time's deviation under 1 ms, tx_ppm and the peer's
  *                                           play_at_ppm within the skew + 2 ppm.
+ *                                           DANTE_SOAK_FAULT=tone_gap (the negative control): OBS's
+ *                                           tone stops 1 s, 20 s into the window, and comes back with a
+ *                                           phase jump: the peer's tone_gaps must rise (the run fails).
  *
  * The caller writes HOME/.camera-box/dante-input.toml for the last three. Exit 0 = every check held. */
 
@@ -192,6 +195,7 @@ static void tone_destroy(void *data)
 }
 
 static volatile bool tone_stop;
+static volatile bool tone_paused;
 static obs_source_t *tone_source;
 
 static void *tone_loop(void *param)
@@ -204,6 +208,10 @@ static void *tone_loop(void *param)
 		const uint64_t due = t0 + k * 480ULL * 1000000000ULL / 48000ULL;
 		if (due > os_gettime_ns())
 			os_sleepto_ns(due);
+		if (tone_paused) {
+			frame += 480 + 7; /* the tone comes back off its phase */
+			continue;
+		}
 		for (int i = 0; i < 480; i++, frame++)
 			plane[i] = 0.25f * (float)sin(2.0 * M_PI * 440.0 * (double)frame / 48000.0);
 		struct obs_source_audio a = {0};
@@ -291,7 +299,17 @@ static void soak(double skew_ppm)
 	const char *window_env = getenv("DANTE_SOAK_SECONDS");
 	const int window = window_env ? atoi(window_env) : 600;
 	fprintf(stderr, "soak: %d s from here (skew %.1f ppm)\n", window, skew_ppm);
-	os_sleep_ms((uint32_t)window * 1000 + 11000); /* + one 10 s status line */
+	const char *fault = getenv("DANTE_SOAK_FAULT");
+	if (fault && strcmp(fault, "tone_gap") == 0 && window > 25) {
+		fprintf(stderr, "soak: the negative control: OBS's tone stops 1 s, 20 s in\n");
+		os_sleep_ms(20000);
+		tone_paused = true;
+		os_sleep_ms(1000);
+		tone_paused = false;
+		os_sleep_ms((uint32_t)(window - 21) * 1000 + 11000);
+	} else {
+		os_sleep_ms((uint32_t)window * 1000 + 11000); /* + one 10 s status line */
+	}
 
 	for (size_t i = 0; i < SOAK_COUNTERS; i++) {
 		const unsigned long long after = last_value(soak_counters[i]);

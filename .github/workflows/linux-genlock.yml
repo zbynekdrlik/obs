@@ -750,6 +750,17 @@ jobs:
           HOME="$home" DANTE_PEER_STATUS="$RUNNER_TEMP/peer.json" DANTE_SOAK_SECONDS=600 DANTE_SOAK_SKEW_PPM=6 \
             DANTE_LIBOBS_DATA="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs/" \
             xvfb-run -a "$test_bin" "$so" soak || rc=$?
+          # The negative control: the same gate on a 60 s window with OBS's tone stopped 1 s must
+          # fail on the peer's tone_gaps, so the gate is shown able to fail on a real dropout.
+          ctl_rc=0
+          HOME="$home" DANTE_PEER_STATUS="$RUNNER_TEMP/peer.json" DANTE_SOAK_SECONDS=60 DANTE_SOAK_SKEW_PPM=6 \
+            DANTE_SOAK_FAULT=tone_gap DANTE_LIBOBS_DATA="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs/" \
+            xvfb-run -a "$test_bin" "$so" soak > "$RUNNER_TEMP/soak-control.log" 2>&1 || ctl_rc=$?
+          grep -E "^(OK|FAIL): soak|soak:" "$RUNNER_TEMP/soak-control.log" || true
+          if [ "$ctl_rc" = 0 ] || ! grep -q "FAIL: soak: the peer's tone_gaps did not rise" "$RUNNER_TEMP/soak-control.log"; then
+            echo "ERROR: the negative control (a 1 s tone stop) did not fail on the peer's tone_gaps (exit $ctl_rc)"
+            rc=1
+          fi
           kill -INT "$peer_pid"
           peer_rc=0
           wait "$peer_pid" || peer_rc=$?
