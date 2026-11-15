@@ -250,20 +250,36 @@ fn a_push_over_one_and_a_half_chunks_late_counts_and_the_gap_max_is_per_window()
         c.note(t, 1024, RATE);
     }
     assert_eq!(c.late(), 0);
-    assert_eq!(c.gap_max_us(true), 23_333);
-    assert_eq!(c.gap_max_us(false), 0, "a take starts the next window");
+    assert_eq!(c.gap_max_us(true, t), 23_333);
+    assert_eq!(c.gap_max_us(false, t), 0, "a take starts the next window");
 
     t += chunk_ns * 3 / 2 + 1_000; // just past the bound
     c.note(t, 1024, RATE);
     t += chunk_ns;
     c.note(t, 1024, RATE);
     assert_eq!(c.late(), 1);
-    assert_eq!(c.gap_max_us(false), 32_000, "a peek leaves the window");
-    assert_eq!(c.gap_max_us(true), 32_000);
+    assert_eq!(c.gap_max_us(false, t), 32_000, "a peek leaves the window");
+    assert_eq!(c.gap_max_us(true, t), 32_000);
 
     t += chunk_ns * 3 / 2 - 1_000; // just under the bound
     c.note(t, 1024, RATE);
     assert_eq!(c.late(), 1);
+}
+
+/// A writer stalled right now shows in the gap before its next push; the push that ends the
+/// stall counts it late once.
+#[test]
+fn a_stall_still_open_shows_in_the_gap_and_counts_late_once_it_ends() {
+    let c = Cadence::default();
+    assert_eq!(c.gap_max_us(false, 1_000_000_000), 0, "no push yet");
+    c.note(1_000, 1024, RATE);
+    c.note(1_000 + 21_000_000, 1024, RATE);
+    let stalled = 1_000 + 21_000_000 + 80_000_000;
+    assert_eq!(c.gap_max_us(true, stalled), 80_000);
+    assert_eq!(c.late(), 0, "no push ended it yet");
+    c.note(stalled + 10_000_000, 1024, RATE);
+    assert_eq!(c.late(), 1);
+    assert_eq!(c.gap_max_us(true, stalled + 10_000_000), 90_000);
 }
 
 /// The first push has no gap; a shorter chunk sets a shorter bound for the next push.
@@ -271,7 +287,7 @@ fn a_push_over_one_and_a_half_chunks_late_counts_and_the_gap_max_is_per_window()
 fn the_bound_follows_the_last_push_s_length() {
     let c = Cadence::default();
     c.note(5, 480, RATE); // 10 ms
-    assert_eq!((c.late(), c.gap_max_us(false)), (0, 0));
+    assert_eq!((c.late(), c.gap_max_us(false, 5)), (0, 0));
     c.note(5 + 16_000_000, 1024, RATE); // 16 ms after a 10 ms push: late
     assert_eq!(c.late(), 1);
 }
@@ -287,5 +303,7 @@ fn obs_s_pushes_feed_the_cadence() {
     let (late, gap) = tx_in.cadence(true);
     assert_eq!(late, 0);
     assert!(gap >= 5_000, "gap {gap} µs");
-    assert_eq!(tx_in.cadence(true).1, 0);
+    // The window restarted: only the gap still open since the last push, far under the 5 ms.
+    let (_, open) = tx_in.cadence(true);
+    assert!(open < gap, "open {open} µs after a {gap} µs window");
 }

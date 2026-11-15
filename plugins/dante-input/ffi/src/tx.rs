@@ -61,7 +61,7 @@ impl Cadence {
             }
         }
         if rate > 0 {
-            let len = frames as u64 * 1_000_000_000 / u64::from(rate);
+            let len = (frames as u128 * 1_000_000_000 / u128::from(rate)) as u64;
             self.last_len_ns.store(len, Ordering::Relaxed);
         }
     }
@@ -71,15 +71,23 @@ impl Cadence {
         self.late.load(Ordering::Relaxed)
     }
 
-    /// The largest gap between two pushes since the last take, µs (0: under two pushes since).
-    /// `take` starts the next window (the status line's interval); a peek leaves it.
-    pub fn gap_max_us(&self, take: bool) -> u64 {
-        let ns = if take {
+    /// The largest gap between two pushes since the last take, µs, the gap still open at `now_ns`
+    /// (since the last push) included, so a writer stalled right now shows before its next push
+    /// (0: no push yet). `take` starts the next window (the status line's interval); a peek leaves
+    /// it. Only a push counts a late one (once).
+    pub fn gap_max_us(&self, take: bool, now_ns: u64) -> u64 {
+        let closed = if take {
             self.gap_max_ns.swap(0, Ordering::Relaxed)
         } else {
             self.gap_max_ns.load(Ordering::Relaxed)
         };
-        ns / 1_000
+        let last = self.last_ns.load(Ordering::Relaxed);
+        let open = if last != 0 {
+            now_ns.saturating_sub(last)
+        } else {
+            0
+        };
+        closed.max(open) / 1_000
     }
 }
 
@@ -182,7 +190,8 @@ impl TxIn {
     /// The cadence counts (obs#56): the late pushes since the start, and the largest push gap
     /// since the status line's last take, µs (only the status line takes).
     pub fn cadence(&self, take: bool) -> (u64, u64) {
-        (self.cadence.late(), self.cadence.gap_max_us(take))
+        let now_ns = self.epoch.elapsed().as_nanos() as u64 + 1;
+        (self.cadence.late(), self.cadence.gap_max_us(take, now_ns))
     }
 
     pub fn counts(&self) -> TxCounts {
