@@ -2,4 +2,4 @@
 # The CI compares the download to this sha256, not to the release's own .sha256 (a replaced
 # release asset fails). Move it with the dlink pin: tag, then the sha256 of
 # dstack-dev-<tag>-linux-x86_64.
-v0.6.143 ff3e3d74b869ef6c178456f123f149faa679c9625b3bde01c64c9dbb8325dbdb
+v0.6.144 a56ce82586270070eed5278116c0440901ecbdd940c7fabee4feb791f1d6952c

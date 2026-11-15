@@ -14,9 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use dlink::Block;
-use dlink::bridge::{AppBuffer, Fifo, Player, Stats, fifo_for};
+use dlink::bridge::{AppBuffer, Fifo, Player, Stats, chunk_ns, fifo_for};
 
-use crate::config::TX_CHANNELS;
+use crate::config::{OBS_CHUNK_FRAMES, TX_CHANNELS};
 
 /// The most frames the pump fills from the player at once (its scratch, no allocation in a block).
 pub const CHUNK: usize = 1024;
@@ -153,6 +153,9 @@ fn tx_on(
         obs_rate,
         app_rate,
         buffer,
+        // OBS writes 1024-frame chunks (dlink v0.6.144, dstack #317: the player follows the
+        // producer's real chunk).
+        chunk_ns(OBS_CHUNK_FRAMES, obs_rate),
         Arc::clone(&stats),
     )
     .map_err(|e| format!("the TX rate conversion {obs_rate} to {app_rate} Hz: {e}"))?;
