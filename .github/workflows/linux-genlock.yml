@@ -710,6 +710,76 @@ jobs:
             HOME="$home" xvfb-run -a "$test_bin" "$so" "$mode"
           done
 
+      # obs#57 (owner 14.11.2026: E2E strong enough that a regression never reaches production), the
+      # release gate. dstack's docs/ci-peer.md (dstack#305): a second Dante device on this runner
+      # (`dstack-dev peer` from the pinned dlink tag's release) and dante-input both on dlink's TEST
+      # system clock skewed 6 ppm (the field's drift), on dante0 with Dante's multicast routed there.
+      # OBS plays a tone into dante-input's TX, the peer sends one into its RX; after the settle,
+      # 10 min of real time must show no TX underrun/re-centre/resync, no RX hole/loss/gap, no pump
+      # underrun, no play-time step, stamp jump or unfilled gap, no peer tone gap (module_test soak).
+      # The publish jobs need this job, so a failing soak blocks the release.
+      - name: Soak dante-input RX+TX against a Dante peer on a skewed clock (obs#57 release gate)
+        working-directory: plugins/dante-input
+        run: |
+          set -euo pipefail
+          libobs="$(find "$GITHUB_WORKSPACE/obs-sdk" -name 'libobs.so*' -type f -print -quit)"
+          if [ -z "$libobs" ]; then echo "ERROR: no libobs.so in obs-sdk"; exit 1; fi
+          export LD_LIBRARY_PATH="$(dirname "$libobs")"
+          so="$PWD/build_ubuntu/dante-input.so"
+          test_bin="$PWD/build_ubuntu/dante-input-module-test"
+          tag="$(sed -n 's/^dlink = .*tag = "\(v[^"]*\)".*/\1/p' ffi/Cargo.toml)"
+          if [ -z "$tag" ]; then echo "ERROR: no dlink tag in ffi/Cargo.toml"; exit 1; fi
+          peer_dir="$RUNNER_TEMP/dstack-peer"
+          mkdir -p "$peer_dir"
+          asset="dstack-dev-$tag-linux-x86_64"
+          curl -fsSL --retry 5 -o "$peer_dir/$asset" "https://github.com/zbynekdrlik/dstack/releases/download/$tag/$asset"
+          # The download against the sha256 pinned in this repo (not the release's own .sha256).
+          pin="$(awk -v t="$tag" '$1 == t {print $2}' ci/dstack-dev.pin)"
+          if [ -z "$pin" ]; then echo "ERROR: ci/dstack-dev.pin has no sha256 for $tag (move it with the dlink pin)"; exit 1; fi
+          got="$(sha256sum "$peer_dir/$asset" | cut -d' ' -f1)"
+          if [ "$got" != "$pin" ]; then echo "ERROR: $asset is $got, ci/dstack-dev.pin says $pin"; exit 1; fi
+          chmod +x "$peer_dir/$asset"
+          # Dante's multicast (mDNS, the info groups) on dante0, so both devices find each other there.
+          sudo ip link set dante0 multicast on
+          sudo ip route add 224.0.0.0/4 dev dante0
+          home="$RUNNER_TEMP/home-soak"
+          mkdir -p "$home/.camera-box"
+          printf 'name = "obs-ci"\niface = "dante0"\nnetwork_rate = 96000\nrx = ["In 1"]\ntx = ["Out 1", "Out 2"]\ntest_clock_ppm = 6.0\n\n[[subscribe]]\nrx = 1\ntx_channel = "TX 1"\ntx_device = "ci-peer"\n' > "$home/.camera-box/dante-input.toml"
+          "$peer_dir/$asset" peer --iface dante0 --name ci-peer --tone-hz 1000 --rx-from "obs-ci:Out 1,Out 2" \
+            --test-clock-ppm 6 --rate 96000 --ports 4441,8801,4456 --process-id 1 \
+            --status "$RUNNER_TEMP/peer.json" > "$RUNNER_TEMP/peer.log" 2>&1 &
+          peer_pid=$!
+          rc=0
+          export DANTE_INPUT_TEST_CLOCK=1   # test_clock_ppm is refused without it (obs#57)
+          HOME="$home" DANTE_PEER_STATUS="$RUNNER_TEMP/peer.json" DANTE_SOAK_SECONDS=600 DANTE_SOAK_SKEW_PPM=6 \
+            DANTE_LIBOBS_DATA="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs/" \
+            xvfb-run -a "$test_bin" "$so" soak || rc=$?
+          # The negative control: the same gate on a 60 s window with OBS's tone stopped 1 s must
+          # fail on the peer's tone_gaps, so the gate is shown able to fail on a real dropout.
+          ctl_rc=0
+          HOME="$home" DANTE_PEER_STATUS="$RUNNER_TEMP/peer.json" DANTE_SOAK_SECONDS=60 DANTE_SOAK_SKEW_PPM=6 \
+            DANTE_SOAK_FAULT=tone_gap DANTE_LIBOBS_DATA="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs/" \
+            xvfb-run -a "$test_bin" "$so" soak > "$RUNNER_TEMP/soak-control.log" 2>&1 || ctl_rc=$?
+          grep -E "^(OK|FAIL): soak|soak:" "$RUNNER_TEMP/soak-control.log" || true
+          # a real rise: "(N then M)" with M > N, never a missing value
+          rise="$(sed -n "s/.*FAIL: soak: the peer's tone_gaps did not rise (\([0-9][0-9]*\) then \([0-9][0-9]*\)).*/\1 \2/p" "$RUNNER_TEMP/soak-control.log" | head -1)"
+          if [ "$ctl_rc" = 0 ] || [ -z "$rise" ] || ! awk -v r="$rise" 'BEGIN { split(r, a, " "); exit !(a[2] > a[1]) }'; then
+            echo "ERROR: the negative control (a 1 s tone stop) did not fail on the peer's tone_gaps (exit $ctl_rc)"
+            rc=1
+          fi
+          # Stop the peer (it may have died already): SIGINT, at most 15 s for its goodbyes, then KILL.
+          kill -INT "$peer_pid" 2>/dev/null || true
+          for _ in $(seq 1 30); do kill -0 "$peer_pid" 2>/dev/null || break; sleep 0.5; done
+          if kill -0 "$peer_pid" 2>/dev/null; then echo "ERROR: the peer ignored SIGINT"; kill -KILL "$peer_pid" || true; rc=1; fi
+          peer_rc=0
+          wait "$peer_pid" || peer_rc=$?
+          echo "== the peer's log (tail)"
+          tail -40 "$RUNNER_TEMP/peer.log"
+          echo "== the peer's last status"
+          cat "$RUNNER_TEMP/peer.json" || true
+          if [ "$peer_rc" != 0 ]; then echo "ERROR: the peer exited $peer_rc"; exit 1; fi
+          exit "$rc"
+
       # camera-box#1387 (obs#1): texture encoding across recordings through real libobs and
       # libobs-opengl: one encode thread for both, a stop that takes no graphics, no stale frame in
       # the second recording, a waiting graphics task that never hangs without a graphics thread.

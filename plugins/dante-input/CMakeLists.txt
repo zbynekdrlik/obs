@@ -28,5 +28,5 @@ target_link_options(dante-input PRIVATE -Wl,-z,defs -Wl,--exclude-libs,ALL -Wl,-
 
 # obs#1: the module test (test/module_test.c), run by CI against the built module.
 add_executable(dante-input-module-test test/module_test.c)
-target_link_libraries(dante-input-module-test PRIVATE OBS::libobs)
+target_link_libraries(dante-input-module-test PRIVATE OBS::libobs m)
 target_compile_options(dante-input-module-test PRIVATE -Wall -Wextra -Werror)

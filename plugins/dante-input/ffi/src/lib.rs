@@ -737,6 +737,15 @@ impl DanteInput {
             Arc::clone(&feed),
             Arc::clone(&gate),
         );
+        if let Some(ppm) = cfg.test_clock_ppm {
+            log(
+                LOG_WARNING,
+                &format!(
+                    "dante-input start: TEST CLOCK: the device runs on the system clock skewed {ppm} ppm, not PTP (test_clock_ppm, {}=1; the CI soak only, obs#57)",
+                    config::TEST_CLOCK_ENV,
+                ),
+            );
+        }
         let feeder = match cfg.rx_stamps {
             config::RxStamps::PlayAt => feeder,
             config::RxStamps::Count => feeder.counting(),
@@ -944,6 +953,8 @@ fn status_of(link: &Mutex<Option<Link>>, feed: &Feed, tx: Option<&TxIn>) -> Opti
     let mut st = Status::read(l.media(), feed.delivered.load(Ordering::Relaxed));
     st.obs_dropped = feed.dropped.load(Ordering::Relaxed);
     st.max_obs_us = feed.max_obs_ns.load(Ordering::Relaxed) / 1_000;
+    st.stamp_jumps = feed.stamp_jumps.load(Ordering::Relaxed);
+    st.gaps_unfilled = feed.gaps_unfilled.load(Ordering::Relaxed);
     if let Some(t) = tx {
         st.tx(t.counts());
     }

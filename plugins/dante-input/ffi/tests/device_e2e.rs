@@ -84,12 +84,26 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
     // obs#45 (dstack #278): reorders apart from loss; obs#47 (dstack v0.6.126): the start
     // burst apart from the holes; obs#56 (dlink v0.6.136): the TX resyncs, the last token. All
     // counts.
-    let (rest, resyncs) = line
+    // obs#57 (dlink v0.6.137): the gate's counters, appended last, each a count.
+    let mut rest = line.as_str();
+    for key in [
+        "gaps_unfilled",
+        "stamp_jumps",
+        "play_at_max_dev_us",
+        "play_at_steps",
+    ] {
+        let (head, v) = rest
+            .rsplit_once(&format!(" {key}="))
+            .unwrap_or_else(|| panic!("{key} missing at the end: {line}"));
+        assert!(v.parse::<u64>().is_ok(), "{key} is a count: {line}");
+        rest = head;
+    }
+    let (rest, resyncs) = rest
         .rsplit_once(" tx_resyncs=")
         .unwrap_or_else(|| panic!("tx_resyncs missing: {line}"));
     assert!(
         resyncs.parse::<u64>().is_ok(),
-        "tx_resyncs is the last token, a count: {line}"
+        "tx_resyncs comes before the gate's counters, a count: {line}"
     );
     let (head, start_holes) = rest
         .rsplit_once(" start_holes=")

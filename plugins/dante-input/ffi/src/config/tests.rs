@@ -458,3 +458,34 @@ fn rx_stamps_is_play_at_unless_set_to_count() {
     let e = InputConfig::load(&p).unwrap_err();
     assert!(e.contains("unknown variant `arrival`"), "{e}");
 }
+
+/// obs#57 (dstack#305): `test_clock_ppm` (TEST ONLY) puts the device on the system clock with that
+/// skew; unset it is not set; outside ±50 ppm it is refused; and (review) without the CI's
+/// environment switch it is refused at all, so a production file never leaves PTP.
+#[test]
+fn test_clock_ppm_is_test_only_and_bounded() {
+    let parse = |text: &str| toml::from_str::<InputConfig>(text).unwrap();
+    let cfg = parse(GOOD);
+    assert_eq!(cfg.test_clock_ppm, None);
+    assert!(cfg.check(false).is_ok());
+    let cfg = parse(&format!("test_clock_ppm = 6.0\n{GOOD}"));
+    assert_eq!(cfg.test_clock_ppm, Some(6.0));
+    assert!(cfg.check(true).is_ok());
+    assert_eq!(
+        cfg.dlink(48_000).clock(dlink::Clock::Dsync),
+        dlink::Clock::System
+    );
+    let e = cfg.check(false).unwrap_err().join("; ");
+    assert!(
+        e.contains("test_clock_ppm: TEST ONLY") && e.contains("DANTE_INPUT_TEST_CLOCK=1"),
+        "{e}"
+    );
+    let e = parse(&format!("test_clock_ppm = 60.0\n{GOOD}"))
+        .check(true)
+        .unwrap_err()
+        .join("; ");
+    assert!(
+        e.contains("test_clock_ppm: 60 is not within ±50 ppm"),
+        "{e}"
+    );
+}
