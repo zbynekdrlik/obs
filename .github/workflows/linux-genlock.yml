@@ -752,6 +752,19 @@ jobs:
             --test-clock-ppm 6 --rate 96000 --ports 4441,8801,4456 --process-id 1 \
             --status "$RUNNER_TEMP/peer.json" > "$RUNNER_TEMP/peer.log" 2>&1 &
           peer_pid=$!
+          # obs#56: the evidence for a tone break, kept as the artifact soak-evidence: the peer's
+          # status once a second (UTC time, then peer.json on one line) and a stall witness, a 1 ms
+          # sleep loop that logs each wake over 5 ms late (a runner stall stops every process).
+          ( while kill -0 "$peer_pid" 2>/dev/null; do
+              printf '%s ' "$(date -u +%H:%M:%S.%N)"; tr -d '\n' < "$RUNNER_TEMP/peer.json" 2>/dev/null || true; echo
+              sleep 1
+            done ) > "$RUNNER_TEMP/peer-status.log" &
+          python3 -u -c 'import time, datetime
+          while True:
+              t = time.monotonic(); time.sleep(0.001); late = (time.monotonic() - t - 0.001) * 1000
+              if late > 5: print(datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S.%f"), "stall", round(late, 2), "ms", flush=True)
+          ' > "$RUNNER_TEMP/stall.log" 2>&1 &
+          stall_pid=$!
           rc=0
           export DANTE_INPUT_TEST_CLOCK=1   # test_clock_ppm is refused without it (obs#57)
           HOME="$home" DANTE_PEER_STATUS="$RUNNER_TEMP/peer.json" DANTE_SOAK_SECONDS=600 DANTE_SOAK_SKEW_PPM=6 \
@@ -776,6 +789,9 @@ jobs:
           if kill -0 "$peer_pid" 2>/dev/null; then echo "ERROR: the peer ignored SIGINT"; kill -KILL "$peer_pid" || true; rc=1; fi
           peer_rc=0
           wait "$peer_pid" || peer_rc=$?
+          kill "$stall_pid" 2>/dev/null || true
+          echo "== the stall witness (wakes over 5 ms late)"
+          cat "$RUNNER_TEMP/stall.log" || true
           # obs#56: the peer's tone breaks with their times (dstack-dev v0.6.143+: one WARN each,
           # target dstack::peer::tone), to set beside dante-input's status lines.
           echo "== the peer's tone breaks"
@@ -786,6 +802,18 @@ jobs:
           cat "$RUNNER_TEMP/peer.json" || true
           if [ "$peer_rc" != 0 ]; then echo "ERROR: the peer exited $peer_rc"; exit 1; fi
           exit "$rc"
+      - name: Keep the soak's evidence (obs#56)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-evidence
+          path: |
+            ${{ runner.temp }}/peer.log
+            ${{ runner.temp }}/peer-status.log
+            ${{ runner.temp }}/stall.log
+            ${{ runner.temp }}/soak-control.log
+          if-no-files-found: ignore
+          retention-days: 30
 
       # camera-box#1387 (obs#1): texture encoding across recordings through real libobs and
       # libobs-opengl: one encode thread for both, a stop that takes no graphics, no stale frame in
