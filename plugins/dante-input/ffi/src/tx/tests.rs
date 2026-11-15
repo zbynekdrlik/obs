@@ -314,7 +314,16 @@ fn obs_s_pushes_feed_the_cadence() {
 /// must not underrun or re-centre the player; pushes on time before and after.
 #[test]
 fn a_push_ten_ms_late_does_not_underrun_or_recentre() {
-    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    // The FIFO stamps each write on the simulated time (frames at 48 kHz, in ns): since dlink
+    // v0.6.143 the player steers on those stamps, so a wall clock would see 400 chunks in a
+    // fraction of a second.
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let clock = Arc::clone(&now);
+    let fifo = fifo_for(TX_CHANNELS, RATE).with_clock(Arc::new(move || {
+        clock.load(std::sync::atomic::Ordering::Relaxed)
+    }));
+    let (tx_in, mut tx_out) = tx_on(fifo, 1, RATE, RATE, buffer(RATE)).unwrap();
+    let at = |frames: u64| (frames * 1_000_000_000 / RATE as u64) as i64;
     const LATE: u64 = 480; // 10 ms at 48 kHz
     let push_at = |k: u64| k * 1024 + if k == 200 { LATE } else { 0 };
     let mut next = 0u64; // the next chunk to push
@@ -322,6 +331,7 @@ fn a_push_ten_ms_late_does_not_underrun_or_recentre() {
     let mut settled = None;
     for b in 0..(400 * 1024 / BLOCK as u64) {
         while push_at(next) <= b * BLOCK as u64 {
+            now.store(at(push_at(next)), std::sync::atomic::Ordering::Relaxed);
             let (l, r) = obs_chunk((next * 1024) as usize);
             tx_in.push(&[&l, &r], 1024);
             next += 1;
@@ -329,6 +339,7 @@ fn a_push_ten_ms_late_does_not_underrun_or_recentre() {
         if next == 150 && settled.is_none() {
             settled = Some(tx_in.counts());
         }
+        now.store(at(b * BLOCK as u64), std::sync::atomic::Ordering::Relaxed);
         pump_at(&mut tx_out, 2, start);
         start += BLOCK as u64;
     }
