@@ -307,3 +307,37 @@ fn obs_s_pushes_feed_the_cadence() {
     let (_, open) = tx_in.cadence(true);
     assert!(open < gap, "open {open} µs after a {gap} µs window");
 }
+
+/// obs#56 (dstack#303, dlink v0.6.140): on stream-snv OBS's TX write lands late inside its audio
+/// pass (behind a slow output, ~10 ms) now and then, and every one turned into a ~22 ms dropout
+/// (tx_underruns = tx_recentres, ~0.8/s). The FIFO still holds audio then, so a push 10 ms late
+/// must not underrun or re-centre the player; pushes on time before and after.
+#[test]
+fn a_push_ten_ms_late_does_not_underrun_or_recentre() {
+    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    const LATE: u64 = 480; // 10 ms at 48 kHz
+    let push_at = |k: u64| k * 1024 + if k == 200 { LATE } else { 0 };
+    let mut next = 0u64; // the next chunk to push
+    let mut start = 0u64;
+    let mut settled = None;
+    for b in 0..(400 * 1024 / BLOCK as u64) {
+        while push_at(next) <= b * BLOCK as u64 {
+            let (l, r) = obs_chunk((next * 1024) as usize);
+            tx_in.push(&[&l, &r], 1024);
+            next += 1;
+        }
+        if next == 150 && settled.is_none() {
+            settled = Some(tx_in.counts());
+        }
+        pump_at(&mut tx_out, 2, start);
+        start += BLOCK as u64;
+    }
+    let before = settled.unwrap();
+    let after = tx_in.counts();
+    assert!(!before.priming, "settled before the late push: {before:?}");
+    assert_eq!(
+        (after.underruns, after.recentres),
+        (before.underruns, before.recentres),
+        "a push 10 ms late: {before:?} then {after:?}"
+    );
+}
