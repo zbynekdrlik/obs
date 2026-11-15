@@ -117,17 +117,18 @@ static bool logged_within(const char *s, int ms);
 
 /* ---- obs#57's soak ---- */
 
-/* The peer's own part of its status JSON (before "device"), or NULL; the caller frees it. */
+/* The peer's own object of its status JSON (from `"peer":{` on: the file puts "device" first, and
+ * the device's keys must not be read as the peer's), or NULL; the caller frees it. */
 static char *peer_part(void)
 {
 	const char *path = getenv("DANTE_PEER_STATUS");
 	char *text = path ? os_quick_read_utf8_file(path) : NULL;
 	if (!text)
 		return NULL;
-	char *device = strstr(text, "\"device\"");
-	if (device)
-		*device = '\0';
-	return text;
+	const char *peer = strstr(text, "\"peer\":{");
+	char *part = peer ? bstrdup(peer) : NULL;
+	bfree(text);
+	return part;
 }
 
 /* The number after `"key":` in `json` (spaces allowed), or -1 when absent. */
@@ -142,10 +143,31 @@ static double json_number(const char *json, const char *key)
 	return p ? strtod(p + 1, NULL) : -1.0;
 }
 
+/* The sum of every `"key":` number in `json` (each RX channel's), or -1 when none. */
+static double json_sum(const char *json, const char *key)
+{
+	char quoted[64];
+	snprintf(quoted, sizeof(quoted), "\"%s\"", key);
+	double sum = -1.0;
+	for (const char *p = json ? strstr(json, quoted) : NULL; p; p = strstr(p + 1, quoted)) {
+		const char *colon = strchr(p + strlen(quoted), ':');
+		if (colon)
+			sum = (sum < 0 ? 0.0 : sum) + strtod(colon + 1, NULL);
+	}
+	return sum;
+}
+
+/* Every peer RX channel locked on a tone (one "locked": true and no "locked": false). */
+static bool all_locked(const char *json)
+{
+	return json && (strstr(json, "\"locked\": true") || strstr(json, "\"locked\":true")) &&
+	       !strstr(json, "\"locked\": false") && !strstr(json, "\"locked\":false");
+}
+
 static bool peer_locked(void)
 {
 	char *json = peer_part();
-	bool locked = json && (strstr(json, "\"locked\": true") || strstr(json, "\"locked\":true"));
+	bool locked = all_locked(json);
 	bfree(json);
 	return locked;
 }
@@ -206,6 +228,29 @@ static const char *const soak_counters[] = {
 
 static void soak(double skew_ppm)
 {
+	/* OBS activates its output channels' sources from the video thread's tick: with audio only,
+	 * neither the tone nor the dante source would be mixed (the TX would carry silence). */
+	const char *data = getenv("DANTE_LIBOBS_DATA");
+	expect(data != NULL, "DANTE_LIBOBS_DATA names libobs's data dir (the effects)");
+	if (!data)
+		return;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+	obs_add_data_path(data);
+#pragma GCC diagnostic pop
+	struct obs_video_info ovi = {0};
+	ovi.graphics_module = "libobs-opengl";
+	ovi.fps_num = 30;
+	ovi.fps_den = 1;
+	ovi.base_width = ovi.output_width = 64;
+	ovi.base_height = ovi.output_height = 64;
+	ovi.output_format = VIDEO_FORMAT_NV12;
+	ovi.gpu_conversion = true;
+	ovi.colorspace = VIDEO_CS_709;
+	ovi.range = VIDEO_RANGE_PARTIAL;
+	ovi.scale_type = OBS_SCALE_BICUBIC;
+	expect(obs_reset_video(&ovi) == OBS_VIDEO_SUCCESS, "obs_reset_video 64x64 (activates the sources)");
+
 	struct obs_source_info tone = {0};
 	tone.id = "soak_tone";
 	tone.type = OBS_SOURCE_TYPE_INPUT;
@@ -234,14 +279,14 @@ static void soak(double skew_ppm)
 		if (!locked)
 			os_sleep_ms(500);
 	}
-	expect(locked, "the peer's RX locked on dante-input's TX and dante-input receives the peer");
+	expect(locked, "the peer's RX channels all locked on dante-input's TX tone and dante-input receives the peer");
 	os_sleep_ms(15000); /* the settle: the status line every 10 s from 30 s on, the ASRCs lock */
 
 	unsigned long long before[SOAK_COUNTERS];
 	for (size_t i = 0; i < SOAK_COUNTERS; i++)
 		before[i] = last_value(soak_counters[i]);
 	char *json = peer_part();
-	const double gaps_before = json_number(json, "tone_gaps");
+	const double gaps_before = json_sum(json, "tone_gaps");
 	bfree(json);
 	const char *window_env = getenv("DANTE_SOAK_SECONDS");
 	const int window = window_env ? atoi(window_env) : 600;
@@ -264,9 +309,9 @@ static void soak(double skew_ppm)
 		 fabs(skew_ppm) + 2.0);
 	expect(fabs(tx_ppm) <= fabs(skew_ppm) + 2.0, what);
 	json = peer_part();
-	const double gaps_after = json_number(json, "tone_gaps");
+	const double gaps_after = json_sum(json, "tone_gaps");
 	const double peer_ppm = json_number(json, "play_at_ppm");
-	const bool still_locked = json && (strstr(json, "\"locked\": true") || strstr(json, "\"locked\":true"));
+	const bool still_locked = all_locked(json);
 	bfree(json);
 	snprintf(what, sizeof(what), "soak: the peer's tone_gaps did not rise (%.0f then %.0f)", gaps_before,
 		 gaps_after);

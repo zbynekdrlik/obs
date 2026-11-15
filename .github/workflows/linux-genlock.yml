@@ -748,6 +748,7 @@ jobs:
           peer_pid=$!
           rc=0
           HOME="$home" DANTE_PEER_STATUS="$RUNNER_TEMP/peer.json" DANTE_SOAK_SECONDS=600 DANTE_SOAK_SKEW_PPM=6 \
+            DANTE_LIBOBS_DATA="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs/" \
             xvfb-run -a "$test_bin" "$so" soak || rc=$?
           kill -INT "$peer_pid"
           peer_rc=0
