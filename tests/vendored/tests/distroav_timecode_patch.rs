@@ -11,7 +11,8 @@
 //! ceil/strictly-next boundary dated every frame 0..1 interval into the receiver's
 //! future and armed the issue-147 backward-step hair-trigger, the 2026-08-07
 //! overnight −900 ms hold collapse) in 100 ns units since the Unix epoch — the SAME
-//! per-second grid and boundary math as the camera-box sender (`src/ndi.rs`
+//! per-second grid and boundary math as the Rust authority (vstack rig-core
+//! `genlock_stamp.rs`, obs#62; formerly camera-box `src/ndi.rs`
 //! `floor_boundary_100ns`), so cam→OBS and OBS↔OBS latency share one timebase. That
 //! is what the QR latency instrument depends on.
 //!
@@ -91,7 +92,7 @@ fn output_video_timecode_uses_real_wall_clock_not_synthesize() {
     );
     assert!(
         !src.contains("genlock_next_boundary_100ns"),
-        "{NDI_OUTPUT}: #1009 — the pre-1009 ceil boundary helper name is back in the          output path; emit stamps may be future-dated again. Keep the floor helper          (mirror: src/ndi.rs floor_boundary_100ns)."
+        "{NDI_OUTPUT}: #1009 — the pre-1009 ceil boundary helper name is back in the output path; emit stamps may be future-dated again. Keep the floor helper (mirror: vstack rig-core genlock_stamp::floor_boundary_100ns, obs#62)."
     );
 
     // And the stock `synthesize` ASSIGNMENT must NOT be back in the output path. This
