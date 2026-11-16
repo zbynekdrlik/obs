@@ -342,6 +342,8 @@ pub struct WakeLog {
     seen: std::collections::VecDeque<LateWake>,
     /// Wakes logged or counted lost since the start.
     accounted: u64,
+    /// The pump the log follows (its stats' address): a new pump's count starts at 0.
+    pump: usize,
 }
 
 impl WakeLog {
@@ -350,8 +352,15 @@ impl WakeLog {
     /// The lines for this status window: `total` is the pump's running count of late wakes,
     /// read BEFORE `recent` (oldest first), so every wake it counts is in `recent` unless the
     /// ring dropped it. At most [`LATE_WAKE_LINES`] wake lines, then one counting the rest, and
-    /// one for wakes lost from the ring.
-    pub fn lines(&mut self, total: u64, recent: &[LateWake]) -> Vec<String> {
+    /// one for wakes lost from the ring. `pump` names the pump read: a new one (a device or engine
+    /// restart, whose count starts at 0) starts the log again.
+    pub fn lines(&mut self, pump: usize, total: u64, recent: &[LateWake]) -> Vec<String> {
+        if pump != self.pump {
+            *self = WakeLog {
+                pump,
+                ..WakeLog::default()
+            };
+        }
         let new: Vec<LateWake> = recent
             .iter()
             .filter(|w| !self.seen.contains(w))
@@ -674,7 +683,7 @@ mod tests {
         let mut log = WakeLog::default();
         let recent = [wake(2_000, 8_552, true), wake(3_000, 2_700, false)];
         assert_eq!(
-            log.lines(2, &recent),
+            log.lines(1, 2, &recent),
             [
                 "dante-input pump: a late wake at 1970-01-01T00:00:02.000Z behind 8552 us \
                  (re-bootstrapped: blocks lost) (obs#71)",
@@ -683,20 +692,20 @@ mod tests {
             ]
         );
         // the next window with nothing new logs nothing
-        assert!(log.lines(2, &recent).is_empty());
+        assert!(log.lines(1, 2, &recent).is_empty());
         // a new wake after a wall-clock step back is still logged, once
         let stepped = [recent[0], recent[1], wake(1_500, 3_000, false)];
-        let lines = log.lines(3, &stepped);
+        let lines = log.lines(1, 3, &stepped);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("00:00:01.500Z"), "{lines:?}");
-        assert!(log.lines(3, &stepped).is_empty());
+        assert!(log.lines(1, 3, &stepped).is_empty());
     }
 
     #[test]
     fn a_wake_log_caps_a_window_and_counts_the_rest() {
         let mut log = WakeLog::default();
         let recent: Vec<LateWake> = (1..=20).map(|i| wake(i * 10, 3_000, false)).collect();
-        let lines = log.lines(20, &recent);
+        let lines = log.lines(1, 20, &recent);
         assert_eq!(lines.len(), LATE_WAKE_LINES + 1);
         assert!(lines[0].contains("00:00:00.010Z"));
         assert!(lines[LATE_WAKE_LINES - 1].contains("00:00:00.160Z"));
@@ -713,9 +722,30 @@ mod tests {
             .map(|i| wake(i, 3_000, false))
             .collect();
         assert_eq!(
-            log.lines(LATE_WAKE_LINES as u64, &recent).len(),
+            log.lines(1, LATE_WAKE_LINES as u64, &recent).len(),
             LATE_WAKE_LINES
         );
+    }
+
+    #[test]
+    fn a_new_pump_s_count_starts_the_log_again() {
+        let mut log = WakeLog::default();
+        let old: Vec<LateWake> = (1..=10).map(|i| wake(i * 10, 3_000, false)).collect();
+        assert_eq!(log.lines(7, 10, &old).len(), 10);
+        // a new pump: its count starts at 0 and passed the old one before this read; 40 wakes,
+        // its ring kept the last 32
+        let recent: Vec<LateWake> = (9..=40)
+            .map(|i| wake(1_000 + i * 10, 3_000, false))
+            .collect();
+        let lines = log.lines(8, 40, &recent);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("dante-input pump: 8 late wake(s) left")),
+            "{lines:?}"
+        );
+        // the same pump read again: nothing new
+        assert!(log.lines(8, 40, &recent).is_empty());
     }
 
     #[test]
@@ -723,7 +753,7 @@ mod tests {
         let mut log = WakeLog::default();
         // 40 late wakes since the start, the ring kept the last 32 (9..=40)
         let recent: Vec<LateWake> = (9..=40).map(|i| wake(i * 10, 3_000, false)).collect();
-        let lines = log.lines(40, &recent);
+        let lines = log.lines(1, 40, &recent);
         assert_eq!(
             lines.last().map(String::as_str),
             Some(
@@ -732,11 +762,11 @@ mod tests {
             )
         );
         // nothing new: no line, the loss is not counted again
-        assert!(log.lines(40, &recent).is_empty());
+        assert!(log.lines(1, 40, &recent).is_empty());
         // a total read before a wake reached the ring is not a loss once it shows
         let mut more = recent.clone();
         more.push(wake(410, 3_000, false));
-        assert_eq!(log.lines(41, &more).len(), 1);
+        assert_eq!(log.lines(1, 41, &more).len(), 1);
     }
 
     #[test]
