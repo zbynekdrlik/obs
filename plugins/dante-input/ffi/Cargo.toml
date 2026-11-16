@@ -44,7 +44,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.137: Config::test_clock_ppm (TEST ONLY: the system clock with a skew) and the dstack-dev peer for the obs#57 soak gate (dstack#305); status engine.play_at_steps / play_at_max_dev_us (PumpView); the player resyncs on a None-to-Some block start (dstack#303). Passed dstack's soak gate. No latency change.
 # v0.6.143: dstack#303, part two: the bridge Player stamps each FIFO push and steers on the producer line, so a 128-frame level read no longer aliases with OBS's 1024-frame grid (v0.6.140 removed the floor re-centre but its loop froze, then braked at 20 ppm, obs#56). The dstack-dev peer logs each tone break. No producer API change, no latency change.
 # v0.6.144: v0.6.143's producer line unchanged; a pump-fed player knows its real producer chunk, dante-input's TX keeps OBS's 1024 frames (dstack #317); a fresher app status. Player::new takes the producer's chunk (OBS's 1024 frames); no latency change.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.144" }
+# v0.6.148: dstack#326: in the normal profile the engine pump drains the RX sockets and writes the RX rings itself, so a late RX helper thread on a loaded PC no longer leaves written_late holes (strih-snv, camera-box#1534); the wake/write delay figures now read up to a block higher. v0.6.145-147: additive APIs, bridge convert_errors count, the peer tone-break kind, a Windows test-clock fix (dstack#328). No latency change, nothing to port.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.148" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
