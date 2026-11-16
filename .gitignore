@@ -7,3 +7,4 @@ TARGETS.md
 
 # Claude Code subagent worktrees (temporary lanes)
 .claude/worktrees/
+__pycache__/
