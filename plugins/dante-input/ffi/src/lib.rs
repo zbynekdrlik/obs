@@ -968,6 +968,34 @@ fn status_of(
     Some(st)
 }
 
+/// The engine pump's recent late wakes (oldest first) and its last whole minute's latest wake,
+/// µs (obs#71); none before a device and its pump run.
+fn pump_wakes(link: &Mutex<Option<Link>>) -> (Vec<status::LateWake>, Option<u64>) {
+    let Ok(guard) = link.lock() else {
+        return (Vec::new(), None);
+    };
+    let Some(l) = guard.as_ref() else {
+        return (Vec::new(), None);
+    };
+    let media = l.media();
+    let recent = media
+        .engine_stats()
+        .map(|s| {
+            s.wakes()
+                .recent()
+                .into_iter()
+                .map(|w| status::LateWake {
+                    unix_ms: w.unix_ms,
+                    behind_us: w.behind_us,
+                    rebootstrap: w.rebootstrap,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let minute = media.engine().and_then(|p| p.wake_behind_minute_max_us);
+    (recent, minute)
+}
+
 fn status_loop(
     link: &Mutex<Option<Link>>,
     stopped: &mpsc::Receiver<()>,
@@ -976,6 +1004,8 @@ fn status_loop(
 ) {
     let mut ended_logged = false;
     let mut lines = 0u32;
+    let mut wakes_after_ms = 0u64;
+    let mut minute_logged = Instant::now();
     loop {
         match stopped.recv_timeout(status_wait(lines)) {
             Err(RecvTimeoutError::Timeout) => {}
@@ -986,6 +1016,20 @@ fn status_loop(
         };
         log(LOG_INFO, &st.line());
         lines = lines.saturating_add(1);
+        // obs#71: each pump wake one block or more late, with its UTC time, so a soak's tone
+        // break (and a box's dropout) can be set beside the pump's own lateness.
+        let (recent, minute) = pump_wakes(link);
+        let (wake_lines, mark) = status::late_wake_lines(&recent, wakes_after_ms);
+        wakes_after_ms = mark;
+        for l in &wake_lines {
+            log(LOG_WARNING, l);
+        }
+        if minute_logged.elapsed() >= Duration::from_secs(60)
+            && let Some(us) = minute
+        {
+            log(LOG_INFO, &status::minute_wake_line(us));
+            minute_logged = Instant::now();
+        }
         let ended = link
             .lock()
             .ok()

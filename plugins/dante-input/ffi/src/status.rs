@@ -320,6 +320,77 @@ pub struct Pump {
     pub play_at_max_dev_us: u64,
 }
 
+/// One pump wake one block or more behind its due time (dstack's `stream::wake::LateWake`, which
+/// dlink does not name; obs#71): its wall time, how far behind, whether the pump re-bootstrapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LateWake {
+    pub unix_ms: u64,
+    pub behind_us: u64,
+    pub rebootstrap: bool,
+}
+
+/// The most late-wake lines one status window logs; the rest are summed in one line.
+pub const LATE_WAKE_LINES: usize = 16;
+
+/// The late-wake lines for the pump's recent wakes (oldest first) newer than `after_ms`, the
+/// last one logged, and the new watermark. Two late wakes are at least a block (2.7 ms) apart,
+/// so a wake's ms identifies it. At most [`LATE_WAKE_LINES`] lines, then one line counting the
+/// rest.
+pub fn late_wake_lines(recent: &[LateWake], after_ms: u64) -> (Vec<String>, u64) {
+    let new: Vec<&LateWake> = recent.iter().filter(|w| w.unix_ms > after_ms).collect();
+    let watermark = new.iter().map(|w| w.unix_ms).max().unwrap_or(after_ms);
+    let mut lines: Vec<String> = new
+        .iter()
+        .take(LATE_WAKE_LINES)
+        .map(|w| {
+            format!(
+                "dante-input pump: a late wake at {} behind {} us ({}) (obs#71)",
+                utc_ms(w.unix_ms),
+                w.behind_us,
+                if w.rebootstrap {
+                    "re-bootstrapped: blocks lost"
+                } else {
+                    "within the margin"
+                }
+            )
+        })
+        .collect();
+    if new.len() > LATE_WAKE_LINES {
+        lines.push(format!(
+            "dante-input pump: {} more late wake(s) in this window not listed (obs#71)",
+            new.len() - LATE_WAKE_LINES
+        ));
+    }
+    (lines, watermark)
+}
+
+/// The pump's latest wake over the last whole minute, logged once a minute (obs#71).
+pub fn minute_wake_line(behind_us: u64) -> String {
+    format!("dante-input pump: the last minute's latest wake {behind_us} us behind (obs#71)")
+}
+
+/// ms since the Unix epoch as UTC `YYYY-MM-DDTHH:MM:SS.mmmZ` (the civil-from-days algorithm).
+pub fn utc_ms(unix_ms: u64) -> String {
+    let secs = unix_ms / 1_000;
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3_600,
+        rem / 60 % 60,
+        rem % 60,
+        unix_ms % 1_000
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,6 +614,79 @@ mod tests {
             ),
             "{}",
             st.line()
+        );
+    }
+
+    fn wake(unix_ms: u64, behind_us: u64, rebootstrap: bool) -> LateWake {
+        LateWake {
+            unix_ms,
+            behind_us,
+            rebootstrap,
+        }
+    }
+
+    #[test]
+    fn utc_ms_formats_the_epoch_a_leap_day_and_a_soak_time() {
+        assert_eq!(utc_ms(0), "1970-01-01T00:00:00.000Z");
+        // 2024-02-29 12:34:56.789 UTC
+        assert_eq!(utc_ms(1_709_210_096_789), "2024-02-29T12:34:56.789Z");
+        // run 43953607643's first late wake: 2026-11-16 21:10:05.648 UTC
+        assert_eq!(utc_ms(1_794_863_405_648), "2026-11-16T21:10:05.648Z");
+        assert_eq!(utc_ms(1_798_761_599_999), "2026-12-31T23:59:59.999Z");
+    }
+
+    #[test]
+    fn late_wake_lines_log_each_wake_after_the_watermark_once() {
+        let recent = [
+            wake(1_000, 3_000, false),
+            wake(2_000, 8_552, true),
+            wake(3_000, 2_700, false),
+        ];
+        let (lines, mark) = late_wake_lines(&recent, 1_000);
+        assert_eq!(mark, 3_000);
+        assert_eq!(
+            lines,
+            [
+                "dante-input pump: a late wake at 1970-01-01T00:00:02.000Z behind 8552 us \
+                 (re-bootstrapped: blocks lost) (obs#71)",
+                "dante-input pump: a late wake at 1970-01-01T00:00:03.000Z behind 2700 us \
+                 (within the margin) (obs#71)",
+            ]
+        );
+        // the next window with nothing new logs nothing and keeps the watermark
+        let (again, mark2) = late_wake_lines(&recent, mark);
+        assert!(again.is_empty());
+        assert_eq!(mark2, 3_000);
+    }
+
+    #[test]
+    fn late_wake_lines_cap_a_window_and_count_the_rest() {
+        let recent: Vec<LateWake> = (1..=20).map(|i| wake(i * 10, 3_000, false)).collect();
+        let (lines, mark) = late_wake_lines(&recent, 0);
+        assert_eq!(mark, 200);
+        assert_eq!(lines.len(), LATE_WAKE_LINES + 1);
+        assert!(lines[0].contains("00:00:00.010Z"));
+        assert!(lines[LATE_WAKE_LINES - 1].contains("00:00:00.160Z"));
+        assert_eq!(
+            lines[LATE_WAKE_LINES],
+            "dante-input pump: 4 more late wake(s) in this window not listed (obs#71)"
+        );
+    }
+
+    #[test]
+    fn exactly_the_cap_has_no_summary_line() {
+        let recent: Vec<LateWake> = (1..=LATE_WAKE_LINES as u64)
+            .map(|i| wake(i, 3_000, false))
+            .collect();
+        let (lines, _) = late_wake_lines(&recent, 0);
+        assert_eq!(lines.len(), LATE_WAKE_LINES);
+    }
+
+    #[test]
+    fn the_minute_line_names_the_latest_wake() {
+        assert_eq!(
+            minute_wake_line(10_445),
+            "dante-input pump: the last minute's latest wake 10445 us behind (obs#71)"
         );
     }
 }

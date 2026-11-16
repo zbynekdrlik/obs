@@ -348,6 +348,8 @@ jobs:
           echo "version $want"
       - name: Format
         run: cargo fmt --check
+      - name: The soak verdict's tests (obs#71)
+        run: python3 -m unittest discover -s ../ci -v
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: A dummy interface for the device test
@@ -770,9 +772,13 @@ jobs:
           trap 'kill "$stall_pid" "$status_pid" 2>/dev/null || true' EXIT
           rc=0
           export DANTE_INPUT_TEST_CLOCK=1   # test_clock_ppm is refused without it (obs#57)
+          # obs#71: the soak's own log (dante-input's late-wake lines carry UTC times) and its span,
+          # for the verdict below.
+          soak_from="$(date -u +%s%3N)"
           HOME="$home" DANTE_PEER_STATUS="$RUNNER_TEMP/peer.json" DANTE_SOAK_SECONDS=600 DANTE_SOAK_SKEW_PPM=6 \
             DANTE_SOAK_BUFFERING_MS=0 DANTE_LIBOBS_DATA="$GITHUB_WORKSPACE/obs-sdk/share/obs/libobs/" \
-            xvfb-run -a "$test_bin" "$so" soak || rc=$?
+            xvfb-run -a "$test_bin" "$so" soak 2>&1 | tee "$RUNNER_TEMP/soak.log" || rc=$?
+          soak_to="$(date -u +%s%3N)"
           # The negative control: the same gate on a 60 s window with OBS's tone stopped 1 s must
           # fail on the peer's tone_gaps, so the gate is shown able to fail on a real dropout.
           ctl_rc=0
@@ -795,6 +801,11 @@ jobs:
           kill "$stall_pid" 2>/dev/null || true
           echo "== the stall witness (wakes over 5 ms late)"
           cat "$RUNNER_TEMP/stall.log" || true
+          # obs#71 (dstack#354): each of the soak's tone breaks set beside dante-input's own pump
+          # late wakes: RUNNER (the runner held the pump; a rerun is the answer) or OURS. The run
+          # still fails on either; this only names the side.
+          python3 -I ci/soak_verdict.py --peer-log "$RUNNER_TEMP/peer.log" --obs-log "$RUNNER_TEMP/soak.log" \
+            --from-ms "$soak_from" --to-ms "$soak_to" || { echo "ERROR: the soak verdict failed"; rc=1; }
           # obs#56: the peer's tone breaks with their times (dstack-dev v0.6.143+: one WARN each,
           # target dstack::peer::tone), to set beside dante-input's status lines.
           echo "== the peer's tone breaks"
@@ -815,6 +826,7 @@ jobs:
             ${{ runner.temp }}/peer-status.log
             ${{ runner.temp }}/stall.log
             ${{ runner.temp }}/soak-control.log
+            ${{ runner.temp }}/soak.log
           if-no-files-found: ignore
           retention-days: 30
 
