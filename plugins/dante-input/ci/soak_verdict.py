@@ -15,9 +15,10 @@ import datetime
 import re
 import sys
 
-# The peer reports a break once the tone is back: at least a Dante latency (10 ms in the soak)
-# plus its own block after the pump woke. The offset is printed, so the window can be tightened
-# once real pairs are read.
+# The peer reports a break once the tone is back, so the break STARTED its length before the report
+# (a 1 s gap reports 1 s after its start). The start is matched: it comes after the pump's late
+# wake by at least a Dante latency (10 ms in the soak) plus the peer's own block. The offset is
+# printed, so the window can be tightened once real pairs are read.
 MATCH_BEFORE_MS = 50
 MATCH_AFTER_MS = 250
 
@@ -71,22 +72,25 @@ def minutes(obs_lines):
 
 
 def verdict(brks, wks):
-    """One line per break: RUNNER with the matching wake (the nearest), else OURS."""
+    """One line per break: RUNNER with the matching wake (the nearest to the break's start, the
+    report time less its length), else OURS."""
     out = []
     for at, ms in brks:
-        near = [w for w in wks if -MATCH_BEFORE_MS <= at - w[0] <= MATCH_AFTER_MS]
+        start = at - round(ms)
+        near = [w for w in wks if -MATCH_BEFORE_MS <= start - w[0] <= MATCH_AFTER_MS]
         when = datetime.datetime.fromtimestamp(at / 1000, datetime.timezone.utc)
         t = when.strftime("%H:%M:%S.") + f"{at % 1000:03d}"
         if near:
-            w = min(near, key=lambda w: abs(at - w[0]))
+            w = min(near, key=lambda w: abs(start - w[0]))
             out.append(
                 f"RUNNER: engine pump descheduled {w[1] / 1000:.1f} ms at {t} "
-                f"(a {ms:.2f} ms tone break {at - w[0]:+d} ms after the pump's late wake, {w[2]})"
+                f"(a {ms:.2f} ms tone break starting {start - w[0]:+d} ms after the pump's "
+                f"late wake, {w[2]})"
             )
         else:
             out.append(
-                f"OURS: a {ms:.2f} ms tone break at {t} with no pump late wake within "
-                f"-{MATCH_BEFORE_MS}..+{MATCH_AFTER_MS} ms"
+                f"OURS: a {ms:.2f} ms tone break reported at {t} with no pump late wake "
+                f"-{MATCH_BEFORE_MS}..+{MATCH_AFTER_MS} ms before its start"
             )
     return out
 

@@ -47,21 +47,32 @@ class SoakVerdict(unittest.TestCase):
         self.assertEqual(
             v[0],
             "RUNNER: engine pump descheduled 8.6 ms at 21:10:05.648 (a 20.42 ms tone break "
-            "+48 ms after the pump's late wake, re-bootstrapped: blocks lost)",
+            "starting +28 ms after the pump's late wake, re-bootstrapped: blocks lost)",
         )
         self.assertEqual(
             v[1],
-            "OURS: a 7.75 ms tone break at 21:11:00.000 with no pump late wake within -50..+250 ms",
+            "OURS: a 7.75 ms tone break reported at 21:11:00.000 with no pump late wake "
+            "-50..+250 ms before its start",
         )
 
     def test_the_match_window_edges(self):
         w = [(10_000, 3_000, "within the margin")]
-        inside = sv.verdict([(10_000 + sv.MATCH_AFTER_MS, 5.0), (10_000 - sv.MATCH_BEFORE_MS, 5.0)], w)
+        # the window is on the break's start: its report time less its 5 ms
+        inside = sv.verdict(
+            [(10_005 + sv.MATCH_AFTER_MS, 5.0), (10_005 - sv.MATCH_BEFORE_MS, 5.0)], w
+        )
         self.assertTrue(all(line.startswith("RUNNER:") for line in inside), inside)
         outside = sv.verdict(
-            [(10_000 + sv.MATCH_AFTER_MS + 1, 5.0), (10_000 - sv.MATCH_BEFORE_MS - 1, 5.0)], w
+            [(10_005 + sv.MATCH_AFTER_MS + 1, 5.0), (10_005 - sv.MATCH_BEFORE_MS - 1, 5.0)], w
         )
         self.assertTrue(all(line.startswith("OURS:") for line in outside), outside)
+
+    def test_a_long_break_is_matched_by_its_start_not_its_report(self):
+        # a 1004 ms break reported 1004 ms after it began, 20 ms after a late wake
+        w = [(10_000, 9_000, "re-bootstrapped: blocks lost")]
+        (line,) = sv.verdict([(10_000 + 20 + 1004, 1004.4583)], w)
+        self.assertTrue(line.startswith("RUNNER:"), line)
+        self.assertIn("starting +20 ms", line)
 
     def test_the_nearest_wake_is_named(self):
         w = [(10_000, 9_000, "a"), (10_100, 3_000, "b")]

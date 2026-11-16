@@ -968,20 +968,23 @@ fn status_of(
     Some(st)
 }
 
-/// The engine pump's recent late wakes (oldest first) and its last whole minute's latest wake,
-/// µs (obs#71); none before a device and its pump run.
-fn pump_wakes(link: &Mutex<Option<Link>>) -> (Vec<status::LateWake>, Option<u64>) {
+/// The engine pump's running count of late wakes, its recent ones (oldest first; the count is read
+/// first, so each counted wake is in them unless the ring dropped it) and its last whole minute's
+/// latest wake, µs (obs#71); none before a device and its pump run.
+fn pump_wakes(link: &Mutex<Option<Link>>) -> (u64, Vec<status::LateWake>, Option<u64>) {
     let Ok(guard) = link.lock() else {
-        return (Vec::new(), None);
+        return (0, Vec::new(), None);
     };
     let Some(l) = guard.as_ref() else {
-        return (Vec::new(), None);
+        return (0, Vec::new(), None);
     };
     let media = l.media();
-    let recent = media
+    let (total, recent) = media
         .engine_stats()
         .map(|s| {
-            s.wakes()
+            let wakes = s.wakes();
+            let total = wakes.late_wakes();
+            let recent = wakes
                 .recent()
                 .into_iter()
                 .map(|w| status::LateWake {
@@ -989,11 +992,12 @@ fn pump_wakes(link: &Mutex<Option<Link>>) -> (Vec<status::LateWake>, Option<u64>
                     behind_us: w.behind_us,
                     rebootstrap: w.rebootstrap,
                 })
-                .collect()
+                .collect();
+            (total, recent)
         })
         .unwrap_or_default();
     let minute = media.engine().and_then(|p| p.wake_behind_minute_max_us);
-    (recent, minute)
+    (total, recent, minute)
 }
 
 fn status_loop(
@@ -1004,7 +1008,7 @@ fn status_loop(
 ) {
     let mut ended_logged = false;
     let mut lines = 0u32;
-    let mut wakes_after_ms = 0u64;
+    let mut wake_log = status::WakeLog::default();
     let mut minute_logged = Instant::now();
     loop {
         match stopped.recv_timeout(status_wait(lines)) {
@@ -1018,10 +1022,8 @@ fn status_loop(
         lines = lines.saturating_add(1);
         // obs#71: each pump wake one block or more late, with its UTC time, so a soak's tone
         // break (and a box's dropout) can be set beside the pump's own lateness.
-        let (recent, minute) = pump_wakes(link);
-        let (wake_lines, mark) = status::late_wake_lines(&recent, wakes_after_ms);
-        wakes_after_ms = mark;
-        for l in &wake_lines {
+        let (total, recent, minute) = pump_wakes(link);
+        for l in &wake_log.lines(total, &recent) {
             log(LOG_WARNING, l);
         }
         if minute_logged.elapsed() >= Duration::from_secs(60)

@@ -332,36 +332,70 @@ pub struct LateWake {
 /// The most late-wake lines one status window logs; the rest are summed in one line.
 pub const LATE_WAKE_LINES: usize = 16;
 
-/// The late-wake lines for the pump's recent wakes (oldest first) newer than `after_ms`, the
-/// last one logged, and the new watermark. Two late wakes are at least a block (2.7 ms) apart,
-/// so a wake's ms identifies it. At most [`LATE_WAKE_LINES`] lines, then one line counting the
-/// rest.
-pub fn late_wake_lines(recent: &[LateWake], after_ms: u64) -> (Vec<String>, u64) {
-    let new: Vec<&LateWake> = recent.iter().filter(|w| w.unix_ms > after_ms).collect();
-    let watermark = new.iter().map(|w| w.unix_ms).max().unwrap_or(after_ms);
-    let mut lines: Vec<String> = new
-        .iter()
-        .take(LATE_WAKE_LINES)
-        .map(|w| {
-            format!(
-                "dante-input pump: a late wake at {} behind {} us ({}) (obs#71)",
-                utc_ms(w.unix_ms),
-                w.behind_us,
-                if w.rebootstrap {
-                    "re-bootstrapped: blocks lost"
-                } else {
-                    "within the margin"
-                }
-            )
-        })
-        .collect();
-    if new.len() > LATE_WAKE_LINES {
-        lines.push(format!(
-            "dante-input pump: {} more late wake(s) in this window not listed (obs#71)",
-            new.len() - LATE_WAKE_LINES
-        ));
+/// Logs each pump late wake once (obs#71). A wake is known by its time, lateness and outcome, not
+/// by a time watermark, so a wall-clock step (the times are UTC) neither hides nor repeats one. The
+/// pump keeps only its last 32; wakes its ring no longer held when read are counted from its
+/// running total.
+#[derive(Debug, Default)]
+pub struct WakeLog {
+    /// The wakes logged, the newest last; as many as the pump keeps, twice over.
+    seen: std::collections::VecDeque<LateWake>,
+    /// Wakes logged or counted lost since the start.
+    accounted: u64,
+}
+
+impl WakeLog {
+    const KEEP: usize = 64;
+
+    /// The lines for this status window: `total` is the pump's running count of late wakes,
+    /// read BEFORE `recent` (oldest first), so every wake it counts is in `recent` unless the
+    /// ring dropped it. At most [`LATE_WAKE_LINES`] wake lines, then one counting the rest, and
+    /// one for wakes lost from the ring.
+    pub fn lines(&mut self, total: u64, recent: &[LateWake]) -> Vec<String> {
+        let new: Vec<LateWake> = recent
+            .iter()
+            .filter(|w| !self.seen.contains(w))
+            .copied()
+            .collect();
+        for w in &new {
+            self.seen.push_back(*w);
+            if self.seen.len() > Self::KEEP {
+                self.seen.pop_front();
+            }
+        }
+        self.accounted += new.len() as u64;
+        let lost = total.saturating_sub(self.accounted);
+        self.accounted += lost;
+        let mut lines: Vec<String> = new
+            .iter()
+            .take(LATE_WAKE_LINES)
+            .map(|w| {
+                format!(
+                    "dante-input pump: a late wake at {} behind {} us ({}) (obs#71)",
+                    utc_ms(w.unix_ms),
+                    w.behind_us,
+                    if w.rebootstrap {
+                        "re-bootstrapped: blocks lost"
+                    } else {
+                        "within the margin"
+                    }
+                )
+            })
+            .collect();
+        if new.len() > LATE_WAKE_LINES {
+            lines.push(format!(
+                "dante-input pump: {} more late wake(s) in this window not listed (obs#71)",
+                new.len() - LATE_WAKE_LINES
+            ));
+        }
+        if lost > 0 {
+            lines.push(format!(
+                "dante-input pump: {lost} late wake(s) left the pump's last 32 before they were \
+                 read; their times are lost (obs#71)"
+            ));
+        }
+        lines
     }
-    (lines, watermark)
 }
 
 /// The pump's latest wake over the last whole minute, logged once a minute (obs#71).
@@ -636,16 +670,11 @@ mod tests {
     }
 
     #[test]
-    fn late_wake_lines_log_each_wake_after_the_watermark_once() {
-        let recent = [
-            wake(1_000, 3_000, false),
-            wake(2_000, 8_552, true),
-            wake(3_000, 2_700, false),
-        ];
-        let (lines, mark) = late_wake_lines(&recent, 1_000);
-        assert_eq!(mark, 3_000);
+    fn a_wake_log_logs_each_wake_once() {
+        let mut log = WakeLog::default();
+        let recent = [wake(2_000, 8_552, true), wake(3_000, 2_700, false)];
         assert_eq!(
-            lines,
+            log.lines(2, &recent),
             [
                 "dante-input pump: a late wake at 1970-01-01T00:00:02.000Z behind 8552 us \
                  (re-bootstrapped: blocks lost) (obs#71)",
@@ -653,17 +682,21 @@ mod tests {
                  (within the margin) (obs#71)",
             ]
         );
-        // the next window with nothing new logs nothing and keeps the watermark
-        let (again, mark2) = late_wake_lines(&recent, mark);
-        assert!(again.is_empty());
-        assert_eq!(mark2, 3_000);
+        // the next window with nothing new logs nothing
+        assert!(log.lines(2, &recent).is_empty());
+        // a new wake after a wall-clock step back is still logged, once
+        let stepped = [recent[0], recent[1], wake(1_500, 3_000, false)];
+        let lines = log.lines(3, &stepped);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("00:00:01.500Z"), "{lines:?}");
+        assert!(log.lines(3, &stepped).is_empty());
     }
 
     #[test]
-    fn late_wake_lines_cap_a_window_and_count_the_rest() {
+    fn a_wake_log_caps_a_window_and_counts_the_rest() {
+        let mut log = WakeLog::default();
         let recent: Vec<LateWake> = (1..=20).map(|i| wake(i * 10, 3_000, false)).collect();
-        let (lines, mark) = late_wake_lines(&recent, 0);
-        assert_eq!(mark, 200);
+        let lines = log.lines(20, &recent);
         assert_eq!(lines.len(), LATE_WAKE_LINES + 1);
         assert!(lines[0].contains("00:00:00.010Z"));
         assert!(lines[LATE_WAKE_LINES - 1].contains("00:00:00.160Z"));
@@ -675,11 +708,35 @@ mod tests {
 
     #[test]
     fn exactly_the_cap_has_no_summary_line() {
+        let mut log = WakeLog::default();
         let recent: Vec<LateWake> = (1..=LATE_WAKE_LINES as u64)
             .map(|i| wake(i, 3_000, false))
             .collect();
-        let (lines, _) = late_wake_lines(&recent, 0);
-        assert_eq!(lines.len(), LATE_WAKE_LINES);
+        assert_eq!(
+            log.lines(LATE_WAKE_LINES as u64, &recent).len(),
+            LATE_WAKE_LINES
+        );
+    }
+
+    #[test]
+    fn wakes_the_ring_dropped_are_counted_once() {
+        let mut log = WakeLog::default();
+        // 40 late wakes since the start, the ring kept the last 32 (9..=40)
+        let recent: Vec<LateWake> = (9..=40).map(|i| wake(i * 10, 3_000, false)).collect();
+        let lines = log.lines(40, &recent);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(
+                "dante-input pump: 8 late wake(s) left the pump's last 32 before they were \
+                 read; their times are lost (obs#71)"
+            )
+        );
+        // nothing new: no line, the loss is not counted again
+        assert!(log.lines(40, &recent).is_empty());
+        // a total read before a wake reached the ring is not a loss once it shows
+        let mut more = recent.clone();
+        more.push(wake(410, 3_000, false));
+        assert_eq!(log.lines(41, &more).len(), 1);
     }
 
     #[test]
