@@ -42,6 +42,7 @@ OBS_TIME = re.compile(r"^\[\d+\] (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})Z "
 TX_RESTART = "the TX schedule starts again"
 # dstack-dev peer v0.6.161+ (dstack#358): its own pump's skip, re-locked and counted as own_skips
 PEER_OWN_JUMP = "its own reads jumped; the tone check re-locks"
+PEER_OWN_LAG_MS = 1000
 PEER_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)Z ")
 # The peer's pump watch logs once a second for the second before: a skip it reports came up to
 # this long before its warning.
@@ -120,12 +121,13 @@ def stalls(stall_lines, day_ms):
 
 
 def peer_own_jumps(peer_lines, from_ms, to_ms):
-    """The test peer's own skips in the run (dstack#358): (UTC ms, the rest of its line)."""
+    """The test peer's own skips in the run (dstack#358): (UTC ms, the rest of its line). A skip
+    at the run's end may be logged up to the peer's watch period after it."""
     out = []
     for line in peer_lines:
         if PEER_OWN_JUMP in line:
             at = line_ms(line, PEER_TIME)
-            if at is not None and from_ms <= at <= to_ms:
+            if at is not None and from_ms <= at <= to_ms + PEER_OWN_LAG_MS:
                 out.append((at, line.split(PEER_OWN_JUMP, 1)[1].strip()))
     return out
 

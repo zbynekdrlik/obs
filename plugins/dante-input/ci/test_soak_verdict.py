@@ -233,6 +233,10 @@ class SoakVerdict(unittest.TestCase):
         ]
         got = sv.peer_own_jumps(peer, sv.utc_ms("2026-11-17T01:00:00.000"), sv.utc_ms("2026-11-17T01:30:00.000"))
         self.assertEqual(got, [(sv.utc_ms("2026-11-17T01:08:40.225"), "frames=640 own_skips=1")])
+        # a skip logged just after the run's end still counts; one past the lag does not
+        end = sv.utc_ms("2026-11-17T01:08:39.500")
+        self.assertEqual(len(sv.peer_own_jumps(peer, 0, end)), 1)
+        self.assertEqual(len(sv.peer_own_jumps(peer, 0, end - 1000)), 0)
 
     def test_minutes(self):
         self.assertEqual(sv.minutes(OBS), [8604])

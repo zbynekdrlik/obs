@@ -382,6 +382,8 @@ static void soak(double skew_ppm)
 	const unsigned long long late_before = last_value(" tx_late_pushes=");
 	char *json = peer_part();
 	const double gaps_before = json_sum(json, "tone_gaps");
+	/* `own_skips` is the peer object's own key (dstack crates/dstack/src/peer.rs, v0.6.161); its rx
+	 * entries and the device's status carry no such key, so the first one is the peer's. */
 	const double own_before = json_number(json, "own_skips");
 	const double blocks_before = json_number(json, "blocks");
 	bfree(json);
