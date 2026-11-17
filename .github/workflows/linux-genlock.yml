@@ -756,7 +756,8 @@ jobs:
           peer_pid=$!
           # obs#56: the evidence for a tone break, kept as the artifact soak-evidence: the peer's
           # status once a second (UTC time, then peer.json on one line) and a stall witness, a 1 ms
-          # sleep loop that logs each wake over 5 ms late (a runner stall stops every process).
+          # sleep loop that logs each wake over 1 ms late (a runner stall stops every process; dstack#354:
+          # at 5 ms it missed the single-thread gaps of 4.8-5.5 ms).
           ( while kill -0 "$peer_pid" 2>/dev/null; do
               printf '%s ' "$(date -u +%H:%M:%S.%N)"; tr -d '\n' < "$RUNNER_TEMP/peer.json" 2>/dev/null || true; echo
               sleep 1
@@ -765,7 +766,7 @@ jobs:
           python3 -u -c 'import time, datetime
           while True:
               t = time.monotonic(); time.sleep(0.001); late = (time.monotonic() - t - 0.001) * 1000
-              if late > 5: print(datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S.%f"), "stall", round(late, 2), "ms", flush=True)
+              if late > 1: print(datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S.%f"), "stall", round(late, 2), "ms", flush=True)
           ' > "$RUNNER_TEMP/stall.log" 2>&1 &
           stall_pid=$!
           # An abort anywhere below still stops the two helpers.
@@ -799,8 +800,8 @@ jobs:
           peer_rc=0
           wait "$peer_pid" || peer_rc=$?
           kill "$stall_pid" 2>/dev/null || true
-          echo "== the stall witness (wakes over 5 ms late)"
-          cat "$RUNNER_TEMP/stall.log" || true
+          echo "== the stall witness (wakes over 1 ms late): $(wc -l < "$RUNNER_TEMP/stall.log") in all, the first 50 (all in soak-evidence)"
+          head -50 "$RUNNER_TEMP/stall.log" || true
           # obs#71 (dstack#354): each of the soak's tone breaks set beside dante-input's own pump
           # late wakes: RUNNER (the runner held the pump; a rerun is the answer) or OURS. The run
           # still fails on either; this only names the side.

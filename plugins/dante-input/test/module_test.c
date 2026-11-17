@@ -40,17 +40,32 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 /* libobs logs from its own threads too (audio, destroy), so the buffer is locked. */
 static pthread_mutex_t logged_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct dstr logged;
 
+/* The wall time as UTC `YYYY-MM-DDTHH:MM:SS.mmmZ` (obs#71: the soak's verdict sets dlink's
+ * lines, e.g. a TX schedule restart or a pump-watch second, beside the peer's tone breaks). */
+static void utc_now(char *out, size_t len)
+{
+	struct timespec ts;
+	struct tm tm;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	gmtime_r(&ts.tv_sec, &tm);
+	size_t n = strftime(out, len, "%Y-%m-%dT%H:%M:%S", &tm);
+	snprintf(out + n, len - n, ".%03ldZ", ts.tv_nsec / 1000000L);
+}
+
 static void capture(int level, const char *fmt, va_list args, void *param)
 {
 	(void)param;
 	char line[4096];
+	char now[40];
 	vsnprintf(line, sizeof(line), fmt, args);
-	fprintf(stderr, "[%d] %s\n", level, line);
+	utc_now(now, sizeof(now));
+	fprintf(stderr, "[%d] %s %s\n", level, now, line);
 	pthread_mutex_lock(&logged_mutex);
 	dstr_cat(&logged, line);
 	dstr_cat(&logged, "\n");

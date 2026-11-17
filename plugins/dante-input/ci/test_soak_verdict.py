@@ -51,8 +51,8 @@ class SoakVerdict(unittest.TestCase):
         )
         self.assertEqual(
             v[1],
-            "OURS: a 7.75 ms tone break reported at 21:11:00.000 with no pump late wake "
-            "-50..+250 ms before its start",
+            "OURS: a 7.75 ms tone break reported at 21:11:00.000 with no pump late wake, no TX "
+            "schedule restart -50..+250 ms before its start and no peer pump skip after it",
         )
 
     def test_the_match_window_edges(self):
@@ -103,20 +103,19 @@ class SoakVerdict(unittest.TestCase):
         f = sv.pump_seconds([self.LATE.replace("oversleep_max_us=8401", "oversleep_max_us=900")])[0]
         self.assertTrue(sv.split_verdict(f).startswith("OURS: the wake was late"), sv.split_verdict(f))
 
-    def test_an_overrun_off_the_cpu_is_runner_one_at_work_is_ours(self):
+    def test_an_overrun_is_judged_against_the_quiet_host_block(self):
         base = self.LATE.replace("cause=late", "cause=none").replace("rebootstraps=1", "rebootstraps=0")
         base = base.replace("overruns=0", "overruns=1")
-        off = sv.pump_seconds([base.replace("max_process_us=57", "max_process_us=2080")])[0]
-        self.assertTrue(sv.split_verdict(off).startswith("RUNNER: a block off the CPU"), sv.split_verdict(off))
-        work = sv.pump_seconds(
-            [base.replace("max_process_us=57", "max_process_us=2080").replace("max_process_cpu_us=49", "max_process_cpu_us=1900")]
+        # run 43990478131: process 3212, cpu 3214 (this VM counts steal as CPU): still the runner
+        steal = sv.pump_seconds(
+            [base.replace("max_process_us=57", "max_process_us=3212").replace("max_process_cpu_us=49", "max_process_cpu_us=3214")]
         )[0]
-        self.assertTrue(sv.split_verdict(work).startswith("OURS: a block's own work"), sv.split_verdict(work))
-        # the edge: 4 x cpu + 500 is still work, one more us is off the CPU
-        edge = base.replace("max_process_us=57", "max_process_us=696")
-        self.assertTrue(sv.split_verdict(sv.pump_seconds([edge])[0]).startswith("OURS"))
-        past = base.replace("max_process_us=57", "max_process_us=697")
-        self.assertTrue(sv.split_verdict(sv.pump_seconds([past])[0]).startswith("RUNNER"))
+        self.assertTrue(sv.split_verdict(steal).startswith("RUNNER: a 3212 us block"), sv.split_verdict(steal))
+        # the edge: 10 x 56 = 560 us is still ours, one more us is the runner
+        edge = sv.pump_seconds([base.replace("max_process_us=57", "max_process_us=560")])[0]
+        self.assertTrue(sv.split_verdict(edge).startswith("OURS: a block's own work"), sv.split_verdict(edge))
+        past = sv.pump_seconds([base.replace("max_process_us=57", "max_process_us=561")])[0]
+        self.assertTrue(sv.split_verdict(past).startswith("RUNNER"), sv.split_verdict(past))
 
     def test_a_clock_re_bootstrap_is_ours_with_its_cause(self):
         f = sv.pump_seconds([self.LATE.replace("cause=late", "cause=clock_back+retime")])[0]
@@ -133,11 +132,66 @@ class SoakVerdict(unittest.TestCase):
         f = sv.pump_seconds([self.LATE.replace("cause=late", "cause=none")])[0]
         self.assertTrue(sv.split_verdict(f).startswith("UNCLASSIFIED: cause=none"), sv.split_verdict(f))
 
-    def test_an_unmeasured_cpu_is_said(self):
+    def test_an_unmeasured_block_is_said(self):
         f = sv.pump_seconds(
-            [self.LATE.replace("overruns=0", "overruns=1").replace("max_process_cpu_us=49", "max_process_cpu_us=-")]
+            [self.LATE.replace("overruns=0", "overruns=1").replace("max_process_us=57", "max_process_us=-")]
         )[0]
         self.assertIn("UNMEASURED overrun", sv.split_verdict(f))
+
+    def test_a_timed_obs_line_gives_its_time(self):
+        line = "[200] 2026-11-17T01:08:49.612Z " + self.LATE.split("] ", 1)[1]
+        (f,) = sv.pump_seconds([line])
+        self.assertEqual(f["_ms"], sv.utc_ms("2026-11-17T01:08:49.612"))
+        self.assertTrue(sv.split_verdict(f).startswith("01:08:49.612 RUNNER"), sv.split_verdict(f))
+
+    def test_a_break_after_a_tx_schedule_restart_is_runner(self):
+        obs = [
+            "[200] 2026-11-17T01:08:49.603Z dante-input dlink:  WARN dstack::media::tx: "
+            "the TX schedule starts again lag=827 max_lag=803"
+        ]
+        restarts = sv.tx_restarts(obs)
+        self.assertEqual(restarts, [(sv.utc_ms("2026-11-17T01:08:49.603"), "lag=827 max_lag=803")])
+        # a 9.02 ms silence reported at .622: it began at .613, 10 ms after the restart
+        (line,) = sv.verdict([(sv.utc_ms("2026-11-17T01:08:49.622"), 9.0208)], [], restarts)
+        self.assertTrue(line.startswith("RUNNER: our TX thread ran late at 01:08:49.622"), line)
+        self.assertIn("starting +10 ms after the TX schedule started again, lag=827 max_lag=803", line)
+
+    def test_a_break_before_the_peer_s_own_pump_skip_is_peer(self):
+        peer = [
+            '2026-11-17T01:08:40.225376Z  WARN dstack::stream::watch: engine pump lost or overran '
+            'blocks this second device="ci-peer" rebootstraps=1 missed=5 overruns=0 cause=late',
+            '2026-11-17T01:09:00.000000Z  WARN dstack::stream::watch: engine pump lost or overran '
+            'blocks this second device="ci-peer" rebootstraps=0 missed=0 overruns=1 cause=none',
+        ]
+        skips = sv.peer_skips(peer)
+        self.assertEqual(skips, [sv.utc_ms("2026-11-17T01:08:40.225")])
+        (line,) = sv.verdict([(sv.utc_ms("2026-11-17T01:08:39.070"), 0.0208, "misplaced")], [], [], skips)
+        self.assertTrue(line.startswith("PEER: a 0.02 ms tone break at 01:08:39.070, 1155 ms before"), line)
+        # past the watch's 2 s, or after the skip's warning, it is not the peer's
+        (late,) = sv.verdict([(sv.utc_ms("2026-11-17T01:08:38.000"), 0.0208, "misplaced")], [], [], skips)
+        self.assertTrue(late.startswith("OURS:"), late)
+        (after,) = sv.verdict([(sv.utc_ms("2026-11-17T01:08:41.000"), 0.0208, "misplaced")], [], [], skips)
+        self.assertTrue(after.startswith("OURS:"), after)
+        # a silence near a peer skip is not the peer's (its skip reads as misplaced)
+        (silence,) = sv.verdict([(sv.utc_ms("2026-11-17T01:08:39.872"), 10.35, "silence")], [], [], skips)
+        self.assertTrue(silence.startswith("OURS:"), silence)
+
+    def test_breaks_carry_their_kind(self):
+        peer = [
+            "2026-11-17T01:08:39.070645Z  WARN dstack::peer::tone: dstack-dev peer: a tone break "
+            "rx_channel=1 samples=2 ms=0.020833333333333332 gaps=3 kind=misplaced",
+            "2026-11-17T01:08:39.070705Z  WARN dstack::peer::tone: dstack-dev peer: a tone break "
+            "rx_channel=2 samples=2 ms=0.020833333333333332 gaps=3 kind=misplaced",
+        ]
+        self.assertEqual(
+            sv.breaks(peer, 0, 2**62, with_kind=True),
+            [(sv.utc_ms("2026-11-17T01:08:39.070"), 0.020833333333333332, "misplaced")],
+        )
+
+    def test_a_pump_wake_wins_over_a_tx_restart(self):
+        w = [(10_000, 9_000, "re-bootstrapped: blocks lost")]
+        (line,) = sv.verdict([(10_030, 5.0)], w, [(10_010, "lag=900 max_lag=803")])
+        self.assertTrue(line.startswith("RUNNER: engine pump descheduled"), line)
 
     def test_minutes(self):
         self.assertEqual(sv.minutes(OBS), [8604])
