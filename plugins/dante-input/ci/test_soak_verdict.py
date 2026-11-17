@@ -79,6 +79,51 @@ class SoakVerdict(unittest.TestCase):
         (line,) = sv.verdict([(10_090, 5.0)], w)
         self.assertIn("descheduled 3.0 ms", line)
 
+    LATE = (
+        '[200] dante-input dlink:  WARN dstack::stream::watch: engine pump lost or overran blocks '
+        'this second device="obs-ci" rebootstraps=1 missed=7 overruns=0 writes_after_send=0 '
+        'max_process_us=57 media=true block=128 margin=576 playout=803 offset=1507 cause=late '
+        'behind_max_us=8552 oversleep_max_us=8401 drain_max_us=80 drain_max_datagrams=34 '
+        'max_process_cpu_us=49'
+    )
+
+    def test_pump_seconds_parse_the_v0_6_159_warning(self):
+        (f,) = sv.pump_seconds([self.LATE, "[300] dante-input status: underruns=7"])
+        self.assertEqual(f["device"], "obs-ci")
+        self.assertEqual(f["cause"], "late")
+        self.assertEqual(sv.num(f, "oversleep_max_us"), 8401)
+        self.assertEqual(sv.num(f, "drain_max_datagrams"), 34)
+
+    def test_a_late_wake_whose_sleep_overslept_is_runner(self):
+        line = sv.split_verdict(sv.pump_seconds([self.LATE])[0])
+        self.assertTrue(line.startswith("RUNNER: the sleep returned late"), line)
+        self.assertIn("behind=8552 us oversleep=8401 us", line)
+
+    def test_a_late_wake_with_a_short_oversleep_is_ours(self):
+        f = sv.pump_seconds([self.LATE.replace("oversleep_max_us=8401", "oversleep_max_us=900")])[0]
+        self.assertTrue(sv.split_verdict(f).startswith("OURS: the wake was late"), sv.split_verdict(f))
+
+    def test_an_overrun_off_the_cpu_is_runner_one_at_work_is_ours(self):
+        base = self.LATE.replace("cause=late", "cause=none").replace("rebootstraps=1", "rebootstraps=0")
+        base = base.replace("overruns=0", "overruns=1")
+        off = sv.pump_seconds([base.replace("max_process_us=57", "max_process_us=2080")])[0]
+        self.assertTrue(sv.split_verdict(off).startswith("RUNNER: a block off the CPU"), sv.split_verdict(off))
+        work = sv.pump_seconds(
+            [base.replace("max_process_us=57", "max_process_us=2080").replace("max_process_cpu_us=49", "max_process_cpu_us=1900")]
+        )[0]
+        self.assertTrue(sv.split_verdict(work).startswith("OURS: a block's own work"), sv.split_verdict(work))
+        # the edge: 4 x cpu + 500 is still work, one more us is off the CPU
+        edge = base.replace("max_process_us=57", "max_process_us=696")
+        self.assertTrue(sv.split_verdict(sv.pump_seconds([edge])[0]).startswith("OURS"))
+        past = base.replace("max_process_us=57", "max_process_us=697")
+        self.assertTrue(sv.split_verdict(sv.pump_seconds([past])[0]).startswith("RUNNER"))
+
+    def test_an_unmeasured_cpu_is_said(self):
+        f = sv.pump_seconds(
+            [self.LATE.replace("overruns=0", "overruns=1").replace("max_process_cpu_us=49", "max_process_cpu_us=-")]
+        )[0]
+        self.assertIn("UNMEASURED overrun", sv.split_verdict(f))
+
     def test_minutes(self):
         self.assertEqual(sv.minutes(OBS), [8604])
 
@@ -88,7 +133,7 @@ class SoakVerdict(unittest.TestCase):
             with open(peer, "w") as f:
                 f.write("\n".join(PEER) + "\n")
             with open(obs, "w") as f:
-                f.write("\n".join(OBS) + "\n")
+                f.write("\n".join(OBS + [self.LATE]) + "\n")
             r = subprocess.run(
                 [sys.executable, "-I", sv.__file__, "--peer-log", peer, "--obs-log", obs,
                  "--from-ms", str(FROM), "--to-ms", str(TO)],
@@ -98,6 +143,8 @@ class SoakVerdict(unittest.TestCase):
         self.assertIn("RUNNER: engine pump descheduled 8.6 ms", r.stdout)
         self.assertIn("OURS: a 7.75 ms tone break", r.stdout)
         self.assertIn("latest wake per minute, us: 8604", r.stdout)
+        self.assertIn("== the pump's lost seconds (1, dlink's pump watch, dstack#354)", r.stdout)
+        self.assertIn("RUNNER: the sleep returned late", r.stdout)
 
 
 if __name__ == "__main__":

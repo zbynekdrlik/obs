@@ -31,6 +31,58 @@ WAKE = re.compile(
     r"behind (\d+) us \(([^)]*)\)"
 )
 MINUTE = re.compile(r"dante-input pump: the last minute's latest wake (\d+) us behind")
+# dlink's pump watch (dstack v0.6.159+, dstack#354): one warning a second that lost blocks or
+# overran, with where the time went.
+PUMP_WARNING = "engine pump lost or overran blocks this second"
+FIELD = re.compile(r"\b([a-z_]+)=(\"[^\"]*\"|\S+)")
+# A block whose wall time is past this many times its thread CPU (plus a floor) was off the CPU.
+PREEMPT_RATIO = 4
+PREEMPT_FLOOR_US = 500
+
+
+def pump_seconds(obs_lines):
+    """dlink's pump-watch warnings as field dicts (values as text)."""
+    out = []
+    for line in obs_lines:
+        if PUMP_WARNING in line:
+            out.append({k: v.strip('"') for k, v in FIELD.findall(line.split(PUMP_WARNING, 1)[1])})
+    return out
+
+
+def num(fields, key):
+    v = fields.get(key)
+    return int(v) if v is not None and v.isdigit() else None
+
+
+def split_verdict(fields):
+    """One line for a pump-watch second: where its lost time went, RUNNER or OURS."""
+    behind = num(fields, "behind_max_us")
+    over = num(fields, "oversleep_max_us")
+    proc = num(fields, "max_process_us")
+    cpu = num(fields, "max_process_cpu_us")
+    drain, dgrams = num(fields, "drain_max_us"), num(fields, "drain_max_datagrams")
+    cause = fields.get("cause", "?")
+    facts = (
+        f"cause={cause} behind={behind} us oversleep={over} us process={proc} us "
+        f"cpu={fields.get('max_process_cpu_us', '?')} us drain={drain} us ({dgrams} datagrams)"
+    )
+    words = []
+    if "late" in cause.split("+"):
+        if behind is None or over is None:
+            words.append("UNMEASURED late wake")
+        elif over * 2 >= behind:
+            words.append("RUNNER: the sleep returned late (the scheduler ran the pump late)")
+        else:
+            words.append("OURS: the wake was late but the sleep was not (time went to work before it)")
+    blocks = (num(fields, "overruns") or 0) + (num(fields, "writes_after_send") or 0)
+    if blocks:
+        if proc is None or cpu is None:
+            words.append("UNMEASURED overrun (no thread CPU time)")
+        elif proc > PREEMPT_RATIO * cpu + PREEMPT_FLOOR_US:
+            words.append("RUNNER: a block off the CPU (wall far above its thread CPU)")
+        else:
+            words.append("OURS: a block's own work took the time")
+    return "; ".join(words or ["no lost block"]) + f" [{facts}]"
 
 
 def utc_ms(stamp):
@@ -113,6 +165,10 @@ def main(argv):
         when = datetime.datetime.fromtimestamp(at / 1000, datetime.timezone.utc)
         print(f"{when.strftime('%H:%M:%S.')}{at % 1000:03d} late wake {us / 1000:.2f} ms ({note})")
     print("== the pump's latest wake per minute, us: " + (" ".join(map(str, minutes(obs))) or "(none)"))
+    secs = pump_seconds(obs)
+    print(f"== the pump's lost seconds ({len(secs)}, dlink's pump watch, dstack#354)")
+    for fields in secs:
+        print(split_verdict(fields))
     print(f"== the verdict on the soak's tone breaks ({len(brks)})")
     for line in verdict(brks, wks):
         print(line)
