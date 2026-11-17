@@ -19,7 +19,9 @@
  *                                           After the settle, DANTE_SOAK_SECONDS (600 unless set) of
  *                                           real time: no TX underrun, re-centre or resync, no RX
  *                                           hole, loss or gap, no pump underrun, no play-time step,
- *                                           stamp jump or unfilled gap, no peer tone gap; the play
+ *                                           stamp jump or unfilled gap, no peer tone gap and no peer
+ *                                           own skip (dstack#358: the peer's own stall, counted apart
+ *                                           from tone_gaps since dlink v0.6.161); the play
  *                                           time's deviation under 1 ms, tx_ppm and the peer's
  *                                           play_at_ppm within the skew + 2 ppm.
  *                                           DANTE_SOAK_FAULT=tone_gap (the negative control): OBS's
@@ -380,9 +382,11 @@ static void soak(double skew_ppm)
 	const unsigned long long late_before = last_value(" tx_late_pushes=");
 	char *json = peer_part();
 	const double gaps_before = json_sum(json, "tone_gaps");
+	const double own_before = json_number(json, "own_skips");
 	const double blocks_before = json_number(json, "blocks");
 	bfree(json);
 	expect(gaps_before >= 0, "the peer's status carries tone_gaps at the start of the window");
+	expect(own_before >= 0, "the peer's status carries own_skips at the start of the window (dstack#358)");
 	const char *window_env = getenv("DANTE_SOAK_SECONDS");
 	const int window = window_env ? atoi(window_env) : 600;
 	fprintf(stderr, "soak: %d s from here (skew %.1f ppm)\n", window, skew_ppm);
@@ -425,6 +429,7 @@ static void soak(double skew_ppm)
 	expect(fabs(tx_ppm) <= fabs(skew_ppm) + 2.0, what);
 	json = peer_part();
 	const double gaps_after = json_sum(json, "tone_gaps");
+	const double own_after = json_number(json, "own_skips");
 	const double peer_ppm = json_number(json, "play_at_ppm");
 	const double blocks_after = json_number(json, "blocks");
 	const bool still_locked = all_locked(json);
@@ -432,6 +437,11 @@ static void soak(double skew_ppm)
 	snprintf(what, sizeof(what), "soak: the peer's tone_gaps did not rise (%.0f then %.0f)", gaps_before,
 		 gaps_after);
 	expect(gaps_before >= 0 && gaps_after == gaps_before, what);
+	/* dstack docs/ci-peer.md: a rise is the peer's (or the runner's) stall, not the app's; it still
+	 * voids the window (the peer did not hear what it skipped). The soak verdict names it PEER. */
+	snprintf(what, sizeof(what), "soak: the peer's own_skips did not rise (%.0f then %.0f; a peer or runner stall, dstack#358)",
+		 own_before, own_after);
+	expect(own_before >= 0 && own_after == own_before, what);
 	expect(still_locked, "soak: the peer's RX still locked at the end");
 	snprintf(what, sizeof(what), "soak: the peer ran through the window (blocks %.0f then %.0f)", blocks_before,
 		 blocks_after);

@@ -90,8 +90,8 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.159"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.159#6ec61b98cc0ad052dfdd5f53871bb2033887b9d2"
+version = "0.6.161"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.161#b54f136c33693ea8643cc836bb91925134cf687f"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -102,8 +102,8 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.6.159"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.159#6ec61b98cc0ad052dfdd5f53871bb2033887b9d2"
+version = "0.6.161"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.161#b54f136c33693ea8643cc836bb91925134cf687f"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -125,13 +125,13 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.159"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.159#6ec61b98cc0ad052dfdd5f53871bb2033887b9d2"
+version = "0.6.161"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.161#b54f136c33693ea8643cc836bb91925134cf687f"
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.159"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.159#6ec61b98cc0ad052dfdd5f53871bb2033887b9d2"
+version = "0.6.161"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.161#b54f136c33693ea8643cc836bb91925134cf687f"
 dependencies = [
  "rubato",
 ]
@@ -281,7 +281,7 @@ dependencies = [
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.159#6ec61b98cc0ad052dfdd5f53871bb2033887b9d2"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.161#b54f136c33693ea8643cc836bb91925134cf687f"
 dependencies = [
  "fastrand",
  "flume",

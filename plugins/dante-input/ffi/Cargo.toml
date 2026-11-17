@@ -47,7 +47,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.148: dstack#326: in the normal profile the engine pump drains the RX sockets and writes the RX rings itself, so a late RX helper thread on a loaded PC no longer leaves written_late holes (strih-snv, camera-box#1534); the wake/write delay figures now read up to a block higher. v0.6.145-147: additive APIs, bridge convert_errors count, the peer tone-break kind, a Windows test-clock fix (dstack#328). No latency change, nothing to port.
 # v0.6.155: dstack#345: the heartbeat's peaks record (0x8002) carries its padding in its length, so dcontroller and Dante Controller read the latency records of a device whose TX+RX channel count is not a multiple of 4 (strih-obs: 2). v0.6.149-154: ASIO-bridge and dlisten pull APIs (RxPull::new returns Result; obs does not pull), Rated output zeroing, test fixes. No latency change, nothing to port.
 # v0.6.159: dstack#354: the pump watch splits a lost second (oversleep_max_us, drain_max_us, drain_max_datagrams, max_process_cpu_us), which obs#71's soak verdict reads. v0.6.156-158: per-slot mean packet age, writes_after_send (#346), a latency write reaching running flows (#352), arrival-time lateness (#350), Rated's exact timeline across a re-bootstrap (#343), a Windows media spin fix (#351). No latency change, nothing to port.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.159" }
+# v0.6.161: dstack#358: the test peer re-locks its tone check at its own pump's skip and counts it as own_skips, never in tone_gaps (the soak gates own_skips); dstack#359: `the TX schedule starts again` carries oversleep_us, last_pass_us, last_pass_cpu_us. v0.6.160: info-server fixes. No latency change, nothing to port.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.161" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

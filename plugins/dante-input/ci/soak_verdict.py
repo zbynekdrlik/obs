@@ -40,6 +40,8 @@ MINUTE = re.compile(r"dante-input pump: the last minute's latest wake (\d+) us b
 # the module test's log line: `[level] <UTC>Z <text>`
 OBS_TIME = re.compile(r"^\[\d+\] (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})Z ")
 TX_RESTART = "the TX schedule starts again"
+# dstack-dev peer v0.6.161+ (dstack#358): its own pump's skip, re-locked and counted as own_skips
+PEER_OWN_JUMP = "its own reads jumped; the tone check re-locks"
 PEER_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)Z ")
 # The peer's pump watch logs once a second for the second before: a skip it reports came up to
 # this long before its warning.
@@ -114,6 +116,17 @@ def stalls(stall_lines, day_ms):
             h, mi, se = int(m.group(1)), int(m.group(2)), int(m.group(3))
             ms = int((m.group(4) + "000")[:3])
             out.append((day_ms + ((h * 60 + mi) * 60 + se) * 1000 + ms, float(m.group(5))))
+    return out
+
+
+def peer_own_jumps(peer_lines, from_ms, to_ms):
+    """The test peer's own skips in the run (dstack#358): (UTC ms, the rest of its line)."""
+    out = []
+    for line in peer_lines:
+        if PEER_OWN_JUMP in line:
+            at = line_ms(line, PEER_TIME)
+            if at is not None and from_ms <= at <= to_ms:
+                out.append((at, line.split(PEER_OWN_JUMP, 1)[1].strip()))
     return out
 
 
@@ -292,6 +305,10 @@ def main(argv):
     print(f"== the pump's lost seconds ({len(secs)}, dlink's pump watch, dstack#354)")
     for fields in secs:
         print(split_verdict(fields, host))
+    own = peer_own_jumps(peer, a.from_ms, a.to_ms)
+    print(f"== the test peer's own skips ({len(own)}, dstack#358: PEER, its or the runner's stall)")
+    for at, rest in own:
+        print(f"{hhmmss(at)} PEER: the test peer's own reads jumped {rest}")
     print(f"== the verdict on the soak's tone breaks ({len(brks)})")
     for line in verdict(brks, wks, tx_restarts(obs), peer_skips(peer)):
         print(line)

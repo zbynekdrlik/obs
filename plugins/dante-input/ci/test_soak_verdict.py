@@ -224,6 +224,16 @@ class SoakVerdict(unittest.TestCase):
         (line,) = sv.verdict([(10_030, 5.0)], w, [(10_010, "lag=900 max_lag=803")])
         self.assertTrue(line.startswith("RUNNER: engine pump descheduled"), line)
 
+    def test_peer_own_jumps_are_listed_in_the_run(self):
+        peer = [
+            "2026-11-17T01:08:40.225376Z  WARN dstack::peer::tone: dstack-dev peer: its own reads "
+            "jumped; the tone check re-locks frames=640 own_skips=1",
+            "2026-11-17T02:00:00.000000Z  WARN dstack::peer::tone: dstack-dev peer: its own reads "
+            "jumped; the tone check re-locks frames=128 own_skips=2",
+        ]
+        got = sv.peer_own_jumps(peer, sv.utc_ms("2026-11-17T01:00:00.000"), sv.utc_ms("2026-11-17T01:30:00.000"))
+        self.assertEqual(got, [(sv.utc_ms("2026-11-17T01:08:40.225"), "frames=640 own_skips=1")])
+
     def test_minutes(self):
         self.assertEqual(sv.minutes(OBS), [8604])
 
