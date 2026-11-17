@@ -110,12 +110,30 @@ class SoakVerdict(unittest.TestCase):
         steal = sv.pump_seconds(
             [base.replace("max_process_us=57", "max_process_us=3212").replace("max_process_cpu_us=49", "max_process_cpu_us=3214")]
         )[0]
-        self.assertTrue(sv.split_verdict(steal).startswith("RUNNER: a 3212 us block"), sv.split_verdict(steal))
-        # the edge: 10 x 56 = 560 us is still ours, one more us is the runner
+        # no witnessed host stall that second: unproven, never a silent RUNNER
+        self.assertTrue(sv.split_verdict(steal).startswith("UNPROVEN: a 3212 us block"), sv.split_verdict(steal))
+        # the edge: 10 x 56 = 560 us is still ours, one more us is past it
         edge = sv.pump_seconds([base.replace("max_process_us=57", "max_process_us=560")])[0]
         self.assertTrue(sv.split_verdict(edge).startswith("OURS: a block's own work"), sv.split_verdict(edge))
         past = sv.pump_seconds([base.replace("max_process_us=57", "max_process_us=561")])[0]
-        self.assertTrue(sv.split_verdict(past).startswith("RUNNER"), sv.split_verdict(past))
+        self.assertTrue(sv.split_verdict(past).startswith("UNPROVEN"), sv.split_verdict(past))
+
+    def test_a_long_block_in_a_witnessed_host_stall_is_runner(self):
+        line = (
+            "[200] 2026-11-17T01:10:00.900Z dante-input dlink:  WARN dstack::stream::watch: engine "
+            "pump lost or overran blocks this second device=\"obs-ci\" rebootstraps=0 missed=0 "
+            "overruns=1 writes_after_send=0 max_process_us=3212 cause=none behind_max_us=2145 "
+            "oversleep_max_us=291 drain_max_us=63 drain_max_datagrams=10 max_process_cpu_us=3214"
+        )
+        (f,) = sv.pump_seconds([line])
+        day = sv.utc_ms("2026-11-17T00:00:00.000")
+        host = sv.stalls(["01:10:00.412345 stall 6.2 ms", "01:12:00.000000 stall 9.0 ms"], day)
+        self.assertEqual(host[0], (sv.utc_ms("2026-11-17T01:10:00.412"), 6.2))
+        v = sv.split_verdict(f, host)
+        self.assertIn("RUNNER: a 3212 us block in a second the witness saw the host stall 6.2 ms", v)
+        # a stall outside the second before the line does not count
+        v2 = sv.split_verdict(f, host[1:])
+        self.assertIn("UNPROVEN", v2)
 
     def test_a_clock_re_bootstrap_is_ours_with_its_cause(self):
         f = sv.pump_seconds([self.LATE.replace("cause=late", "cause=clock_back+retime")])[0]
@@ -172,6 +190,19 @@ class SoakVerdict(unittest.TestCase):
         self.assertTrue(late.startswith("OURS:"), late)
         (after,) = sv.verdict([(sv.utc_ms("2026-11-17T01:08:41.000"), 0.0208, "misplaced")], [], [], skips)
         self.assertTrue(after.startswith("OURS:"), after)
+        # a watch line just before the break's report (its second boundary inside the break)
+        (edge,) = sv.verdict([(sv.utc_ms("2026-11-17T01:08:40.300"), 0.0208, "misplaced")], [], [], skips)
+        self.assertTrue(edge.startswith("PEER:"), edge)
+        (past,) = sv.verdict([(sv.utc_ms("2026-11-17T01:08:40.326"), 0.0208, "misplaced")], [], [], skips)
+        self.assertTrue(past.startswith("OURS:"), past)
+        # our own TX restart before a misplaced break wins over a peer skip after it
+        (ours,) = sv.verdict(
+            [(sv.utc_ms("2026-11-17T01:08:39.070"), 0.0208, "misplaced")],
+            [],
+            [(sv.utc_ms("2026-11-17T01:08:39.060"), "lag=900 max_lag=803")],
+            skips,
+        )
+        self.assertTrue(ours.startswith("RUNNER: our TX thread ran late"), ours)
         # a silence near a peer skip is not the peer's (its skip reads as misplaced)
         (silence,) = sv.verdict([(sv.utc_ms("2026-11-17T01:08:39.872"), 10.35, "silence")], [], [], skips)
         self.assertTrue(silence.startswith("OURS:"), silence)

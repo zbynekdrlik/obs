@@ -44,6 +44,11 @@ PEER_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+)Z ")
 # The peer's pump watch logs once a second for the second before: a skip it reports came up to
 # this long before its warning.
 PEER_WATCH_MS = 2000
+# ... and its second boundary can fall inside a short break, so its line may come just before the
+# break's report.
+PEER_BEFORE_MS = 100
+# the stall witness's line: `HH:MM:SS.ffffff stall X ms` (UTC, the run's date)
+STALL = re.compile(r"^(\d{2}):(\d{2}):(\d{2})\.(\d+) stall ([0-9.]+) ms")
 # obs's block on a quiet host (dstack#354, measured on obs's shape: p50 26, max 56 us, also right
 # after a re-bootstrap, a Rated restart and a TX resync). The runner (an Azure VM without paravirt
 # steal accounting) counts host steal as the thread's CPU, so cpu = wall proves nothing there.
@@ -100,7 +105,19 @@ def num(fields, key):
     return int(v) if v is not None and v.isdigit() else None
 
 
-def split_verdict(fields):
+def stalls(stall_lines, day_ms):
+    """The witness's host stalls as (UTC ms, ms); `day_ms` is the run's UTC midnight."""
+    out = []
+    for line in stall_lines:
+        m = STALL.search(line)
+        if m:
+            h, mi, se = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            ms = int((m.group(4) + "000")[:3])
+            out.append((day_ms + ((h * 60 + mi) * 60 + se) * 1000 + ms, float(m.group(5))))
+    return out
+
+
+def split_verdict(fields, host_stalls=()):
     """One line for a pump-watch second: where its lost time went, RUNNER or OURS."""
     behind = num(fields, "behind_max_us")
     over = num(fields, "oversleep_max_us")
@@ -131,10 +148,20 @@ def split_verdict(fields):
         if proc is None:
             words.append("UNMEASURED overrun (no block time)")
         elif proc > STEAL_RATIO * QUIET_BLOCK_MAX_US:
-            words.append(
-                f"RUNNER: a {proc} us block where obs's costs at most {QUIET_BLOCK_MAX_US} us on a "
-                "quiet host (this VM counts host steal as the thread's CPU)"
-            )
+            at = fields.get("_ms")
+            seen = [] if at is None else [x for x in host_stalls if at - 1000 <= x[0] <= at]
+            if seen:
+                worst = max(x[1] for x in seen)
+                words.append(
+                    f"RUNNER: a {proc} us block in a second the witness saw the host stall "
+                    f"{worst:.1f} ms (obs's block is at most {QUIET_BLOCK_MAX_US} us on a quiet host)"
+                )
+            else:
+                words.append(
+                    f"UNPROVEN: a {proc} us block with no host stall witnessed that second: steal "
+                    f"(this VM counts it as the thread's CPU) or ours (obs's block is at most "
+                    f"{QUIET_BLOCK_MAX_US} us on a quiet host)"
+                )
         else:
             words.append("OURS: a block's own work took the time")
     if not words:
@@ -204,7 +231,11 @@ def verdict(brks, wks, restarts=(), skips=()):
         near = [w for w in wks if -MATCH_BEFORE_MS <= start - w[0] <= MATCH_AFTER_MS]
         tx = [r for r in restarts if -MATCH_BEFORE_MS <= start - r[0] <= MATCH_AFTER_MS]
         # a peer skip reads as one 2-sample misplaced break (dstack#358), never a silence
-        peer = [p for p in skips if 0 <= p - at <= PEER_WATCH_MS] if kind == "misplaced" else []
+        peer = (
+            [p for p in skips if -PEER_BEFORE_MS <= p - at <= PEER_WATCH_MS]
+            if kind == "misplaced"
+            else []
+        )
         if near:
             w = min(near, key=lambda w: abs(start - w[0]))
             out.append(
@@ -239,6 +270,7 @@ def main(argv):
     p.add_argument("--obs-log", required=True)
     p.add_argument("--from-ms", type=int, required=True)
     p.add_argument("--to-ms", type=int, required=True)
+    p.add_argument("--stall-log", help="the stall witness's log (HH:MM:SS UTC on the run's day)")
     a = p.parse_args(argv)
     with open(a.peer_log, encoding="utf-8", errors="replace") as f:
         peer = f.read().splitlines()
@@ -251,10 +283,15 @@ def main(argv):
         when = datetime.datetime.fromtimestamp(at / 1000, datetime.timezone.utc)
         print(f"{when.strftime('%H:%M:%S.')}{at % 1000:03d} late wake {us / 1000:.2f} ms ({note})")
     print("== the pump's latest wake per minute, us: " + (" ".join(map(str, minutes(obs))) or "(none)"))
+    host = []
+    if a.stall_log:
+        day = a.from_ms - a.from_ms % 86_400_000
+        with open(a.stall_log, encoding="utf-8", errors="replace") as f:
+            host = stalls(f.read().splitlines(), day)
     secs = pump_seconds(obs)
     print(f"== the pump's lost seconds ({len(secs)}, dlink's pump watch, dstack#354)")
     for fields in secs:
-        print(split_verdict(fields))
+        print(split_verdict(fields, host))
     print(f"== the verdict on the soak's tone breaks ({len(brks)})")
     for line in verdict(brks, wks, tx_restarts(obs), peer_skips(peer)):
         print(line)
