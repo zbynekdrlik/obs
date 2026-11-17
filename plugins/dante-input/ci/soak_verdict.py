@@ -74,6 +74,12 @@ def split_verdict(fields):
             words.append("RUNNER: the sleep returned late (the scheduler ran the pump late)")
         else:
             words.append("OURS: the wake was late but the sleep was not (time went to work before it)")
+    # a re-bootstrap on a clock or latency event is the stack's own reaction, not the scheduler
+    other = [c for c in cause.split("+") if c not in ("late", "none", "?")]
+    if other:
+        words.append(
+            f"OURS: a re-bootstrap on {'+'.join(other)} (a clock or latency event, not the scheduler)"
+        )
     blocks = (num(fields, "overruns") or 0) + (num(fields, "writes_after_send") or 0)
     if blocks:
         if proc is None or cpu is None:
@@ -82,7 +88,9 @@ def split_verdict(fields):
             words.append("RUNNER: a block off the CPU (wall far above its thread CPU)")
         else:
             words.append("OURS: a block's own work took the time")
-    return "; ".join(words or ["no lost block"]) + f" [{facts}]"
+    if not words:
+        words.append(f"UNCLASSIFIED: cause={cause}, nothing the rules above read")
+    return "; ".join(words) + f" [{facts}]"
 
 
 def utc_ms(stamp):

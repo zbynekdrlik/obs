@@ -118,6 +118,21 @@ class SoakVerdict(unittest.TestCase):
         past = base.replace("max_process_us=57", "max_process_us=697")
         self.assertTrue(sv.split_verdict(sv.pump_seconds([past])[0]).startswith("RUNNER"))
 
+    def test_a_clock_re_bootstrap_is_ours_with_its_cause(self):
+        f = sv.pump_seconds([self.LATE.replace("cause=late", "cause=clock_back+retime")])[0]
+        line = sv.split_verdict(f)
+        self.assertTrue(
+            line.startswith("OURS: a re-bootstrap on clock_back+retime"), line
+        )
+        both = sv.pump_seconds([self.LATE.replace("cause=late", "cause=late+reanchor")])[0]
+        line = sv.split_verdict(both)
+        self.assertIn("RUNNER: the sleep returned late", line)
+        self.assertIn("OURS: a re-bootstrap on reanchor", line)
+
+    def test_a_warned_second_no_rule_reads_is_unclassified(self):
+        f = sv.pump_seconds([self.LATE.replace("cause=late", "cause=none")])[0]
+        self.assertTrue(sv.split_verdict(f).startswith("UNCLASSIFIED: cause=none"), sv.split_verdict(f))
+
     def test_an_unmeasured_cpu_is_said(self):
         f = sv.pump_seconds(
             [self.LATE.replace("overruns=0", "overruns=1").replace("max_process_cpu_us=49", "max_process_cpu_us=-")]
