@@ -58,10 +58,7 @@ fn the_libvlc_instance_defaults_to_the_dummy_audio_output_so_no_source_loads_mmd
     let src = read(PLUGIN);
     let lifted = lift_fn(&src, "bool load_libvlc(void)\n{");
     let out = compile_and_run(&HARNESS.replace("LIFTED", &lifted), "vlc_no_mmdevice_78");
-    let args: Vec<&str> = out
-        .iter()
-        .filter_map(|l| l.strip_prefix("arg "))
-        .collect();
+    let args: Vec<&str> = out.iter().filter_map(|l| l.strip_prefix("arg ")).collect();
     assert!(
         out.iter().any(|l| l == "loaded 1"),
         "obs#78: load_libvlc did not load: {out:?}"
@@ -73,7 +70,9 @@ fn the_libvlc_instance_defaults_to_the_dummy_audio_output_so_no_source_loads_mmd
          over; it got {args:?} ({out:?})"
     );
     assert!(
-        !args.iter().any(|a| a.starts_with("--aout=") && *a != "--aout=adummy"),
+        !args
+            .iter()
+            .any(|a| a.starts_with("--aout=") && *a != "--aout=adummy"),
         "obs#78: one default audio output only: {args:?}"
     );
 }
