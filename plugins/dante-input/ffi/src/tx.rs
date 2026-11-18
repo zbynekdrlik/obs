@@ -3,8 +3,10 @@
 //!
 //! OBS makes its mix on its own clock (the system clock); the device sends on dlink's media clock
 //! (PTP). The two drift, so the mix goes through dlink's bridge (dstack #241, dsend's): OBS's
-//! audio thread writes a [`Fifo`] at OBS's rate ([`TxIn::push`]), and the pump reads it through
-//! the ASRC [`Player`] at the device's app rate ([`TxOut::fill`]). The player keeps the FIFO at the
+//! audio thread writes a [`Fifo`] at OBS's rate ([`TxIn::push`]), and the device's TX thread reads
+//! it through the ASRC [`Player`] at the device's app rate (dlink's [`TxPull`], obs#76: the TX
+//! thread fills each block at the pump's own due time and stamp just before it sends, so a late
+//! pump no longer costs TX audio, dstack#363). The player keeps the FIFO at the
 //! device's app buffer ([`AppBuffer`], dstack #247: OBS's 1024-frame chunk and one pump block,
 //! 22.667 ms on a 96 kHz device) by moving its ratio a few ppm. OBS's mix reaches the wire that
 //! buffer plus dlink's TX path later; the device logs every term at its start.
@@ -13,13 +15,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use dlink::Block;
-use dlink::bridge::{AppBuffer, Fifo, Player, Stats, chunk_ns, fifo_for};
+use dlink::bridge::{AppBuffer, Fifo, Player, Stats, TxPull, chunk_ns, fifo_for};
 
 use crate::config::{OBS_CHUNK_FRAMES, TX_CHANNELS};
-
-/// The most frames the pump fills from the player at once (its scratch, no allocation in a block).
-pub const CHUNK: usize = 1024;
 
 /// The OBS side: OBS's audio thread writes the track's planes into the FIFO.
 pub struct TxIn {
@@ -91,12 +89,6 @@ impl Cadence {
     }
 }
 
-/// The pump side: fills the device's TX outputs from the player.
-pub struct TxOut {
-    player: Player,
-    scratch: Vec<f64>,
-}
-
 /// The TX's counts, for the status line (obs#41).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TxCounts {
@@ -108,7 +100,7 @@ pub struct TxCounts {
     pub underruns: u64,
     /// Depths the player could not steer back and re-centred (a skip or a refill).
     pub recentres: u64,
-    /// OBS frames the FIFO had no room for (the pump not reading).
+    /// OBS frames the FIFO had no room for (the TX thread not reading).
     pub overflows: u64,
     /// The converter's correction, ppm.
     pub ppm: f64,
@@ -119,14 +111,15 @@ pub struct TxCounts {
     pub priming: bool,
 }
 
-/// The TX of OBS's track `track` (from 1): OBS writes at `obs_rate`, the pump reads at `app_rate`,
-/// the FIFO held at `buffer` (the device's `bridge_buffer`).
+/// The TX of OBS's track `track` (from 1): OBS writes at `obs_rate`, the device's TX thread reads
+/// at `app_rate` through the returned [`TxPull`] (`Link::start_tx_pulling`), the FIFO held at
+/// `buffer` (the device's `bridge_buffer`).
 pub fn tx(
     track: u32,
     obs_rate: u32,
     app_rate: u32,
     buffer: AppBuffer,
-) -> Result<(TxIn, TxOut), String> {
+) -> Result<(TxIn, TxPull), String> {
     tx_on(
         fifo_for(TX_CHANNELS, obs_rate),
         track,
@@ -145,7 +138,7 @@ fn tx_on(
     obs_rate: u32,
     app_rate: u32,
     buffer: AppBuffer,
-) -> Result<(TxIn, TxOut), String> {
+) -> Result<(TxIn, TxPull), String> {
     let fifo = Arc::new(fifo);
     let stats = Arc::new(Stats::default());
     let player = Player::new(
@@ -169,10 +162,7 @@ fn tx_on(
             cadence: Cadence::default(),
             epoch: Instant::now(),
         },
-        TxOut {
-            player,
-            scratch: vec![0.0; CHUNK * TX_CHANNELS],
-        },
+        TxPull::new(player, TX_CHANNELS),
     ))
 }
 
@@ -226,32 +216,6 @@ impl TxIn {
             ppm: self.stats.ppm(),
             resyncs: self.stats.resyncs(),
             priming: self.stats.priming(),
-        }
-    }
-}
-
-impl TxOut {
-    /// Fills the block's TX outputs (the first [`TX_CHANNELS`]) from the player. No lock, no
-    /// allocation, no system call: it runs in the pump's block.
-    pub fn fill(&mut self, block: &mut Block<'_>) {
-        let frames = block.frames();
-        let outputs = block.outputs().min(TX_CHANNELS);
-        let start = block.start();
-        let mut done = 0;
-        while done < frames {
-            let n = (frames - done).min(CHUNK);
-            let buf = &mut self.scratch[..n * TX_CHANNELS];
-            // obs#56 (dlink v0.6.136): each piece's start, so a block off the last one's end
-            // (a rebootstrap's skip) resyncs the player instead of leaving its FIFO off target.
-            let at = start.map(|s| s + done as u64);
-            self.player.fill_at(at, buf, TX_CHANNELS, |x| x);
-            for c in 0..outputs {
-                let out = block.output(c);
-                for (f, slot) in out.iter_mut().skip(done).take(n).enumerate() {
-                    *slot = buf[f * TX_CHANNELS + c];
-                }
-            }
-            done += n;
         }
     }
 }

@@ -25,7 +25,7 @@ pub mod tx;
 
 use config::InputConfig;
 use status::Status;
-use tx::{TxIn, TxOut};
+use tx::TxIn;
 
 /// OBS's log levels (util/base.h).
 pub const LOG_ERROR: c_int = 100;
@@ -374,22 +374,6 @@ impl Process for Sink {
             }
         }
         self.written += frames as u64;
-    }
-}
-
-/// The device's processor: the RX into the ring ([`Sink`]) and, with TX, OBS's track out of the
-/// TX FIFO ([`TxOut`]), each block.
-pub struct Pump {
-    sink: Sink,
-    tx: Option<TxOut>,
-}
-
-impl Process for Pump {
-    fn process(&mut self, block: &mut Block<'_>) {
-        self.sink.process(block);
-        if let Some(tx) = &mut self.tx {
-            tx.fill(block);
-        }
     }
 }
 
@@ -761,7 +745,7 @@ impl DanteInput {
                 },
             ),
         );
-        let (tx_in, tx_out) = match cfg.tx_track() {
+        let (tx_in, tx_pull) = match cfg.tx_track() {
             0 => (None, None),
             track => {
                 let obs = cfg.obs_side_rate(obs_rate);
@@ -786,9 +770,14 @@ impl DanteInput {
             rx: (0..n).collect(),
             tx: (0..cfg.tx.len()).collect(),
         };
-        let pump = Pump { sink, tx: tx_out };
-        let link = Link::start(&link_cfg, &Place::Iface(cfg.iface.clone()), map, pump)
-            .map_err(|e| format!("the device did not start: {e}"))?;
+        // The pump runs the RX ring (`Sink`); with TX, the device's TX thread fills the TX
+        // channels from OBS's FIFO itself (obs#76, dlink's TX pull, dstack#363).
+        let place = Place::Iface(cfg.iface.clone());
+        let link = match tx_pull {
+            Some(pull) => Link::start_tx_pulling(&link_cfg, &place, map, sink, pull),
+            None => Link::start(&link_cfg, &place, map, sink),
+        }
+        .map_err(|e| format!("the device did not start: {e}"))?;
         log(
             LOG_INFO,
             &format!(
