@@ -102,7 +102,9 @@ pub struct TxCounts {
     pub underruns: u64,
     /// Depths the player could not steer back and re-centred (a skip or a refill).
     pub recentres: u64,
-    /// OBS frames the FIFO had no room for (the TX thread not reading).
+    /// OBS frames the FIFO had no room for (the TX thread not reading). None before the TX
+    /// thread's first pull (obs#80: those are `unpulled`); after it, a rise means the TX thread
+    /// stopped pulling, e.g. the media clock fell out of ready mid-run.
     pub overflows: u64,
     /// The converter's correction, ppm.
     pub ppm: f64,

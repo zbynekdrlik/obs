@@ -24,6 +24,7 @@ const FRAMES: u32 = RATE / 2;
 const HARNESS: &str = r#"
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <vlc/vlc.h>
@@ -38,14 +39,14 @@ static int64_t (*libvlc_clock_)(void) = libvlc_clock;
 bool load_libvlc(void);
 LIFTED
 
-static volatile unsigned long played;
-static volatile unsigned setups;
+static _Atomic unsigned long played;
+static _Atomic unsigned setups;
 
 static int audio_setup(void **data, char *format, unsigned *rate, unsigned *channels)
 {
 	(void)data;
 	printf("setup %.4s %u %u\n", format, *rate, *channels);
-	setups++;
+	atomic_fetch_add(&setups, 1);
 	return 0;
 }
 
@@ -54,7 +55,7 @@ static void audio_play(void *data, const void *samples, unsigned count, int64_t 
 	(void)data;
 	(void)samples;
 	(void)pts;
-	played += count;
+	atomic_fetch_add(&played, count);
 }
 
 int main(int argc, char **argv)
@@ -84,13 +85,13 @@ int main(int argc, char **argv)
 		printf("play refused\n");
 		return 1;
 	}
-	for (int i = 0; i < 100 && played < 12000; i++)
+	for (int i = 0; i < 100 && atomic_load(&played) < 12000; i++)
 		usleep(50000);
 	libvlc_media_player_stop(mp);
 	libvlc_media_player_release(mp);
 	libvlc_release(libvlc);
-	printf("setups %u\n", setups);
-	printf("played %lu\n", played);
+	printf("setups %u\n", atomic_load(&setups));
+	printf("played %lu\n", atomic_load(&played));
 	return 0;
 }
 "#;

@@ -24,14 +24,16 @@ int main(void)
 {
 	struct cb_jxs_out_retry r = {0};
 
-	/* the reboot: wanted (enabled=true), the first start failed at t=10 s */
 	/* obs#81 (vstack#18): every pace source code has its status word, 5 = frame-spread. */
 	CHECK(strcmp(cb_jxs_out_pace_source(0), "line-rate") == 0, "pace source 0 is line-rate");
+	CHECK(strcmp(cb_jxs_out_pace_source(1), "fixed") == 0, "pace source 1 is fixed");
+	CHECK(strcmp(cb_jxs_out_pace_source(2), "receiver-link") == 0, "pace source 2 is receiver-link");
 	CHECK(strcmp(cb_jxs_out_pace_source(3), "start-spread") == 0, "pace source 3 is start-spread");
 	CHECK(strcmp(cb_jxs_out_pace_source(4), "congestion") == 0, "pace source 4 is congestion");
 	CHECK(strcmp(cb_jxs_out_pace_source(5), "frame-spread") == 0, "pace source 5 is frame-spread (vstack#18)");
 	CHECK(strcmp(cb_jxs_out_pace_source(6), "unknown") == 0, "an unknown pace source reads unknown");
 
+	/* the reboot: wanted (enabled=true), the first start failed at t=10 s */
 	cb_jxs_out_retry_note(&r, false, 10 * S);
 	CHECK(r.fails == 1, "a failed start is counted");
 	CHECK(!cb_jxs_out_retry_due(&r, true, false, 10 * S + S), "no retry before 2 s");
