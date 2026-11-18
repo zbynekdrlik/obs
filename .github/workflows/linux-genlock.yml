@@ -383,10 +383,12 @@ jobs:
         # includes libobs's util/sse-intrin.h (simde/x86/sse2.h); camera-box issue 1439, obs#50.
         # (Do not name that plugin's directory here: vban_receive_wiring_1439 checks the imag-parity
         # job range of this file never names it.)
+        # libvlc-dev + vlc-plugin-base: vlc_audio_through_amem_80 plays a WAV through real libvlc 3
+        # (adummy, amem, wav, araw) to prove VLC's audio reaches OBS's callbacks (obs#80).
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential libjansson-dev libsimde-dev
+          sudo apt-get install -y --no-install-recommends build-essential libjansson-dev libsimde-dev libvlc-dev vlc-plugin-base
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

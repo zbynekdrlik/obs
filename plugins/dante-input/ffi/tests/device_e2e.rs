@@ -159,8 +159,9 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
 ///
 /// obs#76: the TX thread pulls the track (dlink's TX pull) only on a ready media clock, as it
 /// sends only then; with no grandmaster the pump free-paces and nothing is pulled. So the device
-/// runs on the test clock (`test_clock_ppm`, the soak's, CI sets DANTE_INPUT_TEST_CLOCK=1): a
-/// ready media clock with no PTP.
+/// runs on the test clock (`test_clock_ppm`, the soak's): a ready media clock with no PTP. It needs
+/// DANTE_INPUT_TEST_CLOCK=1 in the environment (CI sets it; without it the config refuses
+/// `test_clock_ppm` and the start fails, the reason in the log).
 #[test]
 fn a_device_with_tx_plays_obs_s_track_into_its_tx_channels() {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
@@ -234,7 +235,7 @@ fn tx_pull_blocks(v: &serde_json::Value) -> u64 {
 
 /// obs#76 (dstack's contract): the TX thread fills OBS's track only while its media clock is ready;
 /// with no grandmaster and no test clock the pump free-paces, nothing is sent, and the TX pull
-/// stays idle (OBS's frames past the FIFO count as overflows). The status shows it as such.
+/// stays idle; OBS's frames are not written before the first pull and count no overflow (obs#80).
 #[test]
 fn on_a_free_clock_the_tx_pull_stays_idle() {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
@@ -277,6 +278,8 @@ fn on_a_free_clock_the_tx_pull_stays_idle() {
     );
     assert_eq!(st.tx_played, 0, "{line}");
     assert!(st.tx_priming, "{line}");
+    // obs#80: a device waiting for its clock is not dropping OBS frames.
+    assert_eq!(st.tx_overflows, 0, "{line}");
     assert_eq!(tx_pull_blocks(&v), 0, "{v}");
     d.stop();
 }

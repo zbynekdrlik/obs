@@ -28,6 +28,8 @@ pub struct TxIn {
     buffer: AppBuffer,
     cadence: Cadence,
     epoch: Instant,
+    /// obs#80: OBS frames pushed before the TX thread's first pull (not written).
+    unpulled: AtomicU64,
 }
 
 /// obs#56: the TX writer's cadence, OBS's audio thread pushing its chunks. A push more than
@@ -100,7 +102,9 @@ pub struct TxCounts {
     pub underruns: u64,
     /// Depths the player could not steer back and re-centred (a skip or a refill).
     pub recentres: u64,
-    /// OBS frames the FIFO had no room for (the TX thread not reading).
+    /// OBS frames the FIFO had no room for (the TX thread not reading). None before the TX
+    /// thread's first pull (obs#80: those are `unpulled`); after it, a rise means the TX thread
+    /// stopped pulling, e.g. the media clock fell out of ready mid-run.
     pub overflows: u64,
     /// The converter's correction, ppm.
     pub ppm: f64,
@@ -161,6 +165,7 @@ fn tx_on(
             buffer,
             cadence: Cadence::default(),
             epoch: Instant::now(),
+            unpulled: AtomicU64::new(0),
         },
         TxPull::new(player, TX_CHANNELS),
     ))
@@ -185,6 +190,11 @@ impl TxIn {
     /// Writes `frames` frames of OBS's planes: the left and right channels, a missing right
     /// (a mono mix) as the left. Frames past the FIFO's room are dropped and counted. Only OBS's
     /// audio thread calls it (the FIFO takes one writer).
+    ///
+    /// obs#80: until the TX thread's first pull (the player has played nothing: dlink's TX pull
+    /// fills only on a ready media clock, #76) nothing is written and the frames count as
+    /// [`TxIn::unpulled`], not as overflows: a device waiting for PTP lock drops no OBS frame
+    /// that could have gone out, and the first pull primes on fresh audio.
     pub fn push(&self, planes: &[&[f32]], frames: usize) {
         let Some(left) = planes.first() else {
             return;
@@ -194,6 +204,10 @@ impl TxIn {
         // + 1: a push in the epoch's first nanosecond is not "no push yet".
         let now_ns = self.epoch.elapsed().as_nanos() as u64 + 1;
         self.cadence.note(now_ns, frames, self.rate);
+        if self.stats.played() == 0 {
+            self.unpulled.fetch_add(frames as u64, Ordering::Relaxed);
+            return;
+        }
         self.fifo.push_with(frames, |f, c| {
             f64::from(if c == 0 { left[f] } else { right[f] })
         });
@@ -204,6 +218,16 @@ impl TxIn {
     pub fn cadence(&self, take: bool) -> (u64, u64) {
         let now_ns = self.epoch.elapsed().as_nanos() as u64 + 1;
         (self.cadence.late(), self.cadence.gap_max_us(take, now_ns))
+    }
+
+    /// obs#80: OBS frames pushed before the TX thread's first pull (not written, no overflow).
+    pub fn unpulled(&self) -> u64 {
+        self.unpulled.load(Ordering::Relaxed)
+    }
+
+    /// Whether the TX thread has pulled (the player played a frame).
+    pub fn pulled(&self) -> bool {
+        self.stats.played() > 0
     }
 
     pub fn counts(&self) -> TxCounts {

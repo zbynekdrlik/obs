@@ -407,6 +407,18 @@ impl WakeLog {
     }
 }
 
+/// obs#80: the line logged once when the TX thread first pulls OBS's track: the OBS frames pushed
+/// before it (not written, no overflow: the device's media clock was not ready yet).
+pub fn first_pull_line(unpulled: u64, rate: u32) -> String {
+    let ms = if rate > 0 {
+        unpulled as f64 * 1000.0 / f64::from(rate)
+    } else {
+        0.0
+    };
+    format!(
+        "dante-input TX: the TX thread pulls OBS's track; {unpulled} OBS frames ({ms:.1} ms) before its first pull were not written (the media clock was not ready; obs#80)"
+    )
+}
 /// The pump's latest wake over the last whole minute, logged once a minute (obs#71).
 pub fn minute_wake_line(behind_us: u64) -> String {
     format!("dante-input pump: the last minute's latest wake {behind_us} us behind (obs#71)")
@@ -552,6 +564,16 @@ mod tests {
             ..Pump::default()
         });
         assert_eq!((st.underruns, st.rebootstraps, st.late_blocks), (3, 1, 0));
+    }
+
+    /// obs#80: the first-pull line names the frames and their length at OBS's rate.
+    #[test]
+    fn the_first_pull_line_names_the_frames_not_written() {
+        assert_eq!(
+            first_pull_line(48_000, 48_000),
+            "dante-input TX: the TX thread pulls OBS's track; 48000 OBS frames (1000.0 ms) before its first pull were not written (the media clock was not ready; obs#80)"
+        );
+        assert!(first_pull_line(0, 0).contains(" 0 OBS frames (0.0 ms) "));
     }
 
     #[test]
