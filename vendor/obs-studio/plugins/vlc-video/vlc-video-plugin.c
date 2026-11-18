@@ -204,7 +204,14 @@ bool load_libvlc(void)
 	if (libvlc)
 		return true;
 
-	libvlc = libvlc_new_(0, 0);
+	/* obs#78: VLC 3's media player opens the instance's default audio output as it is created,
+	 * before libvlc_audio_set_callbacks moves it to amem; on Windows that is mmdevice, which
+	 * crashed OBS on resolume-pp (VLC 3.0.24) from a disabled, empty source. OBS takes VLC's
+	 * audio only through the callbacks, so the default is the dummy output. */
+	const char *const args[] = {"--aout=adummy"};
+	libvlc = libvlc_new_(1, args);
+	blog(LOG_INFO, "[vlc-video]: libvlc instance with --aout=adummy (OBS takes the audio "
+		       "through its callbacks; obs#78)");
 	if (!libvlc) {
 		blog(LOG_INFO, "[vlc-video]: Couldn't create libvlc instance");
 		return false;
