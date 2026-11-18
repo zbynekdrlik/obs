@@ -12,7 +12,7 @@ fn buffer(obs_rate: u32) -> AppBuffer {
 }
 
 /// One TX block of `outputs` TX channels filled by `out` (the TX thread's pull); the channels, channel-major.
-fn pump(out: &mut TxPull, outputs: usize) -> Vec<f64> {
+fn pull(out: &mut TxPull, outputs: usize) -> Vec<f64> {
     let input: [f64; 0] = [];
     let mut output = vec![0.0; BLOCK * outputs];
     let mut block = Block::new(BLOCK, &input, &mut output);
@@ -21,7 +21,7 @@ fn pump(out: &mut TxPull, outputs: usize) -> Vec<f64> {
 }
 
 /// One pump block starting at `start` (the block's media start, output frames).
-fn pump_at(out: &mut TxPull, outputs: usize, start: u64) -> Vec<f64> {
+fn pull_at(out: &mut TxPull, outputs: usize, start: u64) -> Vec<f64> {
     let input: [f64; 0] = [];
     let mut output = vec![0.0; BLOCK * outputs];
     let mut block = Block::new(BLOCK, &input, &mut output).at(start);
@@ -40,10 +40,10 @@ fn obs_chunk(from: usize) -> (Vec<f32>, Vec<f32>) {
 
 #[test]
 fn obs_s_mix_reaches_the_tx_outputs_after_the_fifo_primes_left_and_right_kept_apart() {
-    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let (tx_in, mut tx_pull) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
     assert_eq!(tx_in.track(), 1);
     assert!(
-        pump(&mut tx_out, 2).iter().all(|&x| x == 0.0),
+        pull(&mut tx_pull, 2).iter().all(|&x| x == 0.0),
         "silence while the FIFO is empty"
     );
     assert!(tx_in.counts().priming);
@@ -56,7 +56,7 @@ fn obs_s_mix_reaches_the_tx_outputs_after_the_fifo_primes_left_and_right_kept_ap
         tx_in.push(&[&l, &r], 1024);
         sent += 1024;
         for _ in 0..8 {
-            heard.push(pump(&mut tx_out, 2));
+            heard.push(pull(&mut tx_pull, 2));
         }
     }
     let c = tx_in.counts();
@@ -80,13 +80,13 @@ fn obs_s_mix_reaches_the_tx_outputs_after_the_fifo_primes_left_and_right_kept_ap
 
 #[test]
 fn a_mono_mix_goes_out_on_both_channels() {
-    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let (tx_in, mut tx_pull) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
     let mut last = Vec::new();
     for i in 0..40 {
         let (l, _) = obs_chunk(i * 1024);
         tx_in.push(&[&l], 1024);
         for _ in 0..8 {
-            last = pump(&mut tx_out, 2);
+            last = pull(&mut tx_pull, 2);
         }
     }
     let (left, right) = last.split_at(BLOCK);
@@ -96,18 +96,18 @@ fn a_mono_mix_goes_out_on_both_channels() {
 
 #[test]
 fn obs_stopping_counts_underruns_and_silence_goes_out() {
-    let (tx_in, mut tx_out) = tx(2, RATE, RATE, buffer(RATE)).unwrap();
+    let (tx_in, mut tx_pull) = tx(2, RATE, RATE, buffer(RATE)).unwrap();
     for i in 0..20 {
         let (l, r) = obs_chunk(i * 1024);
         tx_in.push(&[&l, &r], 1024);
         for _ in 0..8 {
-            pump(&mut tx_out, 2);
+            pull(&mut tx_pull, 2);
         }
     }
     assert_eq!(tx_in.counts().underruns, 0);
     let mut last = Vec::new();
     for _ in 0..100 {
-        last = pump(&mut tx_out, 2);
+        last = pull(&mut tx_pull, 2);
     }
     let c = tx_in.counts();
     assert!(c.underruns > 0, "{c:?}");
@@ -121,7 +121,7 @@ fn obs_stopping_counts_underruns_and_silence_goes_out() {
 /// on fresh audio.
 #[test]
 fn frames_before_the_first_pull_count_no_overflow() {
-    let (tx_in, mut pull) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let (tx_in, mut tx_pull) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
     let (l, r) = obs_chunk(0);
     // 30 chunks overflow the 0.5 s FIFO if they were written.
     for _ in 0..30 {
@@ -130,12 +130,12 @@ fn frames_before_the_first_pull_count_no_overflow() {
     assert_eq!(tx_in.counts().overflows, 0, "{:?}", tx_in.counts());
     assert_eq!(tx_in.unpulled(), 30 * 1024);
     // The first pull primes on what OBS pushes from then on.
-    pump(&mut pull, 2);
+    pull(&mut tx_pull, 2);
     for i in 0..40 {
         let (l, r) = obs_chunk(i * 1024);
         tx_in.push(&[&l, &r], 1024);
         for _ in 0..8 {
-            pump(&mut pull, 2);
+            pull(&mut tx_pull, 2);
         }
     }
     let c = tx_in.counts();
@@ -152,8 +152,8 @@ fn frames_before_the_first_pull_count_no_overflow() {
 /// frames past the FIFO counted as overflows.
 #[test]
 fn a_pump_that_does_not_read_counts_obs_s_frames_as_overflows() {
-    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
-    pump(&mut tx_out, 2);
+    let (tx_in, mut tx_pull) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    pull(&mut tx_pull, 2);
     let (l, r) = obs_chunk(0);
     // The FIFO holds player::FIFO_S (0.5 s): 24000 frames at 48 kHz, so 30 chunks overflow it.
     for _ in 0..30 {
@@ -170,13 +170,13 @@ fn a_pump_that_does_not_read_counts_obs_s_frames_as_overflows() {
 
 #[test]
 fn a_device_with_more_outputs_gets_the_mix_on_the_first_two_only() {
-    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let (tx_in, mut tx_pull) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
     let mut last = Vec::new();
     for i in 0..40 {
         let (l, r) = obs_chunk(i * 1024);
         tx_in.push(&[&l, &r], 1024);
         for _ in 0..8 {
-            last = pump(&mut tx_out, 3);
+            last = pull(&mut tx_pull, 3);
         }
     }
     assert!(last[..BLOCK].iter().all(|&x| x > 0.05));
@@ -185,7 +185,7 @@ fn a_device_with_more_outputs_gets_the_mix_on_the_first_two_only() {
 
 #[test]
 fn obs_at_another_rate_than_the_device_s_app_rate_converts() {
-    let (tx_in, mut tx_out) = tx(1, 44_100, RATE, buffer(44_100)).unwrap();
+    let (tx_in, mut tx_pull) = tx(1, 44_100, RATE, buffer(44_100)).unwrap();
     assert_eq!(tx_in.rate(), 44_100);
     let mut last = Vec::new();
     for i in 0..60 {
@@ -194,7 +194,7 @@ fn obs_at_another_rate_than_the_device_s_app_rate_converts() {
         // 1024 frames at 44.1 kHz are ~1114.6 at 48 kHz: 9 blocks of 128 roughly.
         let blocks = if i % 2 == 0 { 9 } else { 8 };
         for _ in 0..blocks {
-            last = pump(&mut tx_out, 2);
+            last = pull(&mut tx_pull, 2);
         }
     }
     let c = tx_in.counts();
@@ -223,7 +223,7 @@ fn the_tx_holds_the_fifo_at_the_app_buffer_it_is_given() {
 /// the status line's tx_resyncs.
 #[test]
 fn a_block_off_the_last_one_s_end_resyncs_the_player_once() {
-    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let (tx_in, mut tx_pull) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
     let mut start = 0u64;
     let mut sent = 0;
     for _ in 0..40 {
@@ -231,7 +231,7 @@ fn a_block_off_the_last_one_s_end_resyncs_the_player_once() {
         tx_in.push(&[&l, &r], 1024);
         sent += 1024;
         for _ in 0..8 {
-            pump_at(&mut tx_out, 2, start);
+            pull_at(&mut tx_pull, 2, start);
             start += BLOCK as u64;
         }
     }
@@ -244,7 +244,7 @@ fn a_block_off_the_last_one_s_end_resyncs_the_player_once() {
         tx_in.push(&[&l, &r], 1024);
         sent += 1024;
         for _ in 0..8 {
-            pump_at(&mut tx_out, 2, start);
+            pull_at(&mut tx_pull, 2, start);
             start += BLOCK as u64;
         }
     }
@@ -256,7 +256,7 @@ fn a_block_off_the_last_one_s_end_resyncs_the_player_once() {
 /// so a piece passing the block's start again would read as a backward start and count one.
 #[test]
 fn a_block_filled_in_pieces_passes_each_piece_s_start() {
-    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let (tx_in, mut tx_pull) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
     let input: [f64; 0] = [];
     let mut start = 0u64;
     let mut sent = 0;
@@ -268,7 +268,7 @@ fn a_block_filled_in_pieces_passes_each_piece_s_start() {
         }
         let mut output = vec![0.0; 2048 * 2];
         let mut block = Block::new(2048, &input, &mut output).at(start);
-        tx_out.process(&mut block);
+        tx_pull.process(&mut block);
         start += 2048;
     }
     assert_eq!(tx_in.counts().resyncs, 0, "{:?}", tx_in.counts());
@@ -359,7 +359,7 @@ fn a_push_ten_ms_late_does_not_underrun_or_recentre() {
     let fifo = fifo_for(TX_CHANNELS, RATE).with_clock(Arc::new(move || {
         clock.load(std::sync::atomic::Ordering::Relaxed)
     }));
-    let (tx_in, mut tx_out) = tx_on(fifo, 1, RATE, RATE, buffer(RATE)).unwrap();
+    let (tx_in, mut tx_pull) = tx_on(fifo, 1, RATE, RATE, buffer(RATE)).unwrap();
     let at = |frames: u64| (frames * 1_000_000_000 / RATE as u64) as i64;
     const LATE: u64 = 480; // 10 ms at 48 kHz
     let push_at = |k: u64| k * 1024 + if k == 200 { LATE } else { 0 };
@@ -377,7 +377,7 @@ fn a_push_ten_ms_late_does_not_underrun_or_recentre() {
             settled = Some(tx_in.counts());
         }
         now.store(at(b * BLOCK as u64), std::sync::atomic::Ordering::Relaxed);
-        pump_at(&mut tx_out, 2, start);
+        pull_at(&mut tx_pull, 2, start);
         start += BLOCK as u64;
     }
     let before = settled.unwrap();
