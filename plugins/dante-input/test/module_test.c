@@ -9,7 +9,9 @@
  *                                           source is created and destroyed, unload stops it.
  *   module_test <dante-input.so> running-tx the config also has `tx` (obs#41): OBS's track 1 mix
  *                                           reaches the device's TX FIFO (the status line's tx_*
- *                                           tokens move), unload untaps it before the stop.
+ *                                           tokens move), unload untaps it before the stop. The
+ *                                           config has test_clock_ppm: dlink's TX pull fills only
+ *                                           on a ready media clock (obs#76).
  *
  *   module_test <dante-input.so> soak       obs#57's release gate (dstack docs/ci-peer.md): the config
  *                                           has tx, test_clock_ppm and an RX subscribed to a running

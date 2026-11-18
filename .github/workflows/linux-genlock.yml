@@ -707,11 +707,15 @@ jobs:
               printf 'name = "obs-ci"\niface = "%s"\nnetwork_rate = 96000\nrx = ["Master L", "Master R"]\narc_port = 24440\ncmc_port = 28800\nflows_port = 24455\nrx_port_base = 31200\ntx_port_base = 31232\n' "$iface" > "$home/.camera-box/dante-input.toml"
             fi
             # obs#41: the TX of OBS's track 1 on the same device (dlink's default latency terms).
+            # obs#76: dlink's TX pull fills only on a ready media clock, so running-tx runs on the
+            # test clock (a ready media clock, no PTP; refused without DANTE_INPUT_TEST_CLOCK=1).
+            clock_env=""
             if [ "$mode" = running-tx ]; then
-              printf 'tx = ["OBS program L", "OBS program R"]\n' >> "$home/.camera-box/dante-input.toml"
+              printf 'tx = ["OBS program L", "OBS program R"]\ntest_clock_ppm = 0.0\n' >> "$home/.camera-box/dante-input.toml"
+              clock_env="DANTE_INPUT_TEST_CLOCK=1"
             fi
             echo "== $mode"
-            HOME="$home" xvfb-run -a "$test_bin" "$so" "$mode"
+            env HOME="$home" $clock_env xvfb-run -a "$test_bin" "$so" "$mode"
           done
 
       # obs#57 (owner 14.11.2026: E2E strong enough that a regression never reaches production), the
