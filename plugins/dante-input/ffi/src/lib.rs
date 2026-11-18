@@ -999,6 +999,7 @@ fn status_loop(
     let mut lines = 0u32;
     let mut wake_log = status::WakeLog::default();
     let mut minute_logged = Instant::now();
+    let mut first_pull_logged = false;
     loop {
         match stopped.recv_timeout(status_wait(lines)) {
             Err(RecvTimeoutError::Timeout) => {}
@@ -1009,6 +1010,15 @@ fn status_loop(
         };
         log(LOG_INFO, &st.line());
         lines = lines.saturating_add(1);
+        // obs#80: once, when the TX thread first pulls (its clock ready): the OBS frames that
+        // came before it and were not written.
+        if let Some(t) = tx
+            && !first_pull_logged
+            && t.pulled()
+        {
+            log(LOG_INFO, &status::first_pull_line(t.unpulled(), t.rate()));
+            first_pull_logged = true;
+        }
         // obs#71: each pump wake one block or more late, with its UTC time, so a soak's tone
         // break (and a box's dropout) can be set beside the pump's own lateness.
         let (pump, total, recent, minute) = pump_wakes(link);
