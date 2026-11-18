@@ -189,16 +189,17 @@ static void jxs_log_status(jxs_source *s, const cbjxs_stats &now, const cbjxs_st
 		"jxs-source '%s': fps=%.2f frames=%" PRIu64 " lost_slices=%" PRIu64 " concealed=%" PRIu64
 		" undecodable=%" PRIu64 " reopens=%" PRIu64 " decoder_reopens=%" PRIu64 " bpp=%u.%02u"
 		" reports=%" PRIu64 " report_errors=%" PRIu64 " dropped_unread=%" PRIu64 " foreign=%" PRIu64
-		" camera=%u link_mbps=%u fec_repaired=%" PRIu64 " decoder_opens=%u (issue 1387, obs#86)",
+		" camera=%u link_mbps=%u decoder_opens=%u fec_repaired=%" PRIu64 " (issue 1387)",
 		obs_source_get_name(s->source), window_s > 0.0 ? (double)frames / window_s : 0.0, frames,
 		now.lost_slices - prev.lost_slices, now.concealed_frames - prev.concealed_frames, undecodable,
 		reopens, now.header_changes - prev.header_changes, bpp_x100 / 100u, bpp_x100 % 100u,
 		now.reports_sent - prev.reports_sent, now.report_errors - prev.report_errors,
 		now.dropped_unread - prev.dropped_unread, now.foreign - prev.foreign, (unsigned)now.camera_id,
-		(unsigned)now.link_mbps, now.fec_repaired - prev.fec_repaired,
-		/* vstack#20 (ABI 5): decoders opened from a whole frame this window; a bpp swap the
-		 * receiver has seen in its last 2 levels opens none */
-		(unsigned)(now.decoder_opens - prev.decoder_opens));
+		(unsigned)now.link_mbps,
+		/* obs#86, vstack#20 (ABI 5): decoders opened from a whole frame this window; a bpp swap
+		 * the receiver has seen in its last 2 levels opens none. Before fec_repaired, so the line
+		 * still ends in `fec_repaired=N (issue 1387)` for its readers. */
+		(unsigned)(now.decoder_opens - prev.decoder_opens), now.fec_repaired - prev.fec_repaired);
 	const double fps = window_s > 0.0 ? (double)frames / window_s : 0.0;
 	cb_jxs_state().publish_window(s, (uint32_t)(fps * 100.0 + 0.5), bpp_x100, now.lost_slices - prev.lost_slices,
 				      undecodable, now.dropped_unread - prev.dropped_unread,
@@ -298,6 +299,12 @@ static void jxs_thread(jxs_source *s)
 				"jxs-source '%s': listening on UDP %u (camera %u, 0 = the first heard; max bpp %u, 0 = no limit; receive buffer %" PRId64 " bytes) -- JPEG XS on the genlock FIFO, the receiver report back to the sender (ABI %u) (issue 1387)",
 				obs_source_get_name(s->source), (unsigned)cbjxs_local_port(rx), (unsigned)cfg.camera,
 				(unsigned)cfg.max_bpp, cbjxs_recv_buffer_bytes(rx), cbjxs_abi_version());
+			/* obs#86: a library from another vstack tag than the header reads its stats in
+			 * another layout (an older one leaves decoder_opens 0) */
+			if (cbjxs_abi_version() != CBJXS_ABI_VERSION)
+				obs_log(LOG_WARNING,
+					"jxs-source '%s': the JPEG XS library is ABI %u, this build expects ABI %u: its counters may read wrong (obs#86)",
+					obs_source_get_name(s->source), cbjxs_abi_version(), (unsigned)CBJXS_ABI_VERSION);
 		}
 
 		cbjxs_frame f = {};
