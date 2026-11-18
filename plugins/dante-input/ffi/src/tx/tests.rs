@@ -1,5 +1,6 @@
 use super::*;
 use dlink::bridge::{chunk_ns, player};
+use dlink::{Block, Process};
 
 const RATE: u32 = 48_000;
 const BLOCK: usize = 128;
@@ -10,21 +11,21 @@ fn buffer(obs_rate: u32) -> AppBuffer {
     AppBuffer::new(chunk_ns(1024, obs_rate), chunk_ns(128, 96_000))
 }
 
-/// One pump block of `outputs` TX channels filled by `out`; the channels, channel-major.
-fn pump(out: &mut TxOut, outputs: usize) -> Vec<f64> {
+/// One TX block of `outputs` TX channels filled by `out` (the TX thread's pull); the channels, channel-major.
+fn pump(out: &mut TxPull, outputs: usize) -> Vec<f64> {
     let input: [f64; 0] = [];
     let mut output = vec![0.0; BLOCK * outputs];
     let mut block = Block::new(BLOCK, &input, &mut output);
-    out.fill(&mut block);
+    out.process(&mut block);
     output
 }
 
 /// One pump block starting at `start` (the block's media start, output frames).
-fn pump_at(out: &mut TxOut, outputs: usize, start: u64) -> Vec<f64> {
+fn pump_at(out: &mut TxPull, outputs: usize, start: u64) -> Vec<f64> {
     let input: [f64; 0] = [];
     let mut output = vec![0.0; BLOCK * outputs];
     let mut block = Block::new(BLOCK, &input, &mut output).at(start);
-    out.fill(&mut block);
+    out.process(&mut block);
     output
 }
 
@@ -231,7 +232,7 @@ fn a_block_filled_in_pieces_passes_each_piece_s_start() {
         }
         let mut output = vec![0.0; 2048 * 2];
         let mut block = Block::new(2048, &input, &mut output).at(start);
-        tx_out.fill(&mut block);
+        tx_out.process(&mut block);
         start += 2048;
     }
     assert_eq!(tx_in.counts().resyncs, 0, "{:?}", tx_in.counts());
