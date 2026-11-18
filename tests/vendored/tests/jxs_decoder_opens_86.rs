@@ -47,23 +47,112 @@ fn the_pinned_receiver_abi_carries_decoder_opens() {
     );
 }
 
+const HARNESS: &str = r#"
+#include <cinttypes>
+#include <cstdint>
+#include <cstdio>
+#include "camera_box_jxs.h"
+#include "jxs-source-decide.h"
+
+struct jxs_source {
+	void *source;
+};
+static const char *obs_source_get_name(void *) { return "Cam 1"; }
+#define LOG_INFO 300
+#define obs_log(level, ...) ((void)(level), printf(__VA_ARGS__), printf("\n"))
+struct stub_state {
+	void publish_window(const void *, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, int64_t) {}
+};
+static stub_state state_;
+static stub_state &cb_jxs_state() { return state_; }
+
+LIFTED
+
+int main()
+{
+	jxs_source s{nullptr};
+	cbjxs_stats prev{}, now{};
+	prev.frames = 1000;
+	now.frames = 1250;
+	prev.fec_repaired = 2;
+	now.fec_repaired = 9;
+	prev.decoder_opens = 4;
+	now.decoder_opens = 7;
+	jxs_log_status(&s, now, prev, 5.0, 1920, 1080, 0);
+	/* the u32 counter wraps: the window's delta is still 2 */
+	prev.decoder_opens = 0xFFFFFFFFu;
+	now.decoder_opens = 1;
+	jxs_log_status(&s, now, prev, 5.0, 1920, 1080, 0);
+	return 0;
+}
+"#;
+
+/// The shipped `jxs_log_status`, compiled with `-Wformat=2 -Werror` against the pinned vstack
+/// header (a format/argument mismatch fails the build), run on known counters: the line ends in
+/// this window's `fec_repaired` and `decoder_opens` deltas.
 #[test]
 fn the_status_line_prints_this_window_s_decoder_opens() {
     let src = repo(SOURCE);
     let f = function(&src, "static void jxs_log_status(");
+    let base = option_env!("CARGO_TARGET_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(format!("jxs_decoder_opens_86_{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create the scratch dir");
+    let harness = dir.join("harness.cpp");
+    let bin = dir.join("harness.bin");
+    fs::write(&harness, HARNESS.replace("LIFTED", &format!("{f}\n}}\n")))
+        .expect("write the harness");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
+    let out = std::process::Command::new(&cxx)
+        .args([
+            "-std=gnu++17",
+            "-Wall",
+            "-Wextra",
+            "-Wformat=2",
+            "-Werror",
+            "-O1",
+        ])
+        .arg("-I")
+        .arg(vstack::path("jxs/recv-ffi/include"))
+        .arg("-I")
+        .arg(root.join("vendor/distroav/src"))
+        .arg(&harness)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| panic!("obs#86: could not run the C++ compiler `{cxx}` ({e})"));
     assert!(
-        f.contains("decoder_opens=%u"),
-        "obs#86: the jxs status line has no decoder_opens= field:\n{f}"
+        out.status.success(),
+        "obs#86: the lifted jxs_log_status does not build (a format/argument mismatch?):\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run = std::process::Command::new(&bin)
+        .output()
+        .expect("obs#86: the harness did not run");
+    assert!(run.status.success(), "obs#86: the harness failed");
+    let stdout = String::from_utf8_lossy(&run.stdout).to_string();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "obs#86: two status lines expected:\n{stdout}"
     );
     assert!(
-        f.contains("(unsigned)(now.decoder_opens - prev.decoder_opens)"),
-        "obs#86: decoder_opens is not this window's delta (now - prev):\n{f}"
+        lines[0].contains(" fec_repaired=7 decoder_opens=3 (issue 1387, obs#86)"),
+        "obs#86: the line does not end in this window's deltas:\n{}",
+        lines[0]
     );
-    // The field is the last of the format, and its argument is the last of the call.
-    let fmt_at = f.find("decoder_opens=%u").unwrap();
-    let arg_at = f.find("now.decoder_opens - prev.decoder_opens").unwrap();
     assert!(
-        f[fmt_at..].find("fec_repaired=").is_none() && f[..arg_at].contains("now.fec_repaired"),
-        "obs#86: decoder_opens's format field and its argument are out of order:\n{f}"
+        lines[0].starts_with("jxs-source 'Cam 1': fps=50.00 frames=250 "),
+        "obs#86: {}",
+        lines[0]
     );
+    assert!(
+        lines[1].contains(" decoder_opens=2 "),
+        "obs#86: a wrapped u32 counter's delta: {}",
+        lines[1]
+    );
+    let _ = fs::remove_dir_all(&dir);
 }
