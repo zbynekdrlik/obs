@@ -49,7 +49,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.159: dstack#354: the pump watch splits a lost second (oversleep_max_us, drain_max_us, drain_max_datagrams, max_process_cpu_us), which obs#71's soak verdict reads. v0.6.156-158: per-slot mean packet age, writes_after_send (#346), a latency write reaching running flows (#352), arrival-time lateness (#350), Rated's exact timeline across a re-bootstrap (#343), a Windows media spin fix (#351). No latency change, nothing to port.
 # v0.6.161: dstack#358: the test peer re-locks its tone check at its own pump's skip and counts it as own_skips, never in tone_gaps (the soak gates own_skips); dstack#359: `the TX schedule starts again` carries oversleep_us, last_pass_us, last_pass_cpu_us. v0.6.160: info-server fixes. No latency change, nothing to port.
 # v0.6.170: dstack#379: an RX channel no longer stays silent after the media clock steps back to another time base (stream-obs 16.11.2026: every sample a late hole for ~24 h after a -43.9-day re-anchor until an OBS restart). v0.6.162-169: internal splits, the TX pull (#363, opt-in, not used here), test-run loopback (#366). No latency change, nothing to port.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.170" }
+# v0.6.178 (dstack#399, one dstack version across apps): v0.6.171 Stats output_gaps()/output_lost_frames() and a held output callback no longer underruns a pulled RX bridge (#307; our push-and-fill RX unchanged); v0.6.172 ASRC seed (new methods only); v0.6.176 the 8700 relay of a dasio bridge's figures; v0.6.177-178 dstack-asio only. No API break, no latency change.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.178" }
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
