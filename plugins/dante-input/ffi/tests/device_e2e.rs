@@ -210,5 +210,73 @@ fn a_device_with_tx_plays_obs_s_track_into_its_tx_channels() {
     assert!(st.tx_played > 48_000, "{line}");
     assert_eq!(st.tx_overflows, 0, "{line}");
     assert!(line.contains(" tx_track=1 tx_played="), "{line}");
+    // dlink's view of the TX pull (dstack#363): the TX thread filled the blocks itself.
+    let v: serde_json::Value =
+        serde_json::from_str(&d.device_status().expect("a running device has a status"))
+            .expect("dlink's status is JSON");
+    eprintln!("device status: {v}");
+    let blocks = tx_pull_blocks(&v);
+    assert!(blocks > 0, "the TX thread filled no block: {v}");
+    d.stop();
+}
+
+/// The TX pull's `blocks` anywhere in dlink's status JSON (dstack#363 `tx_pull`).
+fn tx_pull_blocks(v: &serde_json::Value) -> u64 {
+    match v {
+        serde_json::Value::Object(m) => m
+            .get("tx_pull")
+            .and_then(|p| p["blocks"].as_u64())
+            .unwrap_or_else(|| m.values().map(tx_pull_blocks).max().unwrap_or(0)),
+        serde_json::Value::Array(a) => a.iter().map(tx_pull_blocks).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// obs#76 (dstack's contract): the TX thread fills OBS's track only while its media clock is ready;
+/// with no grandmaster and no test clock the pump free-paces, nothing is sent, and the TX pull
+/// stays idle (OBS's frames past the FIFO count as overflows). The status shows it as such.
+#[test]
+fn on_a_free_clock_the_tx_pull_stays_idle() {
+    let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    let (iface, _ip) = iface_ip();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dante-input.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "name = \"obs-e2e-free\"\niface = \"{iface}\"\nrx = [\"Master L\", \"Master R\"]\n\
+             tx = [\"OBS program L\", \"OBS program R\"]\n\
+             network_rate = 96000\narc_port = 24441\ncmc_port = 28801\nflows_port = 24456\nrx_port_base = 31100\ntx_port_base = 31132\n"
+        ),
+    )
+    .unwrap();
+    let d = DanteInput::start(&path, 48_000, drop_audio, std::ptr::null_mut())
+        .expect("the device with TX starts");
+    let left = vec![0.25f32; 1024];
+    let right = vec![-0.25f32; 1024];
+    let start = Instant::now();
+    let mut sent = 0u64;
+    while start.elapsed() < Duration::from_secs(2) {
+        let due = start.elapsed().as_secs_f64() * 48_000.0;
+        while (sent as f64) < due {
+            d.tx_push(&[&left, &right], 1024);
+            sent += 1024;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let st = d.status().expect("a running device has a status");
+    let line = st.line();
+    let v: serde_json::Value =
+        serde_json::from_str(&d.device_status().expect("a running device has a status"))
+            .expect("dlink's status is JSON");
+    eprintln!("{line}");
+    eprintln!("device status: {v}");
+    assert!(
+        line.starts_with("dante-input status: clock=free "),
+        "{line}"
+    );
+    assert_eq!(st.tx_played, 0, "{line}");
+    assert!(st.tx_priming, "{line}");
+    assert_eq!(tx_pull_blocks(&v), 0, "{v}");
     d.stop();
 }
