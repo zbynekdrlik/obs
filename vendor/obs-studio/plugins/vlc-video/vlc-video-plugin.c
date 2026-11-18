@@ -210,12 +210,12 @@ bool load_libvlc(void)
 	 * audio only through the callbacks, so the default is the dummy output. */
 	const char *const args[] = {"--aout=adummy"};
 	libvlc = libvlc_new_(1, args);
-	blog(LOG_INFO, "[vlc-video]: libvlc instance with --aout=adummy (OBS takes the audio "
-		       "through its callbacks; obs#78)");
 	if (!libvlc) {
 		blog(LOG_INFO, "[vlc-video]: Couldn't create libvlc instance");
 		return false;
 	}
+	blog(LOG_INFO, "[vlc-video]: libvlc instance with --aout=adummy (OBS takes the audio "
+		       "through its callbacks; obs#78)");
 
 	time_start = (uint64_t)libvlc_clock_() * 1000ULL;
 	return true;
