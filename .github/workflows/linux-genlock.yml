@@ -363,6 +363,8 @@ jobs:
         env:
           DANTE_INPUT_TEST_IFACE: dante0
           DANTE_INPUT_TEST_IP: 10.99.0.1
+          # obs#76: the TX device test runs on the test clock (a ready media clock, no PTP).
+          DANTE_INPUT_TEST_CLOCK: "1"
         run: cargo llvm-cov --locked --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }} -- --nocapture
 
   # obs#1 (section C point 6): the vendored-source regression guards moved from camera-box. A Rust

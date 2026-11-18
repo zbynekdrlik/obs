@@ -156,6 +156,11 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
 /// obs#41 (camera-box#1513): a device with `tx` takes OBS's track as OBS hands it (1024 frames
 /// every 1024 frames' time, on OBS's own clock), primes its FIFO and plays it into the TX
 /// channels; the status line's tx_* tokens show it. The wire itself is dlink's (dstack's tests).
+///
+/// obs#76: the TX thread pulls the track (dlink's TX pull) only on a ready media clock, as it
+/// sends only then; with no grandmaster the pump free-paces and nothing is pulled. So the device
+/// runs on the test clock (`test_clock_ppm`, the soak's, CI sets DANTE_INPUT_TEST_CLOCK=1): a
+/// ready media clock with no PTP.
 #[test]
 fn a_device_with_tx_plays_obs_s_track_into_its_tx_channels() {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
@@ -167,7 +172,7 @@ fn a_device_with_tx_plays_obs_s_track_into_its_tx_channels() {
         format!(
             "name = \"obs-e2e-tx\"\niface = \"{iface}\"\nrx = [\"Master L\", \"Master R\"]\n\
              tx = [\"OBS program L\", \"OBS program R\"]\n\
-             network_rate = 96000\narc_port = 24441\ncmc_port = 28801\nflows_port = 24456\nrx_port_base = 31100\ntx_port_base = 31132\n"
+             network_rate = 96000\ntest_clock_ppm = 0.0\narc_port = 24441\ncmc_port = 28801\nflows_port = 24456\nrx_port_base = 31100\ntx_port_base = 31132\n"
         ),
     )
     .unwrap();
@@ -192,6 +197,10 @@ fn a_device_with_tx_plays_obs_s_track_into_its_tx_channels() {
     let st = d.status().expect("a running device has a status");
     let line = st.line();
     eprintln!("{line}");
+    assert!(
+        line.starts_with("dante-input status: clock=media "),
+        "{line}"
+    );
     assert_eq!(st.tx_track, 1, "{line}");
     assert!(
         !st.tx_priming,
