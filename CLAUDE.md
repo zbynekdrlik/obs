@@ -8,3 +8,4 @@ The forked OBS. Start with `docs/HANDOVER.md`.
 - release / workflows / VERSION → `.claude/rules/release.md`
 - obs-websocket graphics → `.claude/rules/obs-websocket.md`
 - vlc-video (vendored) → `.claude/rules/vlc-video.md`
+- JPEG XS / the vstack pin → `.claude/rules/jxs-vstack.md`

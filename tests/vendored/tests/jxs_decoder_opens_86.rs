@@ -88,8 +88,8 @@ int main()
 "#;
 
 /// The shipped `jxs_log_status`, compiled with `-Wformat=2 -Werror` against the pinned vstack
-/// header (a format/argument mismatch fails the build), run on known counters: the line ends in
-/// this window's `fec_repaired` and `decoder_opens` deltas.
+/// header with `-Wformat-signedness` (a format/argument or signedness mismatch fails the build), run
+/// on known counters: `decoder_opens=` sits before `fec_repaired=`, so the line keeps its old tail.
 #[test]
 fn the_status_line_prints_this_window_s_decoder_opens() {
     let src = repo(SOURCE);
@@ -111,6 +111,7 @@ fn the_status_line_prints_this_window_s_decoder_opens() {
             "-Wall",
             "-Wextra",
             "-Wformat=2",
+            "-Wformat-signedness",
             "-Werror",
             "-O1",
         ])
@@ -140,14 +141,18 @@ fn the_status_line_prints_this_window_s_decoder_opens() {
         "obs#86: two status lines expected:\n{stdout}"
     );
     assert!(
-        lines[0].contains(" fec_repaired=7 decoder_opens=3 (issue 1387, obs#86)"),
-        "obs#86: the line does not end in this window's deltas:\n{}",
+        lines[0].contains(" decoder_opens=3 fec_repaired=7 (issue 1387)"),
+        "obs#86: decoder_opens must sit before fec_repaired, the line still ending in `fec_repaired=N (issue 1387)`:\n{}",
         lines[0]
     );
     assert!(
         lines[0].starts_with("jxs-source 'Cam 1': fps=50.00 frames=250 "),
         "obs#86: {}",
         lines[0]
+    );
+    assert!(
+        lines.iter().all(|l| l.ends_with(" (issue 1387)")),
+        "obs#86: the line's tail changed:\n{stdout}"
     );
     assert!(
         lines[1].contains(" decoder_opens=2 "),
