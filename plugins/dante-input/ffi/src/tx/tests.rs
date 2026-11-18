@@ -115,9 +115,45 @@ fn obs_stopping_counts_underruns_and_silence_goes_out() {
     assert!(last.iter().all(|&x| x == 0.0));
 }
 
+/// obs#80: until the TX thread's first pull (dlink's TX pull fills only on a ready media clock,
+/// #76) OBS's frames are not written into the FIFO and count no overflow: a device waiting for
+/// PTP lock is not dropping OBS frames. They count as `unpulled`, and the first pull then primes
+/// on fresh audio.
+#[test]
+fn frames_before_the_first_pull_count_no_overflow() {
+    let (tx_in, mut pull) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let (l, r) = obs_chunk(0);
+    // 30 chunks overflow the 0.5 s FIFO if they were written.
+    for _ in 0..30 {
+        tx_in.push(&[&l, &r], 1024);
+    }
+    assert_eq!(tx_in.counts().overflows, 0, "{:?}", tx_in.counts());
+    assert_eq!(tx_in.unpulled(), 30 * 1024);
+    // The first pull primes on what OBS pushes from then on.
+    pump(&mut pull, 2);
+    for i in 0..40 {
+        let (l, r) = obs_chunk(i * 1024);
+        tx_in.push(&[&l, &r], 1024);
+        for _ in 0..8 {
+            pump(&mut pull, 2);
+        }
+    }
+    let c = tx_in.counts();
+    assert!(!c.priming, "{c:?}");
+    assert_eq!(c.overflows, 0, "{c:?}");
+    assert_eq!(
+        tx_in.unpulled(),
+        30 * 1024,
+        "only frames before the first pull"
+    );
+}
+
+/// A TX thread that stops pulling after it started (a clock that falls out of ready) leaves OBS's
+/// frames past the FIFO counted as overflows.
 #[test]
 fn a_pump_that_does_not_read_counts_obs_s_frames_as_overflows() {
-    let (tx_in, _tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    let (tx_in, mut tx_out) = tx(1, RATE, RATE, buffer(RATE)).unwrap();
+    pump(&mut tx_out, 2);
     let (l, r) = obs_chunk(0);
     // The FIFO holds player::FIFO_S (0.5 s): 24000 frames at 48 kHz, so 30 chunks overflow it.
     for _ in 0..30 {

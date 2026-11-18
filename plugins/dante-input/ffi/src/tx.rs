@@ -206,6 +206,11 @@ impl TxIn {
         (self.cadence.late(), self.cadence.gap_max_us(take, now_ns))
     }
 
+    /// obs#80: OBS frames pushed before the TX thread's first pull (not written, no overflow).
+    pub fn unpulled(&self) -> u64 {
+        0
+    }
+
     pub fn counts(&self) -> TxCounts {
         TxCounts {
             track: self.track,

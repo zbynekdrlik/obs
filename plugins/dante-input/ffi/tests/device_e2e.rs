@@ -234,7 +234,7 @@ fn tx_pull_blocks(v: &serde_json::Value) -> u64 {
 
 /// obs#76 (dstack's contract): the TX thread fills OBS's track only while its media clock is ready;
 /// with no grandmaster and no test clock the pump free-paces, nothing is sent, and the TX pull
-/// stays idle (OBS's frames past the FIFO count as overflows). The status shows it as such.
+/// stays idle; OBS's frames are not written before the first pull and count no overflow (obs#80).
 #[test]
 fn on_a_free_clock_the_tx_pull_stays_idle() {
     let _one = ONE_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
@@ -277,6 +277,8 @@ fn on_a_free_clock_the_tx_pull_stays_idle() {
     );
     assert_eq!(st.tx_played, 0, "{line}");
     assert!(st.tx_priming, "{line}");
+    // obs#80: a device waiting for its clock is not dropping OBS frames.
+    assert_eq!(st.tx_overflows, 0, "{line}");
     assert_eq!(tx_pull_blocks(&v), 0, "{v}");
     d.stop();
 }
