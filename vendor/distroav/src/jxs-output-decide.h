@@ -66,7 +66,7 @@ static inline const char *cb_jxs_out_pace_source(uint32_t code)
 		return "start-spread";
 	case 4:
 		return "congestion";
-	case 5: /* vstack#18 (v0.1.12): a slower receiver, each frame over half its interval */
+	case 5: /* vstack#18 (v0.1.12), #23 (v0.1.15): a slower receiver, each frame over 80 % of its interval */
 		return "frame-spread";
 	default:
 		return "unknown";
