@@ -20,7 +20,11 @@
  *   - obs_source_get_audio_mixed_late_events (camera-box issue 1425's MIXED_LATE re-anchors: a member
  *     behind the frozen mix window) stays flat while steady, counts the stall's catch-up (the pusher's
  *     audio then runs behind the window), and stays 0 for the source outside every mix (its re-anchor
- *     is NOT_MIXED).
+ *     is NOT_MIXED);
+ *   - obs#96: a source whose stamps step +30 ms and stay there (inside OBS's 70 ms smoothing, so it keeps
+ *     appending while its intended landing moves) is a real placement jump: the STAMP-basis ASRC books it
+ *     once the ASRC has locked (60 s), and logs an `asrc-booking:` diagnostic line naming the source;
+ *     the steady sources log none.
  *
  * The sources are put on output channels of a running video (obs_reset_video 64x64), which makes them
  * members of the output mix: without video no view mixes audio and nothing is mixed.
@@ -52,13 +56,23 @@ static void expect(bool ok, const char *what)
 		failures++;
 }
 
+/* obs#96: the `asrc-booking:` lines logged, all and for the stepped source */
+static atomic_uint booking_lines, booking_lines_step;
+
 static void log_line(int level, const char *fmt, va_list args, void *param)
 {
 	(void)param;
-	if (level > LOG_WARNING)
-		return;
 	char line[4096];
 	vsnprintf(line, sizeof(line), fmt, args);
+	if (strncmp(line, "asrc-booking: ", 14) == 0) {
+		atomic_fetch_add(&booking_lines, 1);
+		if (strstr(line, "source 'a 30 ms stamp step'"))
+			atomic_fetch_add(&booking_lines_step, 1);
+		fprintf(stderr, "[%d] %s\n", level, line);
+		return;
+	}
+	if (level > LOG_WARNING)
+		return;
 	fprintf(stderr, "[%d] %s\n", level, line);
 }
 
@@ -84,6 +98,8 @@ struct run {
 	obs_source_t *source;
 	/* the push of this block index waits 150 ms first (0 = never) */
 	uint64_t stall_at;
+	/* from this block index on, every stamp is 30 ms later (0 = never) */
+	uint64_t step_at;
 	atomic_bool stop;
 };
 
@@ -110,7 +126,7 @@ static void *push_loop(void *param)
 		a.speakers = SPEAKERS_STEREO;
 		a.format = AUDIO_FORMAT_FLOAT_PLANAR;
 		a.samples_per_sec = 48000;
-		a.timestamp = due;
+		a.timestamp = r->step_at && k >= r->step_at ? due + 30000000ULL : due;
 		obs_source_output_audio(r->source, &a);
 	}
 	return NULL;
@@ -307,6 +323,32 @@ int main(int argc, char **argv)
 			expect(c.late_at_8s > c.late_at_3s, what);
 			snprintf(what, sizeof(what), "%s: outside every mix, no MIXED_LATE re-anchor", places[i].stall);
 			expect(c.off_late == 0, what);
+		}
+	}
+
+	/* obs#96: a real placement jump books and logs the diagnostic; the steady cases above logged none */
+	const unsigned before_step = atomic_load(&booking_lines);
+	expect(before_step == 0, "steady and stalled sources log no asrc-booking line");
+	{
+		struct run stepped = {0};
+		pthread_t t;
+		if (start_pusher(&stepped, &t, "a 30 ms stamp step", 0)) {
+			/* after the ASRC's 60 s lock (ASRC_REGRESSION_LOCK_SPAN_S) captured its setpoint: 75 s in */
+			stepped.step_at = 28125;
+			obs_scene_t *scene = obs_scene_create_private("a 30 ms stamp step");
+			if (scene)
+				obs_scene_add(scene, stepped.source);
+			obs_set_output_source(0, scene ? obs_scene_get_source(scene) : stepped.source);
+			os_sleep_ms(85000);
+			obs_set_output_source(0, NULL);
+			stop_pusher(&stepped, t);
+			obs_scene_release(scene);
+			obs_source_release(stepped.source);
+			fprintf(stderr, "a 30 ms stamp step: %u asrc-booking line(s)\n", atomic_load(&booking_lines_step));
+			expect(atomic_load(&booking_lines_step) >= 1,
+			       "a 30 ms stamp step: the ASRC books it and logs an asrc-booking line");
+		} else {
+			expect(false, "the stepped pusher starts");
 		}
 	}
 

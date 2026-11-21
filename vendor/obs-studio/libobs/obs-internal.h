@@ -1074,6 +1074,15 @@ struct obs_source {
 	double asrc_tc_prev_raw_s;      /* the previous timecode packet's pre-resample duration */
 	uint64_t asrc_tc_prev_stamp_ns; /* the previous timecode packet's stamp on the OBS monotonic clock */
 	bool asrc_tc_have_prev;         /* a previous timecode packet exists (the rate interval is defined) */
+	/* obs#96 (camera-box#1425): this packet's landing inputs, written where it is measured (under
+	 * audio_buf_mutex) for the booking diagnostic line, and how many lines this source logged */
+	uint64_t asrc_diag_audio_ts;
+	uint64_t asrc_diag_buffered_ns;
+	uint64_t asrc_diag_actual_ns;
+	uint64_t asrc_diag_intended_ns;
+	uint64_t asrc_diag_raw_ts;
+	uint32_t asrc_diag_frames;
+	uint32_t asrc_diag_logged;
 	/* camera-box issue 1425 round 2: the STAMP basis's rate point that waits one packet (raw s, master
 	 * s, due), so a following packet with no stamp advance still adds its predecessor's samples to it
 	 * (genlock_audio_asrc_rate_point). Audio thread. */

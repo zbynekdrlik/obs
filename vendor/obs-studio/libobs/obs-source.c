@@ -2574,6 +2574,39 @@ static void genlock_audio_arrival_rebase_record(obs_source_t *source, bool rebas
  * Issue 1425: a directly stamped non-genlock source (the STAMP basis) runs here too, against its OWN
  * stamp. A driver that stamps at ARRIVAL (PulseAudio, WASAPI without device timing) carries its
  * delivery timing in that stamp, so a delivery stall over the jump band reads as a placement jump. */
+/* obs#96 (camera-box#1425): on strih-snv the STAMP-basis 'ASIO zvuk' booked ~3.4 placement jumps a minute,
+ * every one ~21.3 ms (one mixer tick), with clean stamps, and paid them at 1000 ppm nonstop. One line per
+ * booking (the observation raised place_jump_count) names what the landing was made of, so a live run
+ * shows what moves it: this packet's error and the reference it was judged against (the setpoint, the
+ * smoothed error, what was owed before), its landing inputs (where it was appended: audio_ts + buffered,
+ * the intended raw-stamp landing, the raw stamp, its frames), the booked jump and the owed amount after.
+ * At most ASRC_DIAG_MAX_LINES lines a source, then one line saying further ones are not logged. */
+#define ASRC_DIAG_MAX_LINES 600u
+static void asrc_log_placement_booking(obs_source_t *source, uint32_t jumps_before, double err_ms, bool appended,
+				       double target_ms, double ema_ms, double owed_before_ms)
+{
+	if (source->asrc.place_jump_count == jumps_before || source->asrc_diag_logged > ASRC_DIAG_MAX_LINES)
+		return;
+	if (source->asrc_diag_logged++ == ASRC_DIAG_MAX_LINES) {
+		blog(LOG_INFO, "asrc-booking: source '%s': %u lines logged, further bookings are not (obs#96)",
+		     obs_source_get_name(source), ASRC_DIAG_MAX_LINES);
+		return;
+	}
+	const uint64_t now = os_gettime_ns();
+	blog(LOG_INFO,
+	     "asrc-booking: source '%s' jumps=%u booked_ms=%+.3f owed_ms=%+.3f owed_before_ms=%+.3f err_ms=%+.3f "
+	     "target_ms=%+.3f ema_ms=%+.3f appended=%d frames=%u audio_ts_age_ms=%+.3f buffered_ms=%.3f "
+	     "actual_minus_intended_ms=%+.3f intended_minus_raw_ms=%+.3f raw_age_ms=%+.3f basis=%s (obs#96)",
+	     obs_source_get_name(source), source->asrc.place_jump_count, source->asrc.last_place_jump_ms,
+	     source->asrc.step_recover_ms, owed_before_ms, err_ms, target_ms, ema_ms, appended ? 1 : 0,
+	     source->asrc_diag_frames, ((double)(int64_t)(now - source->asrc_diag_audio_ts)) / 1e6,
+	     (double)source->asrc_diag_buffered_ns / 1e6,
+	     ((double)(int64_t)(source->asrc_diag_actual_ns - source->asrc_diag_intended_ns)) / 1e6,
+	     ((double)(int64_t)(source->asrc_diag_intended_ns - source->asrc_diag_raw_ts)) / 1e6,
+	     ((double)(int64_t)(now - source->asrc_diag_raw_ts)) / 1e6,
+	     genlock_audio_asrc_basis_token(source->genlock_asrc_basis));
+}
+
 static void asrc_timecode_ingest(obs_source_t *source, uint64_t stamp_mono_ns, double err_ms, bool appended)
 {
 	const bool contiguous = appended && source->asrc_tc_have_prev;
@@ -2586,7 +2619,13 @@ static void asrc_timecode_ingest(obs_source_t *source, uint64_t stamp_mono_ns, d
 		&source->asrc_tc_pend_master_s, &source->asrc_tc_pend_due);
 	double applied_ppm = 0.0;
 	asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0);
+	/* obs#96: the reference the booking judges against, read before the observation moves it */
+	const uint32_t diag_jumps = source->asrc.place_jump_count;
+	const double diag_target_ms = source->asrc.level_target_ms;
+	const double diag_ema_ms = source->asrc.level_err_ema_ms;
+	const double diag_owed_ms = source->asrc.step_recover_ms;
 	asrc_compensator_observe_placement(&source->asrc, err_ms, source->asrc_tc_raw_s * 1000.0, !appended);
+	asrc_log_placement_booking(source, diag_jumps, err_ms, appended, diag_target_ms, diag_ema_ms, diag_owed_ms);
 	if (point.due)
 		asrc_compensator_compensate(&source->asrc, point.raw_s, point.master_s, err_ms, &applied_ppm);
 	if (!point.keep_prev_stamp)
@@ -3079,6 +3118,14 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 				genlock_audio_asrc_error_ms(genlock_place_err_ns, source->genlock_audio_slew_remaining_ns);
 			genlock_asrc_appended = push_back && source->audio_ts;
 			genlock_asrc_measured = true;
+			/* obs#96: the landing inputs, for the booking diagnostic in asrc_timecode_ingest */
+			source->asrc_diag_audio_ts = source->audio_ts;
+			source->asrc_diag_buffered_ns =
+				conv_frames_to_time(sample_rate, source->audio_input_buf[0].size / sizeof(float));
+			source->asrc_diag_actual_ns = genlock_actual_ns;
+			source->asrc_diag_intended_ns = genlock_intended_ns;
+			source->asrc_diag_raw_ts = data->timestamp;
+			source->asrc_diag_frames = in.frames;
 		}
 		if (push_back && source->audio_ts)
 			source_output_audio_push_back(source, &in);
