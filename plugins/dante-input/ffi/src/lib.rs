@@ -296,6 +296,10 @@ pub struct Feed {
     /// CI soak (FIXED 0 ms, no tone break) chunks routinely came ~80 µs after their end and every
     /// one was mixed; only libobs knows its tick's deadline.
     pub mix_probe: MixProbe,
+    /// obs#96: the feeder thread, set once it runs; the pump unparks it after each block it writes
+    /// (an atomic store and a futex wake: no lock, no allocation), so a chunk never waits for the
+    /// feeder's FEED_EVERY poll.
+    pub feeder_thread: std::sync::OnceLock<std::thread::Thread>,
 }
 
 /// obs#94: the smallest lead (a chunk's end stamp - os_gettime_ns at the hand-off), ns, of a window
@@ -468,6 +472,10 @@ impl Process for Sink {
             }
         }
         self.written += frames as u64;
+        // obs#96: hand the block to OBS now, not at the feeder's next poll
+        if let Some(t) = self.feed.feeder_thread.get() {
+            t.unpark();
+        }
     }
 }
 
@@ -756,13 +764,15 @@ impl Feeder {
     }
 }
 
-/// The feeder thread: drains every [`FEED_EVERY`] until stopped or the gate closes.
+/// The feeder thread: drains each time the pump wakes it after a block (obs#96), and at least every
+/// [`FEED_EVERY`], until stopped or the gate closes.
 fn feed_loop(mut feeder: Feeder, stop: &AtomicBool) {
+    let _ = feeder.feed.feeder_thread.set(std::thread::current());
     while !stop.load(Ordering::Acquire) {
         if feeder.drain().is_none() {
             return;
         }
-        std::thread::sleep(FEED_EVERY);
+        std::thread::park_timeout(FEED_EVERY);
     }
 }
 
@@ -980,7 +990,7 @@ impl DanteInput {
         log(
             LOG_INFO,
             &format!(
-                "dante-input start: the pump queues into a {RING_SECONDS} s ring; dante-input-obs hands it to OBS every {} ms",
+                "dante-input start: the pump queues into a {RING_SECONDS} s ring; dante-input-obs hands each block to OBS as the pump writes it (woken, obs#96), at least every {} ms",
                 FEED_EVERY.as_millis()
             ),
         );
