@@ -489,3 +489,31 @@ fn test_clock_ppm_is_test_only_and_bounded() {
         "{e}"
     );
 }
+
+/// obs#96 (camera-box#1425): `rx_stamp_margin_ms` stamps every RX chunk that much after dlink's play
+/// time, so a chunk handed to OBS up to the margin after the end of its own audio still makes the
+/// mix tick that needs it (strih-snv: up to 2.2 ms past the end, FIXED 0 ms buffering, 83 sat-out
+/// ticks in 33 min). Unset it is 0 (today's stamps, no latency change); it must be finite and
+/// within 0..=50 ms.
+#[test]
+fn rx_stamp_margin_ms_is_off_unless_set_and_bounded() {
+    let parse = |text: &str| toml::from_str::<InputConfig>(text).unwrap();
+    let cfg = parse(GOOD);
+    assert_eq!(cfg.rx_stamp_margin_ms, None);
+    assert_eq!(cfg.rx_stamp_margin_ns(), 0);
+    assert!(cfg.check(false).is_ok());
+    let cfg = parse(&format!("rx_stamp_margin_ms = 4.667\n{GOOD}"));
+    assert_eq!(cfg.rx_stamp_margin_ms, Some(4.667));
+    assert_eq!(cfg.rx_stamp_margin_ns(), 4_667_000);
+    assert!(cfg.check(false).is_ok());
+    for bad in ["-1.0", "50.5"] {
+        let e = parse(&format!("rx_stamp_margin_ms = {bad}\n{GOOD}"))
+            .check(false)
+            .unwrap_err()
+            .join("; ");
+        assert!(
+            e.contains("rx_stamp_margin_ms:") && e.contains("is not within 0..=50 ms"),
+            "{bad}: {e}"
+        );
+    }
+}

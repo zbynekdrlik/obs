@@ -99,8 +99,8 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rig-core"
-version = "0.1.17"
-source = "git+https://github.com/zbynekdrlik/vstack?tag=v0.1.17#c1f4faee9ed7ac226ad404391359b75d13c2fdb7"
+version = "0.1.19"
+source = "git+https://github.com/zbynekdrlik/vstack?tag=v0.1.19#5d5b2c7b436c02e51c1870b7596649323825d3b1"
 dependencies = [
  "libc",
  "tracing",

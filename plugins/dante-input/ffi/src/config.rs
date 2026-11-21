@@ -102,9 +102,24 @@ pub struct InputConfig {
     /// TEST ONLY (obs#57 soak, dstack#305): the device runs on the system clock skewed this many
     /// ppm (dlink `Config::test_clock_ppm`), with no PTP. Never on a production device.
     pub test_clock_ppm: Option<f64>,
+    /// obs#96 (camera-box#1425): every RX chunk is stamped this many ms after dlink's play time,
+    /// a fixed hand-off margin, so a chunk handed to OBS after the end of its own audio still makes
+    /// the mix tick that needs it (FIXED 0 ms buffering leaves a short source out of the tick and
+    /// its timeline then runs one tick late). Unset = 0 = dlink's play time itself: no latency
+    /// change. 0..=50 ms.
+    pub rx_stamp_margin_ms: Option<f64>,
 }
 
+/// obs#96: the largest `rx_stamp_margin_ms`, ms.
+pub const MAX_RX_STAMP_MARGIN_MS: f64 = 50.0;
+
 impl InputConfig {
+    /// obs#96: the RX stamp margin, ns (0 unset). Call after [`InputConfig::check`] (bounded).
+    pub fn rx_stamp_margin_ns(&self) -> i64 {
+        self.rx_stamp_margin_ms
+            .map_or(0, |ms| (ms * 1_000_000.0).round() as i64)
+    }
+
     /// Reads and checks the file at `path`. Every problem is listed.
     pub fn load(path: &Path) -> Result<InputConfig, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -161,6 +176,13 @@ impl InputConfig {
             problems.push(format!(
                 "test_clock_ppm: TEST ONLY (it takes the device off PTP); refused unless the \
                  environment sets {TEST_CLOCK_ENV}=1 (the CI soak, obs#57)"
+            ));
+        }
+        if let Some(ms) = self.rx_stamp_margin_ms
+            && !(ms.is_finite() && (0.0..=MAX_RX_STAMP_MARGIN_MS).contains(&ms))
+        {
+            problems.push(format!(
+                "rx_stamp_margin_ms: {ms} is not within 0..={MAX_RX_STAMP_MARGIN_MS} ms"
             ));
         }
         if let Some(ppm) = self.test_clock_ppm

@@ -722,3 +722,59 @@ fn late_to_mix_and_mixed_late_are_the_mix_probe_s_counts() {
     feed.mix_probe.set(None);
     assert_eq!(feed.mix_probe.read(), MixCounts::default());
 }
+
+/// obs#96 (camera-box#1425): with a stamp margin every stamped chunk reaches OBS stamped that much
+/// after dlink's play time (the hand-off margin), so a chunk handed after the end of its own audio
+/// no longer sits out the mix tick that needs it; its lead is measured to the shifted end. An
+/// unstamped chunk (stamp 0: plugin.c stamps it now) stays 0.
+#[test]
+fn a_stamp_margin_stamps_every_chunk_that_much_after_its_play_time() {
+    let seen_box = SeenBox::default();
+    let (mut sink, feeder, feed, _gate) = pair(&seen_box, 1, 1024);
+    let mut feeder = feeder.stamp_margin_ns(4_667_000);
+    // 50 ms ahead of now, so the lead is a known positive amount
+    let t0 = obs_now_ns() + 50_000_000;
+    push_at(&mut sink, 64, &[0.0; 64], t0);
+    assert_eq!(feeder.drain(), Some(64));
+    push_at(&mut sink, 64, &[0.0; 64], t0 + frames_ns(64) as i64);
+    assert_eq!(feeder.drain(), Some(64));
+    let seen = seen_box.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "two drains, two callbacks");
+    // every chunk: its play time plus the margin
+    assert_eq!(seen[0].3, t0 as u64 + 4_667_000);
+    assert_eq!(seen[1].3, t0 as u64 + frames_ns(64) + 4_667_000);
+    // the lead is to the SHIFTED end (where OBS mixes the chunk): about 50 + 1.333 + 4.667 ms ahead
+    // for the first chunk, less the test's own run time
+    let lead = feed.min_lead.take_us().expect("stamped chunks have a lead");
+    assert!((50_000..=56_000).contains(&lead), "lead {lead} us");
+
+    // without a margin the same chunk gets dlink's play time itself
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, _feed, _gate) = pair(&seen_box, 1, 1024);
+    push_at(&mut sink, 64, &[0.0; 64], t0);
+    assert_eq!(feeder.drain(), Some(64));
+    assert_eq!(seen_box.lock().unwrap()[0].3, t0 as u64);
+}
+
+/// obs#96 (camera-box#1425): the pump wakes the feeder the moment it has written a block, so a chunk
+/// no longer waits up to FEED_EVERY (2 ms) in the ring before OBS gets it (strih-snv: every status
+/// window had chunks handed over 1+ ms after the end of their own audio). The test thread stands in
+/// for the feeder: a written block unparks it at once; without the wake its park would last 10 s.
+#[test]
+fn the_pump_wakes_the_feeder_when_it_writes_a_block() {
+    let feed = Arc::new(Feed::default());
+    let (p, _c) = ring(1, 1024);
+    let (sp, _sc) = stamps(STAMP_SLOTS);
+    let mut sink = Sink::new(p, sp, 1, Arc::clone(&feed));
+    feed.feeder_thread
+        .set(std::thread::current())
+        .expect("the feeder thread is set once");
+    push_at(&mut sink, 64, &[0.0; 64], 1_000_000_000);
+    let t = Instant::now();
+    std::thread::park_timeout(Duration::from_secs(10));
+    assert!(
+        t.elapsed() < Duration::from_secs(5),
+        "the written block did not wake the feeder: parked {:?}",
+        t.elapsed()
+    );
+}
