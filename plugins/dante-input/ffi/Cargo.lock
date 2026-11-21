@@ -79,6 +79,7 @@ name = "dante-input-ffi"
 version = "0.4.56"
 dependencies = [
  "dlink",
+ "libc",
  "rtrb",
  "serde",
  "serde_json",

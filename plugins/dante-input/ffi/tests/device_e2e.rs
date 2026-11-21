@@ -86,7 +86,23 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
     // counts.
     // obs#57 (dlink v0.6.137): the gate's counters, each a count; obs#56: the TX writer's
     // cadence after them, last (0 without TX).
-    let mut rest = line.as_str();
+    // obs#94: the hand-off lead, last: the window's smallest (`none` or signed µs), then the
+    // late chunks' count.
+    let (rest, late) = line
+        .rsplit_once(" late_to_mix=")
+        .unwrap_or_else(|| panic!("late_to_mix missing at the end: {line}"));
+    assert!(
+        late.parse::<u64>().is_ok(),
+        "late_to_mix is a count: {line}"
+    );
+    let (rest, lead) = rest
+        .rsplit_once(" min_lead_us=")
+        .unwrap_or_else(|| panic!("min_lead_us missing before late_to_mix: {line}"));
+    assert!(
+        lead == "none" || lead.parse::<i64>().is_ok(),
+        "min_lead_us is none or signed µs: {line}"
+    );
+    let mut rest = rest;
     for key in [
         "tx_push_gap_max_us",
         "tx_late_pushes",

@@ -10,7 +10,7 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -249,6 +249,60 @@ pub struct Feed {
     pub gap_frames: AtomicU64,
     /// Skips the full ring had no room to fill: OBS's timeline lost their frames (obs#53).
     pub gaps_unfilled: AtomicU64,
+    /// obs#94 (camera-box#1527): the smallest lead of a stamped chunk at the hand-off to OBS (its
+    /// last sample's play time less the time now), since the status loop last took it.
+    pub min_lead: MinLead,
+    /// obs#94: stamped chunks handed to OBS at or after their last sample's play time (lead <= 0):
+    /// a FIXED 0 ms mix tick ending between the two can have left the chunk out (obs-audio.c
+    /// audio_buffer_insufficient, no log).
+    pub late_to_mix: AtomicU64,
+}
+
+/// obs#94: the smallest lead (a chunk's end stamp - os_gettime_ns at the hand-off), ns, of a window
+/// of chunks.
+/// `i64::MAX` = no stamped chunk in the window. The feeder writes it, the status loop takes it.
+#[derive(Debug)]
+pub struct MinLead(AtomicI64);
+
+impl Default for MinLead {
+    fn default() -> Self {
+        MinLead(AtomicI64::new(i64::MAX))
+    }
+}
+
+impl MinLead {
+    /// One stamped chunk's lead, ns.
+    pub fn note(&self, lead_ns: i64) {
+        self.0.fetch_min(lead_ns, Ordering::Relaxed);
+    }
+
+    /// The window's smallest lead, µs, without ending the window; `None` before a stamped chunk.
+    pub fn peek_us(&self) -> Option<i64> {
+        Self::us(self.0.load(Ordering::Relaxed))
+    }
+
+    /// The window's smallest lead, µs, and a new window; `None` with no stamped chunk in it.
+    pub fn take_us(&self) -> Option<i64> {
+        Self::us(self.0.swap(i64::MAX, Ordering::Relaxed))
+    }
+
+    fn us(ns: i64) -> Option<i64> {
+        (ns != i64::MAX).then(|| ns.div_euclid(1_000))
+    }
+}
+
+/// OBS's clock, ns: `os_gettime_ns` is CLOCK_MONOTONIC on Linux, the clock of dlink's
+/// `Block::play_at` and so of every chunk's stamp.
+pub fn obs_now_ns() -> i64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a valid out pointer; CLOCK_MONOTONIC always exists on Linux.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec)
 }
 
 /// A block's play time (dlink's `Block::play_at`, ns on OBS's clock) at its first frame's index in
@@ -610,6 +664,20 @@ impl Feeder {
                 *p = plane.as_ptr();
             }
             let ts = self.stamp(frames);
+            if ts != 0 {
+                // obs#94: how long before its LAST sample's play time this chunk reaches OBS. A
+                // mix tick needs a chunk only by its end, so a chunk handed after its first
+                // sample's time still makes the tick that ends after it (0 = no stamp: plugin.c
+                // stamps it with the time now, so it has no lead to measure).
+                let end = ts.saturating_add(self.frames_ns(frames as u64));
+                let lead = i64::try_from(end)
+                    .unwrap_or(i64::MAX)
+                    .saturating_sub(obs_now_ns());
+                self.feed.min_lead.note(lead);
+                if lead <= 0 {
+                    self.feed.late_to_mix.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             self.read += frames as u64;
             let t = Instant::now();
             // SAFETY: the planes outlive the call; the callback copies them
@@ -950,6 +1018,12 @@ fn status_of(
     st.max_obs_us = feed.max_obs_ns.load(Ordering::Relaxed) / 1_000;
     st.stamp_jumps = feed.stamp_jumps.load(Ordering::Relaxed);
     st.gaps_unfilled = feed.gaps_unfilled.load(Ordering::Relaxed);
+    st.min_lead_us = if take {
+        feed.min_lead.take_us()
+    } else {
+        feed.min_lead.peek_us()
+    };
+    st.late_to_mix = feed.late_to_mix.load(Ordering::Relaxed);
     if let Some(t) = tx {
         st.tx(t.counts());
         (st.tx_late_pushes, st.tx_push_gap_max_us) = t.cadence(take);
