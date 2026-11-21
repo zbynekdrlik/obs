@@ -13,9 +13,9 @@
 	  stamp the NDI output puts on the same frame, so the stream side's camera_box_jxs_source
 	  places it on the per-second grid exactly like `NDI 2ME PGM`.
 	- The frame goes to jxs/send-ffi, the C ABI over camera-box's own sender (src/jxs_send*): one
-	  copy into one of two reusable pictures on this thread, never a wait; with both in use the
-	  frame is dropped and counted (dropped_busy). Coding, slicing, UDP GSO and the auto bpp run on
-	  the sender's own two threads.
+	  copy into one of three reusable pictures on this thread (vstack v0.1.18, vstack#30), never a
+	  wait; with every one in use the frame is dropped and counted (dropped_busy). Coding, slicing,
+	  UDP GSO and the auto bpp run on the sender's own two threads.
 
 	The output is created by the plugin at FINISHED_LOADING (obs-websocket can start, stop and
 	configure an existing output, never create one) from <module config>/jxs-output.json, and is
