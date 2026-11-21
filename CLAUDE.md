@@ -9,3 +9,4 @@ The forked OBS. Start with `docs/HANDOVER.md`.
 - obs-websocket graphics → `.claude/rules/obs-websocket.md`
 - vlc-video (vendored) → `.claude/rules/vlc-video.md`
 - JPEG XS / the vstack pin → `.claude/rules/jxs-vstack.md`
+- libobs audio mixer (obs-audio.c lifts, mix exclusions) → `.claude/rules/libobs-audio.md`

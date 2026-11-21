@@ -9837,6 +9837,14 @@ void obs_source_set_audio_mixers(obs_source_t *source, uint32_t mixers)
 	source->audio_mixers = mixers;
 }
 
+uint64_t obs_source_get_audio_short_ticks(const obs_source_t *source)
+{
+	if (!obs_source_valid(source, "obs_source_get_audio_short_ticks"))
+		return 0;
+	/* unsigned: a 32-bit long (Windows) wraps at 2^32 instead of reading as a huge sign-extended count */
+	return (uint64_t)(unsigned long)os_atomic_load_long(&source->audio_short_ticks);
+}
+
 uint32_t obs_source_get_audio_mixers(const obs_source_t *source)
 {
 	if (!obs_source_valid(source, "obs_source_get_audio_mixers"))

@@ -1636,6 +1636,12 @@ static bool scene_audio_render(void *data, uint64_t *ts_out, struct obs_source_a
 
 			if (source_ts && (!timestamp || source_ts < timestamp))
 				timestamp = source_ts;
+		} else if (item->visible || transition_active(item->hide_transition)) {
+			/* obs#94: a heard child (visible or hiding: the same test this loop uses for the scene's
+			 * timestamp) the scene skips as pending this tick: marked here, before the early return
+			 * when every child is pending. A hidden item heard only through a queued volume action is
+			 * not marked: whether that action is due needs the timestamp this loop computes. */
+			obs_source_audio_mix_skipped(source);
 		}
 
 		item = item->next;

@@ -972,6 +972,15 @@ bool obs_transition_audio_render(obs_source_t *transition, uint64_t *ts_out, str
 		stopped = stop_audio(transition);
 	}
 
+	/* obs#94: the heard children (both while the audio still transitions after this tick's stop
+	 * decision, else the first) the transition skips as pending: marked here, past the stop and before
+	 * the min_ts gate below, which skips every child when both are pending */
+	for (size_t i = 0; i < (transition->transitioning_audio ? 2u : 1u); i++) {
+		obs_source_t *heard = transition->transition_sources[i];
+		if (heard && !obs_source_removed(heard) && heard->audio_pending)
+			obs_source_audio_mix_skipped(heard);
+	}
+
 	unlock_transition(transition);
 
 	if (min_ts) {

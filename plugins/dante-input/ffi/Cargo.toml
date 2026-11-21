@@ -1,6 +1,6 @@
 [package]
 name = "dante-input-ffi"
-version = "0.4.55"
+version = "0.4.56"
 edition = "2024"
 # Let-chains (src/lib.rs Sink::process, obs#53).
 rust-version = "1.88"
@@ -52,6 +52,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.178 (dstack#399, one dstack version across apps): v0.6.171 Stats output_gaps()/output_lost_frames() and a held output callback no longer underruns a pulled RX bridge (#307; our push-and-fill RX unchanged); v0.6.172 ASRC seed (new methods only); v0.6.176 the 8700 relay of a dasio bridge's figures; v0.6.177-178 dstack-asio only. No API break, no latency change.
 # v0.6.181 (obs#84): dstack#409 a device finds its transmitters again after its NIC is re-created (stream-snv USB reset: 23 min silent until restart); dstack#410 play_at no longer counts the RX converter delay twice (dstack: the audio reaches OBS as before, its stamp 0.625 ms earlier at 48 kHz on 96 kHz). No API change.
 dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.181" }
+# obs#94: clock_gettime(CLOCK_MONOTONIC), os_gettime_ns's clock, for the hand-off lead.
+libc = "0.2"
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

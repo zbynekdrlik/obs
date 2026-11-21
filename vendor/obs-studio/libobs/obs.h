@@ -1317,6 +1317,11 @@ EXPORT void obs_source_set_audio_mixers(obs_source_t *source, uint32_t mixers);
 /** Gets audio mixer flags */
 EXPORT uint32_t obs_source_get_audio_mixers(const obs_source_t *source);
 
+/** obs#94 (camera-box#1527): the mixing ticks this source, a member of an output mix with its audio
+ * started, sat out (its buffer short of the tick), since it was created; once a tick, 0 for a source
+ * outside the mix. Wraps at 2^32 where long is 32-bit. */
+EXPORT uint64_t obs_source_get_audio_short_ticks(const obs_source_t *source);
+
 /**
  * Increments the 'showing' reference counter to indicate that the source is
  * being shown somewhere.  If the reference counter was 0, will call the 'show'

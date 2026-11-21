@@ -1025,6 +1025,13 @@ struct obs_source {
 	/* audio */
 	bool audio_failed;
 	bool audio_pending;
+	/* obs#94 (camera-box#1527): mixing ticks this source, a member of an output mix with its audio
+	 * started, sat out: the mix skipped it as audio_pending (its buffer short of the tick) where it
+	 * mixes it (the root loop, a scene's or a transition's heard child). The skip MARKS the mixer tick
+	 * (audio_short_tick_mark), and audio_callback counts each mark once, only on a tick that mixes;
+	 * written on the audio thread, read anywhere */
+	volatile long audio_short_ticks;
+	uint64_t audio_short_tick_mark;
 	bool pending_stop;
 	bool audio_active;
 	bool user_muted;
@@ -1511,6 +1518,8 @@ extern void obs_source_video_tick(obs_source_t *source, float seconds);
 extern float obs_source_get_target_volume(obs_source_t *source, obs_source_t *target);
 extern uint64_t obs_source_get_last_async_ts(const obs_source_t *source);
 
+/* obs#94 (camera-box#1527): the mix skipped this pending source this tick: mark it (obs-audio.c) */
+extern void obs_source_audio_mix_skipped(struct obs_source *source);
 extern void obs_source_audio_render(obs_source_t *source, uint32_t mixers, size_t channels, size_t sample_rate,
 				    size_t size);
 

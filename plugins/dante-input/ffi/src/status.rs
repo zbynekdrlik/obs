@@ -103,6 +103,14 @@ pub struct Status {
     /// a late writer, OBS's audio thread, from a reader-side underrun).
     pub tx_late_pushes: u64,
     pub tx_push_gap_max_us: u64,
+    /// obs#94 (camera-box#1527): the smallest lead of a stamped RX chunk when it was handed to
+    /// OBS (the end of its audio, stamp + length, less the time now), since the last status line,
+    /// µs, signed (`none` with no stamped chunk in the window): headroom, not a verdict; and the
+    /// OBS mix's ticks that found a dante-input source's buffer short of the tick (it sat out that
+    /// tick's mix), the worst of the device's OBS sources alive now, each since it was created (0
+    /// without plugin.c's probe).
+    pub min_lead_us: Option<i64>,
+    pub late_to_mix: u64,
 }
 
 impl Status {
@@ -124,7 +132,7 @@ impl Status {
              tx_track={} tx_played={} tx_underruns={} tx_recentres={} tx_overflows={} tx_ppm={:.1} \
              tx_priming={} rx_reordered={} start_holes={} tx_resyncs={} play_at_steps={} \
              play_at_max_dev_us={} stamp_jumps={} gaps_unfilled={} tx_late_pushes={} \
-             tx_push_gap_max_us={}",
+             tx_push_gap_max_us={} min_lead_us={} late_to_mix={}",
             if self.media_clock { "media" } else { "free" },
             u8::from(self.holdover),
             self.clock_polls,
@@ -164,6 +172,9 @@ impl Status {
             self.gaps_unfilled,
             self.tx_late_pushes,
             self.tx_push_gap_max_us,
+            self.min_lead_us
+                .map_or_else(|| "none".to_string(), |v| v.to_string()),
+            self.late_to_mix,
         );
         s
     }
@@ -493,6 +504,8 @@ mod tests {
             gaps_unfilled: 25,
             tx_late_pushes: 26,
             tx_push_gap_max_us: 27,
+            min_lead_us: Some(-28),
+            late_to_mix: 29,
         };
         assert_eq!(
             st.line(),
@@ -504,7 +517,7 @@ mod tests {
              tx_track=1 tx_played=96000 tx_underruns=17 tx_recentres=18 tx_overflows=19 \
              tx_ppm=-12.5 tx_priming=0 rx_reordered=20 start_holes=21 tx_resyncs=0 \
              play_at_steps=22 play_at_max_dev_us=23 stamp_jumps=24 gaps_unfilled=25 \
-             tx_late_pushes=26 tx_push_gap_max_us=27"
+             tx_late_pushes=26 tx_push_gap_max_us=27 min_lead_us=-28 late_to_mix=29"
         );
     }
 
@@ -532,7 +545,7 @@ mod tests {
             st.line().ends_with(
                 " max_obs_us=0 wire_late=7 wake_delay_us=900 wake_delay_peak_us=4000 \
                  tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
-                 rx_reordered=0 start_holes=0 tx_resyncs=0 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0"
+                 rx_reordered=0 start_holes=0 tx_resyncs=0 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0 min_lead_us=none late_to_mix=0"
             ),
             "{}",
             st.line()
@@ -621,7 +634,7 @@ mod tests {
         let line = st.line();
         assert!(line.contains(" rx_loss=16 rx_gaps=1 rx_late=3 "), "{line}");
         assert!(
-            line.ends_with(" rx_reordered=10 start_holes=0 tx_resyncs=0 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0"),
+            line.ends_with(" rx_reordered=10 start_holes=0 tx_resyncs=0 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0 min_lead_us=none late_to_mix=0"),
             "{line}"
         );
     }
@@ -649,7 +662,7 @@ mod tests {
         let line = st.line();
         assert!(line.contains(" rx_holes=12 rx_written_late=4 "), "{line}");
         assert!(
-            line.ends_with(" rx_reordered=0 start_holes=3424 tx_resyncs=0 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0"),
+            line.ends_with(" rx_reordered=0 start_holes=3424 tx_resyncs=0 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0 min_lead_us=none late_to_mix=0"),
             "{line}"
         );
     }
@@ -660,7 +673,7 @@ mod tests {
         let mut st = Status::default();
         assert!(st.line().ends_with(
             "tx_track=0 tx_played=0 tx_underruns=0 tx_recentres=0 tx_overflows=0 tx_ppm=0.0 tx_priming=0 \
-             rx_reordered=0 start_holes=0 tx_resyncs=0 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0"
+             rx_reordered=0 start_holes=0 tx_resyncs=0 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0 min_lead_us=none late_to_mix=0"
         ));
         st.tx(crate::tx::TxCounts {
             track: 1,
@@ -675,7 +688,7 @@ mod tests {
         assert!(
             st.line().ends_with(
                 "tx_track=1 tx_played=4800 tx_underruns=2 tx_recentres=1 tx_overflows=3 tx_ppm=4.3 tx_priming=1 \
-                 rx_reordered=0 start_holes=0 tx_resyncs=2 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0"
+                 rx_reordered=0 start_holes=0 tx_resyncs=2 play_at_steps=0 play_at_max_dev_us=0 stamp_jumps=0 gaps_unfilled=0 tx_late_pushes=0 tx_push_gap_max_us=0 min_lead_us=none late_to_mix=0"
             ),
             "{}",
             st.line()

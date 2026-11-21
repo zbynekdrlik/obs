@@ -18,4 +18,4 @@ description = "Regression guards over the vendored OBS, DistroAV and plugin sour
 tempfile = "3.9"
 # obs#62: vstack's rig-core, the Rust authority of the vendored C genlock twins (the parity tests).
 # Its tag must equal vstack.pin's (vstack_pin_and_rig_core_tag_agree checks it).
-rig-core = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.17" }
+rig-core = { git = "https://github.com/zbynekdrlik/vstack", tag = "v0.1.18" }

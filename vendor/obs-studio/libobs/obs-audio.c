@@ -533,6 +533,17 @@ static inline bool genlock_mix_source_is_member(const struct obs_source *source)
 	return genlock_mix_is_member(source->genlock_mix_tick, genlock_mix_tick_now);
 }
 
+/* obs#94 (camera-box#1527): the mix skipped `source` as audio_pending where it mixes it (a scene's or a
+ * transition's heard child, the root loop; audio thread). MARK it for this mixer tick when it is a member
+ * of an output mix whose audio has started; audio_callback counts the marks once, after this tick's
+ * buffering decision, and only when the tick mixes (a buffering wait mixes nothing, so nothing is left
+ * out). A pending flag set after the source was already mixed (calc_min_ts) is never read here. */
+void obs_source_audio_mix_skipped(struct obs_source *source)
+{
+	if (source && source->audio_ts && !source->info.audio_render && genlock_mix_source_is_member(source))
+		source->audio_short_tick_mark = genlock_mix_tick_now;
+}
+
 /* audio_callback, right after the output mixes' active trees are in the render order and before the
  * catch-all loop adds every other audio source: advance the mixer tick and mark that render order as
  * the mix. */
@@ -1089,8 +1100,10 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 		for (size_t i = 0; i < audio->root_nodes.num; i++) {
 			obs_source_t *source = audio->root_nodes.array[i];
 
-			if (source->audio_pending)
+			if (source->audio_pending) {
+				obs_source_audio_mix_skipped(source);
 				continue;
+			}
 
 			pthread_mutex_lock(&source->audio_buf_mutex);
 
@@ -1098,6 +1111,15 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 				mix_audio(mixes, source, channels, sample_rate, &ts);
 
 			pthread_mutex_unlock(&source->audio_buf_mutex);
+		}
+
+		/* obs#94: this tick mixes; every source the mix skipped as pending (marked in the render
+		 * loop's scene and transition children and in the root loop above) sat it out: count each
+		 * once (render_order holds each source once) */
+		for (size_t i = 0; i < audio->render_order.num; i++) {
+			obs_source_t *source = audio->render_order.array[i];
+			if (source->audio_short_tick_mark == genlock_mix_tick_now)
+				os_atomic_inc_long(&source->audio_short_ticks);
 		}
 	}
 
