@@ -9841,7 +9841,8 @@ uint64_t obs_source_get_audio_short_ticks(const obs_source_t *source)
 {
 	if (!obs_source_valid(source, "obs_source_get_audio_short_ticks"))
 		return 0;
-	return (uint64_t)os_atomic_load_long(&source->audio_short_ticks);
+	/* unsigned: a 32-bit long (Windows) wraps at 2^32 instead of reading as a huge sign-extended count */
+	return (uint64_t)(unsigned long)os_atomic_load_long(&source->audio_short_ticks);
 }
 
 uint32_t obs_source_get_audio_mixers(const obs_source_t *source)
@@ -10418,9 +10419,6 @@ static inline void process_audio_source_tick(obs_source_t *source, uint32_t mixe
 
 	if (source->audio_input_buf[0].size < size) {
 		source->audio_pending = true;
-		/* obs#94: left out of this tick's mix for want of audio (once per tick: the render order
-		 * holds each source once, and a source with no audio_ts yet returned before this) */
-		os_atomic_inc_long(&source->audio_short_ticks);
 		pthread_mutex_unlock(&source->audio_buf_mutex);
 		return;
 	}

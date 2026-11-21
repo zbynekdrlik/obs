@@ -109,9 +109,9 @@ static void on_audio(void *opaque, const float *const *planes, uint32_t channels
 		     frames, channels, rate, n);
 }
 
-/* obs#94 (camera-box#1527): the device's status thread, once a status line. The OBS mix's ticks that
- * found a dante_input source's buffer short of the tick (it sat out that tick's mix, no log in libobs),
- * the worst of the sources. obs_source_get_audio_short_ticks is an atomic read: no OBS lock is taken
+/* obs#94 (camera-box#1527): the device's status thread, once a status line. The OBS mix's ticks a
+ * dante_input source sat out (its buffer short of the tick, no log in libobs), the worst of the sources
+ * alive now: a source that is destroyed takes its count with it. obs_source_get_audio_short_ticks is an atomic read: no OBS lock is taken
  * under sources_mutex. */
 static uint64_t mix_short_ticks(void *opaque)
 {

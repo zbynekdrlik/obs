@@ -1025,8 +1025,9 @@ struct obs_source {
 	/* audio */
 	bool audio_failed;
 	bool audio_pending;
-	/* obs#94 (camera-box#1527): ticks whose render found this source's buffer short of the tick, so
-	 * it sat out that tick's mix (audio_pending); written on the audio thread, read anywhere */
+	/* obs#94 (camera-box#1527): mixing ticks this source, a member of an output mix with its audio
+	 * started, sat out (audio_pending after the tick's last render: its buffer short of the tick);
+	 * counted once a tick in audio_callback, written on the audio thread, read anywhere */
 	volatile long audio_short_ticks;
 	bool pending_stop;
 	bool audio_active;

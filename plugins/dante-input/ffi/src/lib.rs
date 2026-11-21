@@ -89,7 +89,7 @@ pub type LogCb = unsafe extern "C" fn(level: c_int, msg: *const c_char);
 
 /// obs#94 (camera-box#1527): the mix probe plugin.c hands the device: the OBS mix's count of ticks
 /// that found a dante-input source's buffer short of the tick (libobs
-/// `obs_source_get_audio_short_ticks`, the worst of the device's sources), since the start.
+/// `obs_source_get_audio_short_ticks`), the worst of the device's sources alive now.
 pub type MixProbeCb = unsafe extern "C" fn(opaque: *mut c_void) -> u64;
 
 /// The probe and its `opaque` (as an address: the status thread calls it, the plugin keeps it valid

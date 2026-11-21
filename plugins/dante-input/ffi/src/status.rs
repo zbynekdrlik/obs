@@ -107,7 +107,8 @@ pub struct Status {
     /// OBS (the end of its audio, stamp + length, less the time now), since the last status line,
     /// µs, signed (`none` with no stamped chunk in the window): headroom, not a verdict; and the
     /// OBS mix's ticks that found a dante-input source's buffer short of the tick (it sat out that
-    /// tick's mix), since the start, the worst of the device's sources (0 without plugin.c's probe).
+    /// tick's mix), the worst of the device's OBS sources alive now, each since it was created (0
+    /// without plugin.c's probe).
     pub min_lead_us: Option<i64>,
     pub late_to_mix: u64,
 }

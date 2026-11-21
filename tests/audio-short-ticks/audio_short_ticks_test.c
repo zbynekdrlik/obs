@@ -1,17 +1,25 @@
-/* obs#94 (camera-box#1527): libobs counts, per source, the audio ticks whose render found the source's
- * buffer short of the tick (process_audio_source_tick: audio_pending, the source sits out that tick's
- * mix, no log). stream-snv runs FIXED 0 ms audio buffering, where a source that falls short of a tick
- * is silently left out; dante-input puts this count on its status line (late_to_mix). Real libobs:
- * a source pushes 128-frame blocks at 48 kHz, each 20 ms before its stamp (the soak's tone lead),
- * from its own thread:
+/* obs#94 (camera-box#1527): libobs counts, per source, the mixing ticks a member of an output mix with
+ * its audio started sat out (audio_pending after the tick's last render: its buffer short of the tick;
+ * the mix skips it with no log), once a tick in audio_callback. stream-snv runs FIXED 0 ms audio
+ * buffering, where such a source is silently left out; dante-input puts this count on its status line
+ * (late_to_mix). The test runs that plan too: HOME is a temp dir whose .camera-box/genlock-audio-buffering-ms
+ * says 0 (the box FIXED plan, the mix never grows). Under OBS's default dynamic buffering a starved
+ * source grows the mix's buffering instead (a buffering wait, nothing mixed) and is never left out.
+ * Real libobs: sources push 128-frame blocks at 48 kHz, each 2 ticks (45 ms) before its
+ * stamp, from their own threads:
  *
- *   - steady pushes: no short tick once the mix runs (counted from 3 s in to 8 s; the first tick
- *     after a source's first audio can count one, before the mix has settled on it);
- *   - the pusher stops for 150 ms and then catches up: the source's buffer runs dry, and at least one
- *     tick counts it short (so the count is shown able to rise);
- *   - a source on the mix that never pushed audio counts 0 (no audio_ts: never short, only silent).
+ *   - steady pushes on the mix: no short tick once the mix runs (counted from 3 s in to 8 s; the
+ *     first tick after a source's first audio can count one, before the mix has settled on it);
+ *   - the pusher on the mix stops for 150 ms and then catches up: its buffer runs dry, and it counts
+ *     at least one and at most 12 short ticks (150 ms is ~7 ticks; once a tick, never twice);
+ *   - a source outside every mix that stalls the same way counts 0 (rendered for its meters, never
+ *     mixed, so never left out);
+ *   - a source on the mix that never pushed audio counts 0 (no audio_ts: silent, not short).
  *
- *   audio-short-ticks-test
+ * The sources are put on output channels of a running video (obs_reset_video 64x64), which makes them
+ * members of the output mix: without video no view mixes audio and nothing is mixed.
+ *
+ *   audio-short-ticks-test <libobs data dir>   (the SDK's share/obs/libobs/, which holds the effects)
  *
  * Exit 0 = every check held. */
 
@@ -24,7 +32,9 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static int failures;
 
@@ -71,7 +81,7 @@ struct run {
 };
 
 #define BLOCK 128ULL
-#define LEAD_NS 20000000ULL
+#define LEAD_NS 45000000ULL
 
 static void *push_loop(void *param)
 {
@@ -99,49 +109,98 @@ static void *push_loop(void *param)
 	return NULL;
 }
 
-/* One case of 8 s: the pusher's short ticks at 3 s and at 8 s, and the silent source's at 8 s. */
-static bool run_case(const char *name, uint64_t stall_at, uint64_t *at_3s, uint64_t *at_8s, uint64_t *silent)
+struct counts {
+	uint64_t at_3s, at_8s; /* the pusher on the mix */
+	uint64_t off_at_3s, off_at_8s; /* the same pusher outside every mix */
+	uint64_t silent; /* a source on the mix that never pushed */
+};
+
+static bool start_pusher(struct run *r, pthread_t *thread, const char *name, uint64_t stall_at)
 {
-	struct run r = {0};
-	r.stall_at = stall_at;
-	atomic_init(&r.stop, false);
-	r.source = obs_source_create("short_tick_pusher", name, NULL, NULL);
-	obs_source_t *quiet = obs_source_create("short_tick_pusher", "never pushes", NULL, NULL);
-	if (!r.source || !quiet) {
-		expect(false, "the sources are created");
-		obs_source_release(r.source);
-		obs_source_release(quiet);
+	r->stall_at = stall_at;
+	atomic_init(&r->stop, false);
+	r->source = obs_source_create("short_tick_pusher", name, NULL, NULL);
+	if (!r->source)
+		return false;
+	if (pthread_create(thread, NULL, push_loop, r) != 0) {
+		obs_source_release(r->source);
+		r->source = NULL;
 		return false;
 	}
-	obs_set_output_source(0, r.source);
-	obs_set_output_source(1, quiet);
-	pthread_t thread;
-	const bool started = pthread_create(&thread, NULL, push_loop, &r) == 0;
-	if (started) {
-		os_sleep_ms(3000);
-		*at_3s = obs_source_get_audio_short_ticks(r.source);
-		os_sleep_ms(5000);
-		*at_8s = obs_source_get_audio_short_ticks(r.source);
-		*silent = obs_source_get_audio_short_ticks(quiet);
-		atomic_store(&r.stop, true);
-		pthread_join(thread, NULL);
-	}
-	obs_set_output_source(0, NULL);
-	obs_set_output_source(1, NULL);
-	obs_source_release(r.source);
-	obs_source_release(quiet);
-	if (!started) {
-		expect(false, "the pusher thread starts");
-		return false;
-	}
-	fprintf(stderr, "%s: short ticks %llu at 3 s, %llu at 8 s; the silent source %llu\n", name,
-		(unsigned long long)*at_3s, (unsigned long long)*at_8s, (unsigned long long)*silent);
 	return true;
 }
 
-int main(void)
+static void stop_pusher(struct run *r, pthread_t thread)
 {
+	atomic_store(&r->stop, true);
+	pthread_join(thread, NULL);
+}
+
+/* One case of 8 s: the short ticks at 3 s and at 8 s. */
+static bool run_case(const char *name, uint64_t stall_at, struct counts *c)
+{
+	struct run mixed = {0}, off = {0};
+	pthread_t t_mixed, t_off;
+	obs_source_t *quiet = obs_source_create("short_tick_pusher", "never pushes", NULL, NULL);
+	const bool ok_mixed = start_pusher(&mixed, &t_mixed, name, stall_at);
+	const bool ok_off = start_pusher(&off, &t_off, "outside every mix", stall_at);
+	const bool ok = quiet && ok_mixed && ok_off;
+	if (ok) {
+		obs_set_output_source(0, mixed.source);
+		obs_set_output_source(1, quiet);
+		os_sleep_ms(3000);
+		c->at_3s = obs_source_get_audio_short_ticks(mixed.source);
+		c->off_at_3s = obs_source_get_audio_short_ticks(off.source);
+		os_sleep_ms(5000);
+		c->at_8s = obs_source_get_audio_short_ticks(mixed.source);
+		c->off_at_8s = obs_source_get_audio_short_ticks(off.source);
+		c->silent = obs_source_get_audio_short_ticks(quiet);
+		obs_set_output_source(0, NULL);
+		obs_set_output_source(1, NULL);
+	}
+	if (ok_mixed) {
+		stop_pusher(&mixed, t_mixed);
+		obs_source_release(mixed.source);
+	}
+	if (ok_off) {
+		stop_pusher(&off, t_off);
+		obs_source_release(off.source);
+	}
+	obs_source_release(quiet);
+	if (!ok) {
+		expect(false, "the sources and their pushers start");
+		return false;
+	}
+	fprintf(stderr,
+		"%s: on the mix %llu at 3 s, %llu at 8 s; outside every mix %llu, %llu; the silent source %llu\n",
+		name, (unsigned long long)c->at_3s, (unsigned long long)c->at_8s, (unsigned long long)c->off_at_3s,
+		(unsigned long long)c->off_at_8s, (unsigned long long)c->silent);
+	return true;
+}
+
+int main(int argc, char **argv)
+{
+	if (argc != 2) {
+		fprintf(stderr, "usage: audio-short-ticks-test <libobs data dir>\n");
+		return 2;
+	}
 	base_set_log_handler(log_line, NULL);
+	/* the box FIXED plan at 0 ms, as stream-snv (obs.c genlock_audio_buffering_read_box_ms) */
+	char home[] = "/tmp/audio-short-ticks-XXXXXX";
+	char path[256];
+	if (!mkdtemp(home)) {
+		fprintf(stderr, "FAIL: mkdtemp\n");
+		return 1;
+	}
+	snprintf(path, sizeof(path), "%s/.camera-box", home);
+	mkdir(path, 0700);
+	snprintf(path, sizeof(path), "%s/.camera-box/genlock-audio-buffering-ms", home);
+	FILE *f = fopen(path, "w");
+	if (!f || fputs("0\n", f) < 0 || fclose(f) != 0) {
+		fprintf(stderr, "FAIL: cannot write %s\n", path);
+		return 1;
+	}
+	setenv("HOME", home, 1);
 	if (!obs_startup("en-US", NULL, NULL)) {
 		fprintf(stderr, "FAIL: obs_startup\n");
 		return 1;
@@ -150,6 +209,26 @@ int main(void)
 	ai.samples_per_sec = 48000;
 	ai.speakers = SPEAKERS_STEREO;
 	expect(obs_reset_audio(&ai), "obs_reset_audio 48 kHz stereo");
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+	obs_add_data_path(argv[1]);
+#pragma GCC diagnostic pop
+	struct obs_video_info ovi = {0};
+	ovi.graphics_module = "libobs-opengl";
+	ovi.fps_num = 30;
+	ovi.fps_den = 1;
+	ovi.base_width = ovi.output_width = 64;
+	ovi.base_height = ovi.output_height = 64;
+	ovi.output_format = VIDEO_FORMAT_NV12;
+	ovi.gpu_conversion = true;
+	ovi.colorspace = VIDEO_CS_709;
+	ovi.range = VIDEO_RANGE_PARTIAL;
+	ovi.scale_type = OBS_SCALE_BICUBIC;
+	if (obs_reset_video(&ovi) != OBS_VIDEO_SUCCESS) {
+		fprintf(stderr, "FAIL: obs_reset_video 64x64 (the output mix)\n");
+		obs_shutdown();
+		return 1;
+	}
 
 	struct obs_source_info info = {0};
 	info.id = "short_tick_pusher";
@@ -162,15 +241,20 @@ int main(void)
 
 	expect(obs_source_get_audio_short_ticks(NULL) == 0, "a NULL source reads 0");
 
-	uint64_t at_3s = 0, at_8s = 0, silent = 0;
-	if (run_case("steady pushes", 0, &at_3s, &at_8s, &silent)) {
-		expect(at_8s == at_3s, "steady pushes: no short tick from 3 s to 8 s");
-		expect(silent == 0, "steady case: a source that never pushed counts no short tick");
+	struct counts c = {0};
+	if (run_case("steady pushes", 0, &c)) {
+		expect(c.at_8s == c.at_3s, "steady pushes: no short tick from 3 s to 8 s");
+		expect(c.off_at_8s == 0, "steady pushes: a source outside every mix counts no short tick");
+		expect(c.silent == 0, "steady pushes: a source that never pushed counts no short tick");
 	}
 	/* block 1500 = 4 s in: inside the 3-8 s window */
-	if (run_case("a 150 ms push stall", 1500, &at_3s, &at_8s, &silent)) {
-		expect(at_8s > at_3s, "a 150 ms push stall: the dry buffer counts short ticks");
-		expect(silent == 0, "stall case: a source that never pushed counts no short tick");
+	memset(&c, 0, sizeof(c));
+	if (run_case("a 150 ms push stall", 1500, &c)) {
+		const uint64_t rise = c.at_8s - c.at_3s;
+		expect(rise >= 1, "a 150 ms push stall: the dry buffer counts short ticks");
+		expect(rise <= 12, "a 150 ms push stall: at most 12 short ticks (~7 ticks dry, once a tick)");
+		expect(c.off_at_8s == 0, "a 150 ms push stall outside every mix counts no short tick");
+		expect(c.silent == 0, "a 150 ms push stall: a source that never pushed counts no short tick");
 	}
 
 	obs_shutdown();

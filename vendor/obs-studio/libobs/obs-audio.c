@@ -1086,6 +1086,17 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	/* ------------------------------------------------ */
 	/* mix audio */
 	if (!audio->buffering_wait_ticks) {
+		/* obs#94 (camera-box#1527): once a tick, after every render and re-render above, each member of
+		 * the mix whose audio has started and is still pending sits out this tick's mix (its parent or
+		 * the root loop skips it), with no log: count it per source. A source outside the mix, one not
+		 * started yet (audio_ts 0) and a tick that mixes nothing (buffering wait) count nothing. */
+		for (size_t i = 0; i < audio->render_order.num; i++) {
+			obs_source_t *source = audio->render_order.array[i];
+			if (source->audio_pending && source->audio_ts && !source->info.audio_render &&
+			    genlock_mix_source_is_member(source))
+				os_atomic_inc_long(&source->audio_short_ticks);
+		}
+
 		for (size_t i = 0; i < audio->root_nodes.num; i++) {
 			obs_source_t *source = audio->root_nodes.array[i];
 
