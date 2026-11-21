@@ -1636,6 +1636,10 @@ static bool scene_audio_render(void *data, uint64_t *ts_out, struct obs_source_a
 
 			if (source_ts && (!timestamp || source_ts < timestamp))
 				timestamp = source_ts;
+		} else if (item->visible || transition_active(item->hide_transition)) {
+			/* obs#94: a heard child the scene skips as pending this tick (counted here, before the
+			 * early return when every child is pending) */
+			obs_source_audio_mix_skipped(source);
 		}
 
 		item = item->next;

@@ -2,11 +2,12 @@
  * its audio started sat out (audio_pending after the tick's last render: its buffer short of the tick;
  * the mix skips it with no log), once a tick in audio_callback. stream-snv runs FIXED 0 ms audio
  * buffering, where such a source is silently left out; dante-input puts this count on its status line
- * (late_to_mix). The test runs that plan too: HOME is a temp dir whose .camera-box/genlock-audio-buffering-ms
+ * (late_to_mix). It counts where the mix skips the source (the root loop, a scene's or a transition's
+ * child loop), so a source mixed through a scene (as dante-input is) counts the same. The test runs that plan too: HOME is a temp dir whose .camera-box/genlock-audio-buffering-ms
  * says 0 (the box FIXED plan, the mix never grows). Under OBS's default dynamic buffering a starved
  * source grows the mix's buffering instead (a buffering wait, nothing mixed) and is never left out.
- * Real libobs: sources push 128-frame blocks at 48 kHz, each 2 ticks (45 ms) before its
- * stamp, from their own threads:
+ * Real libobs: sources push 128-frame blocks at 48 kHz, each 45 ms (about two 21.3 ms
+ * ticks) before its stamp, from their own threads:
  *
  *   - steady pushes on the mix: no short tick once the mix runs (counted from 3 s in to 8 s; the
  *     first tick after a source's first audio can count one, before the mix has settled on it);
@@ -14,7 +15,8 @@
  *     at least one and at most 12 short ticks (150 ms is ~7 ticks; once a tick, never twice);
  *   - a source outside every mix that stalls the same way counts 0 (rendered for its meters, never
  *     mixed, so never left out);
- *   - a source on the mix that never pushed audio counts 0 (no audio_ts: silent, not short).
+ *   - a source on the mix that never pushed audio counts 0 (no audio_ts: silent, not short);
+ *   - the same steady and stalled pushes from inside a scene on the mix count the same (0; 1..12).
  *
  * The sources are put on output channels of a running video (obs_reset_video 64x64), which makes them
  * members of the output mix: without video no view mixes audio and nothing is mixed.
@@ -35,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static int failures;
 
@@ -137,7 +140,7 @@ static void stop_pusher(struct run *r, pthread_t thread)
 }
 
 /* One case of 8 s: the short ticks at 3 s and at 8 s. */
-static bool run_case(const char *name, uint64_t stall_at, struct counts *c)
+static bool run_case(const char *name, uint64_t stall_at, bool in_scene, struct counts *c)
 {
 	struct run mixed = {0}, off = {0};
 	pthread_t t_mixed, t_off;
@@ -145,8 +148,15 @@ static bool run_case(const char *name, uint64_t stall_at, struct counts *c)
 	const bool ok_mixed = start_pusher(&mixed, &t_mixed, name, stall_at);
 	const bool ok_off = start_pusher(&off, &t_off, "outside every mix", stall_at);
 	const bool ok = quiet && ok_mixed && ok_off;
-	if (ok) {
-		obs_set_output_source(0, mixed.source);
+	obs_scene_t *scene = NULL;
+	if (ok && in_scene) {
+		scene = obs_scene_create_private(name);
+		if (scene)
+			obs_scene_add(scene, mixed.source);
+	}
+	const bool scene_made = scene != NULL;
+	if (ok && (!in_scene || scene)) {
+		obs_set_output_source(0, in_scene ? obs_scene_get_source(scene) : mixed.source);
 		obs_set_output_source(1, quiet);
 		os_sleep_ms(3000);
 		c->at_3s = obs_source_get_audio_short_ticks(mixed.source);
@@ -158,15 +168,22 @@ static bool run_case(const char *name, uint64_t stall_at, struct counts *c)
 		obs_set_output_source(0, NULL);
 		obs_set_output_source(1, NULL);
 	}
-	if (ok_mixed) {
+	if (ok_mixed)
 		stop_pusher(&mixed, t_mixed);
+	/* the scene holds its own ref on the pusher: release it first */
+	obs_scene_release(scene);
+	scene = NULL;
+	if (ok_mixed)
 		obs_source_release(mixed.source);
-	}
 	if (ok_off) {
 		stop_pusher(&off, t_off);
 		obs_source_release(off.source);
 	}
 	obs_source_release(quiet);
+	if (in_scene && ok && !scene_made) {
+		expect(false, "the scene is created");
+		return false;
+	}
 	if (!ok) {
 		expect(false, "the sources and their pushers start");
 		return false;
@@ -186,8 +203,10 @@ int main(int argc, char **argv)
 	}
 	base_set_log_handler(log_line, NULL);
 	/* the box FIXED plan at 0 ms, as stream-snv (obs.c genlock_audio_buffering_read_box_ms) */
-	char home[] = "/tmp/audio-short-ticks-XXXXXX";
-	char path[256];
+	const char *tmp = getenv("TMPDIR");
+	char home[512];
+	char path[600];
+	snprintf(home, sizeof(home), "%s/audio-short-ticks-XXXXXX", tmp && *tmp ? tmp : "/tmp");
 	if (!mkdtemp(home)) {
 		fprintf(stderr, "FAIL: mkdtemp\n");
 		return 1;
@@ -241,23 +260,44 @@ int main(int argc, char **argv)
 
 	expect(obs_source_get_audio_short_ticks(NULL) == 0, "a NULL source reads 0");
 
-	struct counts c = {0};
-	if (run_case("steady pushes", 0, &c)) {
-		expect(c.at_8s == c.at_3s, "steady pushes: no short tick from 3 s to 8 s");
-		expect(c.off_at_8s == 0, "steady pushes: a source outside every mix counts no short tick");
-		expect(c.silent == 0, "steady pushes: a source that never pushed counts no short tick");
-	}
-	/* block 1500 = 4 s in: inside the 3-8 s window */
-	memset(&c, 0, sizeof(c));
-	if (run_case("a 150 ms push stall", 1500, &c)) {
-		const uint64_t rise = c.at_8s - c.at_3s;
-		expect(rise >= 1, "a 150 ms push stall: the dry buffer counts short ticks");
-		expect(rise <= 12, "a 150 ms push stall: at most 12 short ticks (~7 ticks dry, once a tick)");
-		expect(c.off_at_8s == 0, "a 150 ms push stall outside every mix counts no short tick");
-		expect(c.silent == 0, "a 150 ms push stall: a source that never pushed counts no short tick");
+	static const struct {
+		const char *steady, *stall;
+		bool in_scene;
+	} places[] = {
+		{"steady pushes", "a 150 ms push stall", false},
+		{"steady pushes in a scene", "a 150 ms push stall in a scene", true},
+	};
+	for (size_t i = 0; i < sizeof(places) / sizeof(places[0]); i++) {
+		char what[200];
+		struct counts c = {0};
+		if (run_case(places[i].steady, 0, places[i].in_scene, &c)) {
+			snprintf(what, sizeof(what), "%s: no short tick from 3 s to 8 s", places[i].steady);
+			expect(c.at_8s == c.at_3s, what);
+			snprintf(what, sizeof(what), "%s: a source outside every mix counts none", places[i].steady);
+			expect(c.off_at_8s == 0, what);
+			snprintf(what, sizeof(what), "%s: a source that never pushed counts none", places[i].steady);
+			expect(c.silent == 0, what);
+		}
+		/* block 1500 = 4 s in: inside the 3-8 s window */
+		memset(&c, 0, sizeof(c));
+		if (run_case(places[i].stall, 1500, places[i].in_scene, &c)) {
+			const uint64_t rise = c.at_8s - c.at_3s;
+			snprintf(what, sizeof(what), "%s: the dry buffer counts short ticks", places[i].stall);
+			expect(rise >= 1, what);
+			snprintf(what, sizeof(what), "%s: at most 12 (~7 ticks dry, once a tick)", places[i].stall);
+			expect(rise <= 12, what);
+			snprintf(what, sizeof(what), "%s: the same stall outside every mix counts none", places[i].stall);
+			expect(c.off_at_8s == 0, what);
+			snprintf(what, sizeof(what), "%s: a source that never pushed counts none", places[i].stall);
+			expect(c.silent == 0, what);
+		}
 	}
 
 	obs_shutdown();
+	unlink(path);
+	snprintf(path, sizeof(path), "%s/.camera-box", home);
+	rmdir(path);
+	rmdir(home);
 	if (failures)
 		fprintf(stderr, "%d check(s) failed\n", failures);
 	else

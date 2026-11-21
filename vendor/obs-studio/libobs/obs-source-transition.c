@@ -879,6 +879,8 @@ static void process_audio(obs_source_t *transition, obs_source_t *child, struct 
 	uint64_t ts;
 	size_t pos;
 
+	if (child && child->audio_pending)
+		obs_source_audio_mix_skipped(child); /* obs#94 */
 	if (!valid)
 		return;
 
