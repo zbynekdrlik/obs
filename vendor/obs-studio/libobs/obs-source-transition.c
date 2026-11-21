@@ -956,14 +956,6 @@ bool obs_transition_audio_render(obs_source_t *transition, uint64_t *ts_out, str
 
 	min_ts = calc_min_ts(sources);
 
-	/* obs#94: the heard children (both while the audio transitions, else the first) the transition
-	 * skips as pending this tick: marked before the min_ts gate, which skips every child when both are
-	 * pending */
-	for (size_t i = 0; i < (transition->transitioning_audio ? 2u : 1u); i++) {
-		if (sources[i] && sources[i]->audio_pending)
-			obs_source_audio_mix_skipped(sources[i]);
-	}
-
 	if (min_ts) {
 		t = calc_time(transition, min_ts);
 
@@ -978,6 +970,15 @@ bool obs_transition_audio_render(obs_source_t *transition, uint64_t *ts_out, str
 
 	} else if (!transition->transitioning_video && transition->transitioning_audio) {
 		stopped = stop_audio(transition);
+	}
+
+	/* obs#94: the heard children (both while the audio still transitions after this tick's stop
+	 * decision, else the first) the transition skips as pending: marked here, past the stop and before
+	 * the min_ts gate below, which skips every child when both are pending */
+	for (size_t i = 0; i < (transition->transitioning_audio ? 2u : 1u); i++) {
+		obs_source_t *heard = transition->transition_sources[i];
+		if (heard && !obs_source_removed(heard) && heard->audio_pending)
+			obs_source_audio_mix_skipped(heard);
 	}
 
 	unlock_transition(transition);
