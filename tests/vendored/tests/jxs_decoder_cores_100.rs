@@ -166,7 +166,11 @@ fn each_source_pins_its_decoder_threads_to_its_cpulist() {
         run.status.code()
     );
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2, "obs#100: one INFO and one WARNING line expected:\n{stdout}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "obs#100: one INFO and one WARNING line expected:\n{stdout}"
+    );
     assert!(
         lines[0].starts_with("[300] jxs-source 'Cam 1': decoder threads on cores 8-11"),
         "obs#100: {}",
