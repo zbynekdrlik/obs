@@ -26,6 +26,10 @@ flows_port = 4455
 #                                  # per-block play time, obs#53) or "count" (a sample count from
 #                                  # the first play time; for the dstack#303 bisect only, obs#56;
 #                                  # gap fills and timing warnings stay on)
+# rx_stamp_margin_ms = 4.667       # obs#96: stamp every RX chunk this much after dlink's play time
+#                                  # (a hand-off margin), so OBS's FIXED 0 ms mix never leaves a
+#                                  # chunk handed after its end out of a tick; unset = 0 = no
+#                                  # latency change; 0..=50; a constant shift of the Dante audio
 
 # One subscription per RX channel; each names its own transmitter, so channels from two TX
 # devices are fine.

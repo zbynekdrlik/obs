@@ -497,6 +497,8 @@ pub struct Feeder {
     unfilled_logged: u64,
     /// obs#56: stamp by the sample count from the first play time (`rx_stamps = "count"`).
     counting: bool,
+    /// obs#96: added to every stamped chunk (`rx_stamp_margin_ms`), ns; 0 = dlink's play time.
+    margin_ns: i64,
     /// The first play time, the count's origin.
     count_from: Option<Stamp>,
     planes: Vec<Vec<f32>>,
@@ -536,11 +538,18 @@ impl Feeder {
             unfilled_logged: 0,
             counting: false,
             count_from: None,
+            margin_ns: 0,
             planes: vec![vec![0.0; MAX_CHUNK]; channels],
             ptrs: vec![std::ptr::null(); channels],
             feed,
             gate,
         }
+    }
+
+    /// obs#96: stamp every stamped chunk `ns` after its play time (`rx_stamp_margin_ms`).
+    pub fn stamp_margin_ns(mut self, ns: i64) -> Feeder {
+        self.margin_ns = ns.max(0);
+        self
     }
 
     /// obs#56 (dstack#303 bisect): stamp each chunk by the sample count from the first play time
@@ -704,6 +713,13 @@ impl Feeder {
                 *p = plane.as_ptr();
             }
             let ts = self.stamp(frames);
+            // obs#96: the hand-off margin moves every stamped chunk later by the same amount (a
+            // stamp of 0 stays 0: plugin.c stamps it with the time now)
+            let ts = if ts != 0 {
+                ts.saturating_add(self.margin_ns as u64)
+            } else {
+                0
+            };
             if ts != 0 {
                 // obs#94: how long before its audio ENDS (its stamp + its length, where the next
                 // chunk starts) this chunk reaches OBS, taken as the feeder passes it on, before
@@ -840,6 +856,17 @@ impl DanteInput {
             config::RxStamps::PlayAt => feeder,
             config::RxStamps::Count => feeder.counting(),
         };
+        let margin_ns = cfg.rx_stamp_margin_ns();
+        let feeder = feeder.stamp_margin_ns(margin_ns);
+        if margin_ns != 0 {
+            log(
+                LOG_INFO,
+                &format!(
+                    "dante-input start: every RX chunk is stamped {:.3} ms after dlink's play time (rx_stamp_margin_ms, a hand-off margin for OBS's mix; obs#96)",
+                    margin_ns as f64 / 1e6,
+                ),
+            );
+        }
         log(
             LOG_INFO,
             &format!(
