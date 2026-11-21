@@ -76,7 +76,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "dante-input-ffi"
-version = "0.4.58"
+version = "0.4.59"
 dependencies = [
  "dlink",
  "libc",
@@ -91,8 +91,8 @@ dependencies = [
 
 [[package]]
 name = "dlink"
-version = "0.6.181"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.181#ce0b465e01c3763f92a88e3ee08c584895f3f538"
+version = "0.6.213"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.213#7eff93a496f7195f38a9bcc0faa1eb2d7a7a78d7"
 dependencies = [
  "dstack",
  "dstack-audio-io",
@@ -103,8 +103,8 @@ dependencies = [
 
 [[package]]
 name = "dstack"
-version = "0.6.181"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.181#ce0b465e01c3763f92a88e3ee08c584895f3f538"
+version = "0.6.213"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.213#7eff93a496f7195f38a9bcc0faa1eb2d7a7a78d7"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -126,21 +126,21 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.181"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.181#ce0b465e01c3763f92a88e3ee08c584895f3f538"
+version = "0.6.213"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.213#7eff93a496f7195f38a9bcc0faa1eb2d7a7a78d7"
 
 [[package]]
 name = "dstack-resample"
-version = "0.6.181"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.181#ce0b465e01c3763f92a88e3ee08c584895f3f538"
+version = "0.6.213"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.213#7eff93a496f7195f38a9bcc0faa1eb2d7a7a78d7"
 dependencies = [
  "rubato",
 ]
 
 [[package]]
 name = "dsync-ptp"
-version = "1.33.1"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.33.1#f45090fb0be4eb756441f9eed3ed0c10d6ffeb0e"
+version = "1.35.14"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.35.14#10b75f07456c99886ac873beaf0094f266b23ead"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -282,7 +282,7 @@ dependencies = [
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.181#ce0b465e01c3763f92a88e3ee08c584895f3f538"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.213#7eff93a496f7195f38a9bcc0faa1eb2d7a7a78d7"
 dependencies = [
  "fastrand",
  "flume",

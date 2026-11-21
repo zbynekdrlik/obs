@@ -1,6 +1,6 @@
 [package]
 name = "dante-input-ffi"
-version = "0.4.58"
+version = "0.4.59"
 edition = "2024"
 # Let-chains (src/lib.rs Sink::process, obs#53).
 rust-version = "1.88"
@@ -51,7 +51,8 @@ crate-type = ["staticlib", "rlib"]
 # v0.6.170: dstack#379: an RX channel no longer stays silent after the media clock steps back to another time base (stream-obs 16.11.2026: every sample a late hole for ~24 h after a -43.9-day re-anchor until an OBS restart). v0.6.162-169: internal splits, the TX pull (#363, opt-in, not used here), test-run loopback (#366). No latency change, nothing to port.
 # v0.6.178 (dstack#399, one dstack version across apps): v0.6.171 Stats output_gaps()/output_lost_frames() and a held output callback no longer underruns a pulled RX bridge (#307; our push-and-fill RX unchanged); v0.6.172 ASRC seed (new methods only); v0.6.176 the 8700 relay of a dasio bridge's figures; v0.6.177-178 dstack-asio only. No API break, no latency change.
 # v0.6.181 (obs#84): dstack#409 a device finds its transmitters again after its NIC is re-created (stream-snv USB reset: 23 min silent until restart); dstack#410 play_at no longer counts the RX converter delay twice (dstack: the audio reaches OBS as before, its stamp 0.625 ms earlier at 48 kHz on 96 kHz). No API change.
-dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.181" }
+# v0.6.213 (obs#96): dstack#476 each RX block reaches the app 30 % of P before its play_at (the pump handed it AT play_at + its wake delay: strih-snv min_lead_us p50 -2.8 ms), the engine pump and TX thread take a 200 us EEVDF slice (#302), mDNS announces again after a NIC re-create. No config change, no latency change; the API notes 0.6.182-0.6.213 touch nothing dante-input calls.
+dlink = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.213" }
 # obs#94: clock_gettime(CLOCK_MONOTONIC), os_gettime_ns's clock, for the hand-off lead.
 libc = "0.2"
 rtrb = "0.3"
