@@ -46,6 +46,15 @@ uint32_t dante_input_tx_rate(const struct dante_input *d);
 void dante_input_tx_push(const struct dante_input *d, const float *const *planes, uint32_t channels,
 			 uint32_t frames);
 
+/* obs#94 (camera-box#1527): the OBS mix's count of ticks that found a dante-input source's buffer short
+ * of the tick (it sat out that tick's mix), since the start. The device's status thread calls it once a
+ * status line for late_to_mix. */
+typedef uint64_t (*dante_input_mix_probe_cb)(void *opaque);
+
+/* Hands the device the mix probe; a NULL cb clears it. cb and opaque stay valid until dante_input_stop
+ * returns. */
+void dante_input_set_mix_probe(const struct dante_input *d, dante_input_mix_probe_cb cb, void *opaque);
+
 /* Stops the device; no callback runs after this returns. */
 void dante_input_stop(struct dante_input *d);
 

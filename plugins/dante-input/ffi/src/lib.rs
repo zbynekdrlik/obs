@@ -87,6 +87,34 @@ pub const STAMP_SLOTS: usize = 8192;
 pub const GAP_FILL_MAX_FRAMES: u64 = 9_600;
 pub type LogCb = unsafe extern "C" fn(level: c_int, msg: *const c_char);
 
+/// obs#94 (camera-box#1527): the mix probe plugin.c hands the device: the OBS mix's count of ticks
+/// that found a dante-input source's buffer short of the tick (libobs
+/// `obs_source_get_audio_short_ticks`, the worst of the device's sources), since the start.
+pub type MixProbeCb = unsafe extern "C" fn(opaque: *mut c_void) -> u64;
+
+/// The probe and its `opaque` (as an address: the status thread calls it, the plugin keeps it valid
+/// until dante_input_stop); `None` until plugin.c sets one.
+#[derive(Debug, Default)]
+pub struct MixProbe(Mutex<Option<(MixProbeCb, usize)>>);
+
+impl MixProbe {
+    pub fn set(&self, probe: Option<(MixProbeCb, *mut c_void)>) {
+        if let Ok(mut p) = self.0.lock() {
+            *p = probe.map(|(cb, opaque)| (cb, opaque as usize));
+        }
+    }
+
+    /// The mix's short ticks now; 0 without a probe.
+    pub fn read(&self) -> u64 {
+        let probe = self.0.lock().ok().and_then(|p| *p);
+        match probe {
+            // SAFETY: the plugin's contract (dante_input_set_mix_probe): valid until the stop.
+            Some((cb, opaque)) => unsafe { cb(opaque as *mut c_void) },
+            None => 0,
+        }
+    }
+}
+
 static LOG: OnceLock<LogCb> = OnceLock::new();
 
 /// Logs `msg` through the C callback (stderr before one is set).
@@ -252,10 +280,11 @@ pub struct Feed {
     /// obs#94 (camera-box#1527): the smallest lead of a stamped chunk at the hand-off to OBS (the
     /// end of its audio, stamp + length, less the time now), since the status loop last took it.
     pub min_lead: MinLead,
-    /// obs#94: stamped chunks handed to OBS at or after the end of their audio (lead <= 0):
-    /// a FIXED 0 ms mix tick ending between the two can have left the chunk out (obs-audio.c
-    /// audio_buffer_insufficient, no log).
-    pub late_to_mix: AtomicU64,
+    /// obs#94: the OBS mix's own count of ticks that left a dante-input source out (its buffer
+    /// short of the tick): the status line's late_to_mix. A lead <= 0 is no such verdict: on the
+    /// CI soak (FIXED 0 ms, no tone break) chunks routinely came ~80 µs after their end and every
+    /// one was mixed; only libobs knows its tick's deadline.
+    pub mix_probe: MixProbe,
 }
 
 /// obs#94: the smallest lead (a chunk's end stamp - os_gettime_ns at the hand-off), ns, of a window
@@ -675,9 +704,6 @@ impl Feeder {
                     .unwrap_or(i64::MAX)
                     .saturating_sub(obs_now_ns());
                 self.feed.min_lead.note(lead);
-                if lead <= 0 {
-                    self.feed.late_to_mix.fetch_add(1, Ordering::Relaxed);
-                }
             }
             self.read += frames as u64;
             let t = Instant::now();
@@ -937,6 +963,11 @@ impl DanteInput {
         status_of(&self.link, &self.feed, self.tx.as_deref(), false)
     }
 
+    /// obs#94: the OBS mix's short-tick probe for the status line (`None` clears it).
+    pub fn set_mix_probe(&self, probe: Option<(MixProbeCb, *mut c_void)>) {
+        self.feed.mix_probe.set(probe);
+    }
+
     /// The OBS track the TX carries, from 1; 0 without TX.
     pub fn tx_track(&self) -> u32 {
         self.tx.as_ref().map_or(0, |t| t.track())
@@ -1024,7 +1055,7 @@ fn status_of(
     } else {
         feed.min_lead.peek_us()
     };
-    st.late_to_mix = feed.late_to_mix.load(Ordering::Relaxed);
+    st.late_to_mix = feed.mix_probe.read();
     if let Some(t) = tx {
         st.tx(t.counts());
         (st.tx_late_pushes, st.tx_push_gap_max_us) = t.cadence(take);
@@ -1245,6 +1276,25 @@ pub unsafe extern "C" fn dante_input_tx_push(
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         d.tx_push(&views[..n], frames)
     }));
+}
+
+/// obs#94 (camera-box#1527): hands the device the OBS mix's short-tick count for its status line's
+/// late_to_mix; a NULL `cb` clears it. The device's status thread calls `cb(opaque)` once a status
+/// line.
+///
+/// # Safety
+/// `d` comes from dante_input_start and was not stopped; `cb` and `opaque` stay valid until
+/// dante_input_stop returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dante_input_set_mix_probe(
+    d: *const DanteInput,
+    cb: Option<MixProbeCb>,
+    opaque: *mut c_void,
+) {
+    // SAFETY: the caller's contract.
+    if let Some(d) = unsafe { d.as_ref() } {
+        d.set_mix_probe(cb.map(|cb| (cb, opaque)));
+    }
 }
 
 /// Stops the device; no callback runs after this returns.

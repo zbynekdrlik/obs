@@ -641,8 +641,8 @@ fn the_status_line_comes_every_second_for_the_first_30_then_every_10_s() {
 
 /// obs#94 (camera-box#1527): each stamped chunk's lead at the hand-off to OBS = the end of its
 /// audio (stamp + length) less the time now (a mix tick needs the chunk only by its end). The
-/// window keeps the SMALLEST lead for the status line, which takes it; a chunk at or after its end
-/// counts in late_to_mix: a FIXED 0 ms mix tick ending in between can have left it out.
+/// window keeps the SMALLEST lead for the status line, which takes it. A lead <= 0 is information,
+/// not a verdict: only the OBS mix's probe says a tick left the source out (late_to_mix).
 #[test]
 fn the_feeder_measures_each_chunk_s_lead_to_its_end_at_the_hand_off() {
     let seen_box = SeenBox::default();
@@ -654,7 +654,6 @@ fn the_feeder_measures_each_chunk_s_lead_to_its_end_at_the_hand_off() {
     assert_eq!(feeder.drain(), Some(480 + 480));
     let lead = feed.min_lead.peek_us().expect("a stamped chunk has a lead");
     assert!((0..=15_000).contains(&lead), "lead {lead} us");
-    assert_eq!(feed.late_to_mix.load(Ordering::Relaxed), 0);
     // A peek leaves the window as it is.
     assert_eq!(feed.min_lead.peek_us(), Some(lead));
     assert_eq!(feed.min_lead.take_us(), Some(lead));
@@ -669,20 +668,40 @@ fn the_feeder_measures_each_chunk_s_lead_to_its_end_at_the_hand_off() {
         .take_us()
         .expect("the window had stamped chunks");
     assert!((-30_000..=-27_333).contains(&lead), "lead {lead} us");
-    assert_eq!(feed.late_to_mix.load(Ordering::Relaxed), 1);
-    // Taking it opens a new, empty window; the late count is a total.
+    // Taking it opens a new, empty window.
     assert_eq!(feed.min_lead.take_us(), None);
-    assert_eq!(feed.late_to_mix.load(Ordering::Relaxed), 1);
 }
 
 /// obs#94: a chunk with no play time goes to OBS with stamp 0 (plugin.c stamps it now): no lead.
 #[test]
-fn an_unstamped_chunk_has_no_lead_and_is_never_late_to_the_mix() {
+fn an_unstamped_chunk_has_no_lead() {
     let seen_box = SeenBox::default();
     let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 1024);
     push(&mut sink, 128, &[0.0; 128]);
     assert_eq!(feeder.drain(), Some(128));
     assert_eq!(seen_box.lock().unwrap()[0].3, 0);
     assert_eq!(feed.min_lead.peek_us(), None);
-    assert_eq!(feed.late_to_mix.load(Ordering::Relaxed), 0);
+}
+
+/// obs#94: late_to_mix is the OBS mix's own count, read through plugin.c's probe on the status
+/// thread with the plugin's `opaque`; 0 before a probe is set and after it is cleared.
+unsafe extern "C" fn short_ticks(opaque: *mut c_void) -> u64 {
+    // SAFETY: the test passes a live AtomicU64.
+    unsafe { &*(opaque as *const AtomicU64) }.load(Ordering::Relaxed)
+}
+
+#[test]
+fn late_to_mix_is_the_mix_probe_s_count() {
+    let feed = Feed::default();
+    assert_eq!(feed.mix_probe.read(), 0);
+    let count = AtomicU64::new(7);
+    feed.mix_probe.set(Some((
+        short_ticks,
+        (&count as *const AtomicU64).cast_mut().cast(),
+    )));
+    assert_eq!(feed.mix_probe.read(), 7);
+    count.store(12, Ordering::Relaxed);
+    assert_eq!(feed.mix_probe.read(), 12);
+    feed.mix_probe.set(None);
+    assert_eq!(feed.mix_probe.read(), 0);
 }
