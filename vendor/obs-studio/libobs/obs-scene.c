@@ -1636,10 +1636,18 @@ static bool scene_audio_render(void *data, uint64_t *ts_out, struct obs_source_a
 
 			if (source_ts && (!timestamp || source_ts < timestamp))
 				timestamp = source_ts;
-		} else if (item->visible || transition_active(item->hide_transition)) {
-			/* obs#94: a heard child the scene skips as pending this tick (counted here, before the
-			 * early return when every child is pending) */
-			obs_source_audio_mix_skipped(source);
+		} else {
+			/* obs#94: a heard child (visible, hiding, or with queued volume actions, as the mix loop
+			 * below mixes them) the scene skips as pending this tick: marked here, before the early
+			 * return when every child is pending */
+			bool heard = item->visible || transition_active(item->hide_transition);
+			if (!heard) {
+				pthread_mutex_lock(&item->actions_mutex);
+				heard = item->audio_actions.num > 0;
+				pthread_mutex_unlock(&item->actions_mutex);
+			}
+			if (heard && obs_source_audio_pending(source))
+				obs_source_audio_mix_skipped(source);
 		}
 
 		item = item->next;
