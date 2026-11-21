@@ -732,30 +732,27 @@ fn a_stamp_margin_stamps_every_chunk_that_much_after_its_play_time() {
     let seen_box = SeenBox::default();
     let (mut sink, feeder, feed, _gate) = pair(&seen_box, 1, 1024);
     let mut feeder = feeder.stamp_margin_ns(4_667_000);
-    let t0: i64 = 1_000_000_000_000;
-    push_at(&mut sink, 128, &[0.0; 128], t0);
-    push_at(&mut sink, 128, &[0.0; 128], t0 + frames_ns(128) as i64);
-    assert_eq!(feeder.drain(), Some(256));
+    // 50 ms ahead of now, so the lead is a known positive amount
+    let t0 = obs_now_ns() + 50_000_000;
+    push_at(&mut sink, 64, &[0.0; 64], t0);
+    assert_eq!(feeder.drain(), Some(64));
+    push_at(&mut sink, 64, &[0.0; 64], t0 + frames_ns(64) as i64);
+    assert_eq!(feeder.drain(), Some(64));
     let seen = seen_box.lock().unwrap().clone();
-    let stamps: Vec<u64> = seen.iter().map(|s| s.3).collect();
-    assert_eq!(stamps[0], t0 as u64 + 4_667_000, "{stamps:?}");
-    // the stamps stay continuous: the second chunk's stamp follows the first by its frames
-    let total: u64 = seen.iter().map(|s| u64::from(s.1)).sum();
-    assert_eq!(total, 256);
-    assert_eq!(
-        *stamps.last().unwrap(),
-        t0 as u64 + 4_667_000 + frames_ns(256 - u64::from(seen.last().unwrap().1)),
-        "{stamps:?}"
-    );
-    // the lead is to the shifted end: these stamps sit far in the past, so it is negative by about
-    // the time since t0, less the margin
-    assert!(feed.min_lead.peek_us().is_some());
+    assert_eq!(seen.len(), 2, "two drains, two callbacks");
+    // every chunk: its play time plus the margin
+    assert_eq!(seen[0].3, t0 as u64 + 4_667_000);
+    assert_eq!(seen[1].3, t0 as u64 + frames_ns(64) + 4_667_000);
+    // the lead is to the SHIFTED end (where OBS mixes the chunk): about 50 + 1.333 + 4.667 ms ahead
+    // for the first chunk, less the test's own run time
+    let lead = feed.min_lead.take_us().expect("stamped chunks have a lead");
+    assert!((50_000..=56_000).contains(&lead), "lead {lead} us");
 
     // without a margin the same chunk gets dlink's play time itself
     let seen_box = SeenBox::default();
     let (mut sink, mut feeder, _feed, _gate) = pair(&seen_box, 1, 1024);
-    push_at(&mut sink, 128, &[0.0; 128], t0);
-    assert_eq!(feeder.drain(), Some(128));
+    push_at(&mut sink, 64, &[0.0; 64], t0);
+    assert_eq!(feeder.drain(), Some(64));
     assert_eq!(seen_box.lock().unwrap()[0].3, t0 as u64);
 }
 

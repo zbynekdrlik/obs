@@ -104,7 +104,8 @@ pub struct Status {
     pub tx_late_pushes: u64,
     pub tx_push_gap_max_us: u64,
     /// obs#94 (camera-box#1527): the smallest lead of a stamped RX chunk when it was handed to
-    /// OBS (the end of its audio, stamp + length, less the time now), since the last status line,
+    /// OBS (the end of its audio, stamp + length, less the time now; with rx_stamp_margin_ms set
+    /// the stamp includes the margin, since OBS mixes the chunk there: obs#96), since the last status line,
     /// µs, signed (`none` with no stamped chunk in the window): headroom, not a verdict; and the
     /// OBS mix's ticks that found a dante-input source's buffer short of the tick (it sat out that
     /// tick's mix), the worst of the device's OBS sources alive now, each since it was created (0
