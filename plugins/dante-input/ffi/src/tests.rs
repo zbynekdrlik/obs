@@ -722,3 +722,39 @@ fn late_to_mix_and_mixed_late_are_the_mix_probe_s_counts() {
     feed.mix_probe.set(None);
     assert_eq!(feed.mix_probe.read(), MixCounts::default());
 }
+
+/// obs#96 (camera-box#1425): with a stamp margin every stamped chunk reaches OBS stamped that much
+/// after dlink's play time (the hand-off margin), so a chunk handed after the end of its own audio
+/// no longer sits out the mix tick that needs it; its lead is measured to the shifted end. An
+/// unstamped chunk (stamp 0: plugin.c stamps it now) stays 0.
+#[test]
+fn a_stamp_margin_stamps_every_chunk_that_much_after_its_play_time() {
+    let seen_box = SeenBox::default();
+    let (mut sink, feeder, feed, _gate) = pair(&seen_box, 1, 1024);
+    let mut feeder = feeder.stamp_margin_ns(4_667_000);
+    let t0: i64 = 1_000_000_000_000;
+    push_at(&mut sink, 128, &[0.0; 128], t0);
+    push_at(&mut sink, 128, &[0.0; 128], t0 + frames_ns(128) as i64);
+    assert_eq!(feeder.drain(), Some(256));
+    let seen = seen_box.lock().unwrap().clone();
+    let stamps: Vec<u64> = seen.iter().map(|s| s.3).collect();
+    assert_eq!(stamps[0], t0 as u64 + 4_667_000, "{stamps:?}");
+    // the stamps stay continuous: the second chunk's stamp follows the first by its frames
+    let total: u64 = seen.iter().map(|s| u64::from(s.1)).sum();
+    assert_eq!(total, 256);
+    assert_eq!(
+        *stamps.last().unwrap(),
+        t0 as u64 + 4_667_000 + frames_ns(256 - u64::from(seen.last().unwrap().1)),
+        "{stamps:?}"
+    );
+    // the lead is to the shifted end: these stamps sit far in the past, so it is negative by about
+    // the time since t0, less the margin
+    assert!(feed.min_lead.peek_us().is_some());
+
+    // without a margin the same chunk gets dlink's play time itself
+    let seen_box = SeenBox::default();
+    let (mut sink, mut feeder, _feed, _gate) = pair(&seen_box, 1, 1024);
+    push_at(&mut sink, 128, &[0.0; 128], t0);
+    assert_eq!(feeder.drain(), Some(128));
+    assert_eq!(seen_box.lock().unwrap()[0].3, t0 as u64);
+}
