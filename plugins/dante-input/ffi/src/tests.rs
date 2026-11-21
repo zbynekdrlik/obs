@@ -758,3 +758,26 @@ fn a_stamp_margin_stamps_every_chunk_that_much_after_its_play_time() {
     assert_eq!(feeder.drain(), Some(128));
     assert_eq!(seen_box.lock().unwrap()[0].3, t0 as u64);
 }
+
+/// obs#96 (camera-box#1425): the pump wakes the feeder the moment it has written a block, so a chunk
+/// no longer waits up to FEED_EVERY (2 ms) in the ring before OBS gets it (strih-snv: every status
+/// window had chunks handed over 1+ ms after the end of their own audio). The test thread stands in
+/// for the feeder: a written block unparks it at once; without the wake its park would last 10 s.
+#[test]
+fn the_pump_wakes_the_feeder_when_it_writes_a_block() {
+    let feed = Arc::new(Feed::default());
+    let (p, _c) = ring(1, 1024);
+    let (sp, _sc) = stamps(STAMP_SLOTS);
+    let mut sink = Sink::new(p, sp, 1, Arc::clone(&feed));
+    feed.feeder_thread
+        .set(std::thread::current())
+        .expect("the feeder thread is set once");
+    push_at(&mut sink, 64, &[0.0; 64], 1_000_000_000);
+    let t = Instant::now();
+    std::thread::park_timeout(Duration::from_secs(10));
+    assert!(
+        t.elapsed() < Duration::from_secs(5),
+        "the written block did not wake the feeder: parked {:?}",
+        t.elapsed()
+    );
+}
