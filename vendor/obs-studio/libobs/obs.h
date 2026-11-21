@@ -1322,6 +1322,12 @@ EXPORT uint32_t obs_source_get_audio_mixers(const obs_source_t *source);
  * outside the mix. Wraps at 2^32 where long is 32-bit. */
 EXPORT uint64_t obs_source_get_audio_short_ticks(const obs_source_t *source);
 
+/** obs#94 (camera-box#1527): the times the mix guard re-anchored this source because, a mix member
+ * while the buffering is frozen, its audio ran behind the mix window (camera-box issue 1425's
+ * MIXED_LATE: the audio behind the window is dropped, the source stays in the mix), since it was
+ * created */
+EXPORT uint64_t obs_source_get_audio_mixed_late_events(const obs_source_t *source);
+
 /**
  * Increments the 'showing' reference counter to indicate that the source is
  * being shown somewhere.  If the reference counter was 0, will call the 'show'

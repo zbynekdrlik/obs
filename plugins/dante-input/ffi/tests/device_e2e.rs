@@ -86,9 +86,15 @@ fn the_device_starts_on_its_ports_reports_status_and_frees_them_on_stop() {
     // counts.
     // obs#57 (dlink v0.6.137): the gate's counters, each a count; obs#56: the TX writer's
     // cadence after them, last (0 without TX).
-    // obs#94: the hand-off lead, last: the window's smallest (`none` or signed µs), then the
-    // late chunks' count.
-    let (rest, late) = line
+    // obs#94: the hand-off lead, the mix's sat-out ticks and its MIXED_LATE re-anchors, last.
+    let (line_head, mixed) = line
+        .rsplit_once(" mixed_late=")
+        .unwrap_or_else(|| panic!("mixed_late missing at the end: {line}"));
+    assert!(
+        mixed.parse::<u64>().is_ok(),
+        "mixed_late is a count: {line}"
+    );
+    let (rest, late) = line_head
         .rsplit_once(" late_to_mix=")
         .unwrap_or_else(|| panic!("late_to_mix missing at the end: {line}"));
     assert!(

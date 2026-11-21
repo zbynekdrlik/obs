@@ -16,7 +16,11 @@
  *   - a source outside every mix that stalls the same way counts 0 (rendered for its meters, never
  *     mixed, so never left out);
  *   - a source on the mix that never pushed audio counts 0 (no audio_ts: silent, not short);
- *   - the same steady and stalled pushes from inside a scene on the mix count the same (0; 1..12).
+ *   - the same steady and stalled pushes from inside a scene on the mix count the same (0; 1..12);
+ *   - obs_source_get_audio_mixed_late_events (camera-box issue 1425's MIXED_LATE re-anchors: a member
+ *     behind the frozen mix window) stays flat while steady, counts the stall's catch-up (the pusher's
+ *     audio then runs behind the window), and stays 0 for the source outside every mix (its re-anchor
+ *     is NOT_MIXED).
  *
  * The sources are put on output channels of a running video (obs_reset_video 64x64), which makes them
  * members of the output mix: without video no view mixes audio and nothing is mixed.
@@ -114,6 +118,7 @@ static void *push_loop(void *param)
 
 struct counts {
 	uint64_t at_3s, at_8s; /* the pusher on the mix */
+	uint64_t late_at_3s, late_at_8s, off_late; /* the MIXED_LATE re-anchors */
 	uint64_t off_at_3s, off_at_8s; /* the same pusher outside every mix */
 	uint64_t silent; /* a source on the mix that never pushed */
 };
@@ -161,9 +166,12 @@ static bool run_case(const char *name, uint64_t stall_at, bool in_scene, struct 
 		os_sleep_ms(3000);
 		c->at_3s = obs_source_get_audio_short_ticks(mixed.source);
 		c->off_at_3s = obs_source_get_audio_short_ticks(off.source);
+		c->late_at_3s = obs_source_get_audio_mixed_late_events(mixed.source);
 		os_sleep_ms(5000);
 		c->at_8s = obs_source_get_audio_short_ticks(mixed.source);
 		c->off_at_8s = obs_source_get_audio_short_ticks(off.source);
+		c->late_at_8s = obs_source_get_audio_mixed_late_events(mixed.source);
+		c->off_late = obs_source_get_audio_mixed_late_events(off.source);
 		c->silent = obs_source_get_audio_short_ticks(quiet);
 		obs_set_output_source(0, NULL);
 		obs_set_output_source(1, NULL);
@@ -189,9 +197,11 @@ static bool run_case(const char *name, uint64_t stall_at, bool in_scene, struct 
 		return false;
 	}
 	fprintf(stderr,
-		"%s: on the mix %llu at 3 s, %llu at 8 s; outside every mix %llu, %llu; the silent source %llu\n",
+		"%s: on the mix %llu at 3 s, %llu at 8 s; outside every mix %llu, %llu; the silent source %llu; "
+		"mixed_late %llu at 3 s, %llu at 8 s, outside every mix %llu\n",
 		name, (unsigned long long)c->at_3s, (unsigned long long)c->at_8s, (unsigned long long)c->off_at_3s,
-		(unsigned long long)c->off_at_8s, (unsigned long long)c->silent);
+		(unsigned long long)c->off_at_8s, (unsigned long long)c->silent, (unsigned long long)c->late_at_3s,
+		(unsigned long long)c->late_at_8s, (unsigned long long)c->off_late);
 	return true;
 }
 
@@ -258,7 +268,8 @@ int main(int argc, char **argv)
 	info.destroy = pusher_destroy;
 	obs_register_source(&info);
 
-	expect(obs_source_get_audio_short_ticks(NULL) == 0, "a NULL source reads 0");
+	expect(obs_source_get_audio_short_ticks(NULL) == 0, "a NULL source reads 0 short ticks");
+	expect(obs_source_get_audio_mixed_late_events(NULL) == 0, "a NULL source reads 0 re-anchors");
 
 	static const struct {
 		const char *steady, *stall;
@@ -277,6 +288,8 @@ int main(int argc, char **argv)
 			expect(c.off_at_8s == 0, what);
 			snprintf(what, sizeof(what), "%s: a source that never pushed counts none", places[i].steady);
 			expect(c.silent == 0, what);
+			snprintf(what, sizeof(what), "%s: no MIXED_LATE re-anchor from 3 s to 8 s", places[i].steady);
+			expect(c.late_at_8s == c.late_at_3s, what);
 		}
 		/* block 1500 = 4 s in: inside the 3-8 s window */
 		memset(&c, 0, sizeof(c));
@@ -290,6 +303,10 @@ int main(int argc, char **argv)
 			expect(c.off_at_8s == 0, what);
 			snprintf(what, sizeof(what), "%s: a source that never pushed counts none", places[i].stall);
 			expect(c.silent == 0, what);
+			snprintf(what, sizeof(what), "%s: the catch-up is a MIXED_LATE re-anchor", places[i].stall);
+			expect(c.late_at_8s > c.late_at_3s, what);
+			snprintf(what, sizeof(what), "%s: outside every mix, no MIXED_LATE re-anchor", places[i].stall);
+			expect(c.off_late == 0, what);
 		}
 	}
 

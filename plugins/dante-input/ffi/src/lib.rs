@@ -87,10 +87,19 @@ pub const STAMP_SLOTS: usize = 8192;
 pub const GAP_FILL_MAX_FRAMES: u64 = 9_600;
 pub type LogCb = unsafe extern "C" fn(level: c_int, msg: *const c_char);
 
-/// obs#94 (camera-box#1527): the mix probe plugin.c hands the device: the OBS mix's count of ticks
-/// that found a dante-input source's buffer short of the tick (libobs
-/// `obs_source_get_audio_short_ticks`), the worst of the device's sources alive now.
-pub type MixProbeCb = unsafe extern "C" fn(opaque: *mut c_void) -> u64;
+/// obs#94 (camera-box#1527): the mix probe plugin.c hands the device. It writes the OBS mix's counts
+/// for the dante-input sources, each the worst of the device's sources alive now: the ticks a source
+/// sat out, its buffer short of the tick (libobs `obs_source_get_audio_short_ticks`), and the mix
+/// guard's re-anchors of a source behind the window (`obs_source_get_audio_mixed_late_events`).
+pub type MixProbeCb =
+    unsafe extern "C" fn(opaque: *mut c_void, short_ticks: *mut u64, mixed_late: *mut u64);
+
+/// The mix's counts the probe reads.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MixCounts {
+    pub short_ticks: u64,
+    pub mixed_late: u64,
+}
 
 /// The probe and its `opaque` (as an address: the status thread calls it, the plugin keeps it valid
 /// until dante_input_stop); `None` until plugin.c sets one.
@@ -104,14 +113,16 @@ impl MixProbe {
         }
     }
 
-    /// The mix's short ticks now; 0 without a probe.
-    pub fn read(&self) -> u64 {
+    /// The mix's counts now; 0s without a probe.
+    pub fn read(&self) -> MixCounts {
         let probe = self.0.lock().ok().and_then(|p| *p);
-        match probe {
-            // SAFETY: the plugin's contract (dante_input_set_mix_probe): valid until the stop.
-            Some((cb, opaque)) => unsafe { cb(opaque as *mut c_void) },
-            None => 0,
+        let mut c = MixCounts::default();
+        if let Some((cb, opaque)) = probe {
+            // SAFETY: the plugin's contract (dante_input_set_mix_probe): valid until the stop; the
+            // two out-pointers are live locals.
+            unsafe { cb(opaque as *mut c_void, &mut c.short_ticks, &mut c.mixed_late) };
         }
+        c
     }
 }
 
@@ -1055,7 +1066,9 @@ fn status_of(
     } else {
         feed.min_lead.peek_us()
     };
-    st.late_to_mix = feed.mix_probe.read();
+    let mix = feed.mix_probe.read();
+    st.late_to_mix = mix.short_ticks;
+    st.mixed_late = mix.mixed_late;
     if let Some(t) = tx {
         st.tx(t.counts());
         (st.tx_late_pushes, st.tx_push_gap_max_us) = t.cadence(take);

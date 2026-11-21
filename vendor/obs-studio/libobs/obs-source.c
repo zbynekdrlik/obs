@@ -9845,6 +9845,14 @@ uint64_t obs_source_get_audio_short_ticks(const obs_source_t *source)
 	return (uint64_t)(unsigned long)os_atomic_load_long(&source->audio_short_ticks);
 }
 
+uint64_t obs_source_get_audio_mixed_late_events(const obs_source_t *source)
+{
+	if (!obs_source_valid(source, "obs_source_get_audio_mixed_late_events"))
+		return 0;
+	/* written on the audio thread; a 64-bit aligned load (camera-box issue 1425's MIXED_LATE count) */
+	return *(const volatile uint64_t *)&source->genlock_mixed_late_events;
+}
+
 uint32_t obs_source_get_audio_mixers(const obs_source_t *source)
 {
 	if (!obs_source_valid(source, "obs_source_get_audio_mixers"))
