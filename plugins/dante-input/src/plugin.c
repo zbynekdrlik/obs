@@ -110,21 +110,26 @@ static void on_audio(void *opaque, const float *const *planes, uint32_t channels
 }
 
 /* obs#94 (camera-box#1527): the device's status thread, once a status line. The OBS mix's ticks a
- * dante_input source sat out (its buffer short of the tick, no log in libobs), the worst of the sources
- * alive now: a source that is destroyed takes its count with it. obs_source_get_audio_short_ticks is an atomic read: no OBS lock is taken
- * under sources_mutex. */
-static uint64_t mix_short_ticks(void *opaque)
+ * dante_input source sat out (its buffer short of the tick, no log in libobs) and the mix guard's
+ * re-anchors of a source behind the window (MIXED_LATE, camera-box issue 1425), each the worst of the
+ * sources alive now: a source that is destroyed takes its counts with it. Both getters are plain reads:
+ * no OBS lock is taken under sources_mutex. */
+static void mix_counts(void *opaque, uint64_t *short_ticks, uint64_t *mixed_late)
 {
 	UNUSED_PARAMETER(opaque);
-	uint64_t worst = 0;
+	uint64_t worst_short = 0, worst_late = 0;
 	pthread_mutex_lock(&sources_mutex);
 	for (size_t i = 0; i < sources.num; i++) {
-		const uint64_t n = obs_source_get_audio_short_ticks(sources.array[i]);
-		if (n > worst)
-			worst = n;
+		const uint64_t s = obs_source_get_audio_short_ticks(sources.array[i]);
+		const uint64_t l = obs_source_get_audio_mixed_late_events(sources.array[i]);
+		if (s > worst_short)
+			worst_short = s;
+		if (l > worst_late)
+			worst_late = l;
 	}
 	pthread_mutex_unlock(&sources_mutex);
-	return worst;
+	*short_ticks = worst_short;
+	*mixed_late = worst_late;
 }
 
 static const char *dante_input_name(void *type_data)
@@ -239,7 +244,7 @@ bool obs_module_load(void)
 	if (device) {
 		device_channels = dante_input_channels(device);
 		os_atomic_set_long(&device_rate, (long)dante_input_sample_rate(device));
-		dante_input_set_mix_probe(device, mix_short_ticks, NULL);
+		dante_input_set_mix_probe(device, mix_counts, NULL);
 		pin_module();
 		start_tx();
 	} else {

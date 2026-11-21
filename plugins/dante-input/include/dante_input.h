@@ -46,10 +46,11 @@ uint32_t dante_input_tx_rate(const struct dante_input *d);
 void dante_input_tx_push(const struct dante_input *d, const float *const *planes, uint32_t channels,
 			 uint32_t frames);
 
-/* obs#94 (camera-box#1527): the OBS mix's count of ticks a dante-input source sat out (its buffer short of
- * the tick), the worst of the sources alive now. The device's status thread calls it once a status line
- * for late_to_mix. */
-typedef uint64_t (*dante_input_mix_probe_cb)(void *opaque);
+/* obs#94 (camera-box#1527): the OBS mix's counts for the dante-input sources, each the worst of the
+ * sources alive now: *short_ticks = the ticks a source sat out (its buffer short of the tick: late_to_mix),
+ * *mixed_late = the mix guard's re-anchors of a source behind the window (mixed_late). The device's status
+ * thread calls it once a status line. */
+typedef void (*dante_input_mix_probe_cb)(void *opaque, uint64_t *short_ticks, uint64_t *mixed_late);
 
 /* Hands the device the mix probe; a NULL cb clears it. cb and opaque stay valid until dante_input_stop
  * returns. */

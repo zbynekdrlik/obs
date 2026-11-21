@@ -683,25 +683,42 @@ fn an_unstamped_chunk_has_no_lead() {
     assert_eq!(feed.min_lead.peek_us(), None);
 }
 
-/// obs#94: late_to_mix is the OBS mix's own count, read through plugin.c's probe on the status
-/// thread with the plugin's `opaque`; 0 before a probe is set and after it is cleared.
-unsafe extern "C" fn short_ticks(opaque: *mut c_void) -> u64 {
-    // SAFETY: the test passes a live AtomicU64.
-    unsafe { &*(opaque as *const AtomicU64) }.load(Ordering::Relaxed)
+/// obs#94: late_to_mix and mixed_late are the OBS mix's own counts, read through plugin.c's probe on
+/// the status thread with the plugin's `opaque`; 0 before a probe is set and after it is cleared.
+unsafe extern "C" fn mix_counts(opaque: *mut c_void, short_ticks: *mut u64, mixed_late: *mut u64) {
+    // SAFETY: the test passes two live AtomicU64; the device passes two live out-pointers.
+    let c = unsafe { &*(opaque as *const [AtomicU64; 2]) };
+    unsafe {
+        *short_ticks = c[0].load(Ordering::Relaxed);
+        *mixed_late = c[1].load(Ordering::Relaxed);
+    }
 }
 
 #[test]
-fn late_to_mix_is_the_mix_probe_s_count() {
+fn late_to_mix_and_mixed_late_are_the_mix_probe_s_counts() {
     let feed = Feed::default();
-    assert_eq!(feed.mix_probe.read(), 0);
-    let count = AtomicU64::new(7);
+    assert_eq!(feed.mix_probe.read(), MixCounts::default());
+    let counts = [AtomicU64::new(7), AtomicU64::new(3)];
     feed.mix_probe.set(Some((
-        short_ticks,
-        (&count as *const AtomicU64).cast_mut().cast(),
+        mix_counts,
+        (&counts as *const [AtomicU64; 2]).cast_mut().cast(),
     )));
-    assert_eq!(feed.mix_probe.read(), 7);
-    count.store(12, Ordering::Relaxed);
-    assert_eq!(feed.mix_probe.read(), 12);
+    assert_eq!(
+        feed.mix_probe.read(),
+        MixCounts {
+            short_ticks: 7,
+            mixed_late: 3
+        }
+    );
+    counts[0].store(12, Ordering::Relaxed);
+    counts[1].store(20, Ordering::Relaxed);
+    assert_eq!(
+        feed.mix_probe.read(),
+        MixCounts {
+            short_ticks: 12,
+            mixed_late: 20
+        }
+    );
     feed.mix_probe.set(None);
-    assert_eq!(feed.mix_probe.read(), 0);
+    assert_eq!(feed.mix_probe.read(), MixCounts::default());
 }
