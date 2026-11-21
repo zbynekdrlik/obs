@@ -38,9 +38,15 @@ fn function<'a>(src: &'a str, signature: &str) -> &'a str {
 #[test]
 fn the_pinned_receiver_abi_declares_set_decoder_cores() {
     let header = vstack::read(HEADER);
+    let abi: u32 = header
+        .split("#define CBJXS_ABI_VERSION ")
+        .nth(1)
+        .and_then(|rest| rest.split('u').next())
+        .and_then(|n| n.trim().parse().ok())
+        .expect("obs#100: the pinned header has no CBJXS_ABI_VERSION");
     assert!(
-        header.contains("#define CBJXS_ABI_VERSION 6u"),
-        "obs#100: the pinned vstack's receiver ABI is not 6"
+        abi >= 6,
+        "obs#100: the pinned vstack's receiver ABI is {abi}, below 6"
     );
     assert!(
         header.contains("int cbjxs_set_decoder_cores(cbjxs_receiver *rx, const char *cores);"),
@@ -89,16 +95,20 @@ int main()
 	cb_jxs_config b = a;
 	if (cb_jxs_decoder_cores_wanted(&a)) return 10;
 	if (cb_jxs_reopen_needed(a, b)) return 11;
-	cb_jxs_set_decoder_cores(&b, "8-11");
+	/* max bpp and the genlock latency never reopen */
+	b.max_bpp = 8;
+	b.latency_ms = 900;
+	if (cb_jxs_reopen_needed(a, b)) return 16;
+	if (!cb_jxs_set_decoder_cores(&b, "8-11")) return 17;
 	if (!cb_jxs_decoder_cores_wanted(&b) || strcmp(b.decoder_cores, "8-11") != 0) return 12;
 	if (!cb_jxs_reopen_needed(a, b)) return 13;
+	/* a list longer than the field is refused, never cut: no pinning */
 	char longs[200];
 	memset(longs, '7', sizeof longs - 1);
 	longs[sizeof longs - 1] = '\0';
-	cb_jxs_set_decoder_cores(&b, longs);
-	if (strlen(b.decoder_cores) != sizeof b.decoder_cores - 1) return 14;
-	cb_jxs_set_decoder_cores(&b, nullptr);
-	if (cb_jxs_decoder_cores_wanted(&b)) return 15;
+	if (cb_jxs_set_decoder_cores(&b, longs)) return 14;
+	if (cb_jxs_decoder_cores_wanted(&b)) return 18;
+	if (!cb_jxs_set_decoder_cores(&b, nullptr) || cb_jxs_decoder_cores_wanted(&b)) return 15;
 
 	jxs_source s = {nullptr};
 	cbjxs_receiver *rx = reinterpret_cast<cbjxs_receiver *>(&s);
@@ -181,5 +191,37 @@ fn each_source_pins_its_decoder_threads_to_its_cpulist() {
             && lines[1].contains("not a cpulist"),
         "obs#100: {}",
         lines[1]
+    );
+}
+
+/// The call sites: `jxs_source_update` stores the setting through the setter, and the receiver
+/// thread applies it right after `cbjxs_open`, before the late bound and the first stats read.
+#[test]
+fn the_setting_is_stored_and_applied_right_after_the_receiver_opens() {
+    let src = repo(SOURCE);
+    let update = function(&src, "static void jxs_source_update(");
+    assert!(
+        update.contains("cb_jxs_set_decoder_cores(&cfg, cores)")
+            && update.contains("obs_data_get_string(settings, PROP_JXS_DECODER_CORES)"),
+        "obs#100: jxs_source_update does not store jxs_decoder_cores"
+    );
+    let set = update
+        .find("cb_jxs_set_decoder_cores(&cfg, cores)")
+        .unwrap();
+    let lock = update
+        .find("config_mutex")
+        .expect("obs#100: no config_mutex in update");
+    assert!(
+        set < lock,
+        "obs#100: the cores must be in cfg before it is stored under config_mutex"
+    );
+    let open = src
+        .find(
+            "open_cfg = cfg;\n\t\t\tjxs_apply_decoder_cores(s, rx, cfg);\n\t\t\tcbjxs_set_late_ms(",
+        )
+        .is_some();
+    assert!(
+        open,
+        "obs#100: jxs_apply_decoder_cores must run right after cbjxs_open (after open_cfg = cfg, before cbjxs_set_late_ms)"
     );
 }

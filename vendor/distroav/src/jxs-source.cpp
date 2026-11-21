@@ -165,9 +165,6 @@ static void jxs_output_frame(jxs_source *s, const cbjxs_frame &f)
 	obs_source_output_video(s->source, &frame);
 }
 
-/* This source's row in the JPEG XS state table (the frontend indicator, issue 1387): its name
- * (refreshed: a rename) and what it listens on; `why` names why it cannot listen (a UDP port binds
- * one input, so a second input picked onto the same camera stays black and says so here). */
 /* obs#100 (vstack#30, ABI 6): right after cbjxs_open, put this source's decoder threads (jxd-*) on its
  * cpulist; "" leaves them on the source thread's cores (no call). A list the library refuses (-2) is
  * named once and the source runs on as before: never a failed open. */
@@ -188,6 +185,9 @@ static void jxs_apply_decoder_cores(jxs_source *s, cbjxs_receiver *rx, const cb_
 		obs_source_get_name(s->source), cfg.decoder_cores, r, e);
 }
 
+/* This source's row in the JPEG XS state table (the frontend indicator, issue 1387): its name
+ * (refreshed: a rename) and what it listens on; `why` names why it cannot listen (a UDP port binds
+ * one input, so a second input picked onto the same camera stays black and says so here). */
 static void jxs_state_entry(jxs_source *s, const cb_jxs_config &cfg, const char *why = nullptr)
 {
 	char detail[192];
@@ -497,7 +497,11 @@ static void jxs_source_update(void *data, obs_data_t *settings)
 			     cb_jxs_max_bpp(obs_data_get_int(settings, PROP_JXS_MAX_BPP)),
 			     cb_jxs_clamp_latency_ms(obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC)),
 			     {0}};
-	cb_jxs_set_decoder_cores(&cfg, obs_data_get_string(settings, PROP_JXS_DECODER_CORES));
+	const char *cores = obs_data_get_string(settings, PROP_JXS_DECODER_CORES);
+	if (!cb_jxs_set_decoder_cores(&cfg, cores))
+		obs_log(LOG_WARNING,
+			"jxs-source '%s': decoder cores \"%s\" is longer than %zu characters -- not applied, the decoder runs on the source thread's cores (obs#100)",
+			obs_source_get_name(s->source), cores, sizeof cfg.decoder_cores - 1);
 	{
 		std::lock_guard<std::mutex> lock(s->config_mutex);
 		s->config = cfg;

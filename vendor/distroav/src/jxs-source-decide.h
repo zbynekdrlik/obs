@@ -73,14 +73,19 @@ struct cb_jxs_config {
 	char decoder_cores[64];
 };
 
-/* obs#100: store a cpulist (NULL = none), cut to the field's size, always terminated. */
-static inline void cb_jxs_set_decoder_cores(struct cb_jxs_config *c, const char *cores)
+/* obs#100: store a cpulist (NULL = none). A list longer than the field holds is refused, never cut
+ * (a cut prefix can still read as a valid, wrong cpulist): the field is left empty, so no pinning,
+ * and false tells the caller to say so. Always terminated. */
+static inline bool cb_jxs_set_decoder_cores(struct cb_jxs_config *c, const char *cores)
 {
-	size_t n = 0;
-	if (cores)
-		for (; cores[n] && n + 1 < sizeof c->decoder_cores; n++)
-			c->decoder_cores[n] = cores[n];
-	c->decoder_cores[n] = '\0';
+	c->decoder_cores[0] = '\0';
+	if (!cores)
+		return true;
+	const size_t len = strlen(cores);
+	if (len >= sizeof c->decoder_cores)
+		return false;
+	memcpy(c->decoder_cores, cores, len + 1);
+	return true;
 }
 
 /* obs#100: whether the source asks for its decoder threads on given cores. */
