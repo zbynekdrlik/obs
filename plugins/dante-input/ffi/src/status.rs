@@ -104,9 +104,9 @@ pub struct Status {
     pub tx_late_pushes: u64,
     pub tx_push_gap_max_us: u64,
     /// obs#94 (camera-box#1527): the smallest lead of a stamped RX chunk when it was handed to
-    /// OBS (its last sample's play time less the time now), since the last status line, µs, signed
-    /// (`none` with no stamped chunk in the window); and the stamped chunks handed at or after
-    /// their last sample's play time since the start.
+    /// OBS (the end of its audio, stamp + length, less the time now), since the last status line,
+    /// µs, signed (`none` with no stamped chunk in the window); and the stamped chunks handed at
+    /// or after the end of their audio since the start.
     pub min_lead_us: Option<i64>,
     pub late_to_mix: u64,
 }

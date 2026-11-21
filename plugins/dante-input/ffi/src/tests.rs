@@ -639,36 +639,36 @@ fn the_status_line_comes_every_second_for_the_first_30_then_every_10_s() {
     assert_eq!(first_30, Duration::from_secs(30));
 }
 
-/// obs#94 (camera-box#1527): each stamped chunk's lead at the hand-off to OBS = its last sample's
-/// play time less the time now (a mix tick needs the chunk only by its end). The window's smallest
-/// lead goes to the status line and is taken there; a chunk at or after its end counts in
-/// late_to_mix: a FIXED 0 ms mix tick ending in between can have left it out.
+/// obs#94 (camera-box#1527): each stamped chunk's lead at the hand-off to OBS = the end of its
+/// audio (stamp + length) less the time now (a mix tick needs the chunk only by its end). The
+/// window keeps the SMALLEST lead for the status line, which takes it; a chunk at or after its end
+/// counts in late_to_mix: a FIXED 0 ms mix tick ending in between can have left it out.
 #[test]
 fn the_feeder_measures_each_chunk_s_lead_to_its_end_at_the_hand_off() {
     let seen_box = SeenBox::default();
-    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 1024);
+    let (mut sink, mut feeder, feed, _gate) = pair(&seen_box, 1, 4096);
     assert_eq!(feed.min_lead.peek_us(), None);
-    // 128 frames at 48 kHz = 2.667 ms; its first sample is due 50 ms ahead: headroom.
-    push_at(&mut sink, 128, &[0.0; 128], obs_now_ns() + 50_000_000);
-    assert_eq!(feeder.drain(), Some(128));
+    // 960 frames at 48 kHz = 20 ms, its first sample 5 ms in the past: late to its start, its end
+    // still ~15 ms ahead, in time for the mix.
+    push_at(&mut sink, 960, &[0.0; 960], obs_now_ns() - 5_000_000);
+    assert_eq!(feeder.drain(), Some(480 + 480));
     let lead = feed.min_lead.peek_us().expect("a stamped chunk has a lead");
-    assert!((42_000..=52_667).contains(&lead), "lead {lead} us");
+    assert!((0..=15_000).contains(&lead), "lead {lead} us");
     assert_eq!(feed.late_to_mix.load(Ordering::Relaxed), 0);
-    // First sample 1 ms in the past, last 1.667 ms in the future: late to its start, still in
-    // time for the mix.
-    push_at(&mut sink, 128, &[0.0; 128], obs_now_ns() - 1_000_000);
+    // A peek leaves the window as it is.
+    assert_eq!(feed.min_lead.peek_us(), Some(lead));
+    assert_eq!(feed.min_lead.take_us(), Some(lead));
+    // A late chunk first (128 frames = 2.667 ms, first sample 30 ms ago: its end ~27 ms ago),
+    // then one 40 ms ahead: the window keeps the late one, not the last one.
+    push_at(&mut sink, 128, &[0.0; 128], obs_now_ns() - 30_000_000);
     assert_eq!(feeder.drain(), Some(128));
-    let lead = feed.min_lead.peek_us().unwrap();
-    assert!((0..=1_667).contains(&lead), "lead {lead} us");
-    assert_eq!(feed.late_to_mix.load(Ordering::Relaxed), 0);
-    // First sample 5 ms in the past: its end (2.333 ms ago) passed too, a late chunk.
-    push_at(&mut sink, 128, &[0.0; 128], obs_now_ns() - 5_000_000);
+    push_at(&mut sink, 128, &[0.0; 128], obs_now_ns() + 40_000_000);
     assert_eq!(feeder.drain(), Some(128));
     let lead = feed
         .min_lead
         .take_us()
         .expect("the window had stamped chunks");
-    assert!(lead <= -2_333, "lead {lead} us");
+    assert!((-30_000..=-27_333).contains(&lead), "lead {lead} us");
     assert_eq!(feed.late_to_mix.load(Ordering::Relaxed), 1);
     // Taking it opens a new, empty window; the late count is a total.
     assert_eq!(feed.min_lead.take_us(), None);

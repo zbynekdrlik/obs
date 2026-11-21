@@ -249,10 +249,10 @@ pub struct Feed {
     pub gap_frames: AtomicU64,
     /// Skips the full ring had no room to fill: OBS's timeline lost their frames (obs#53).
     pub gaps_unfilled: AtomicU64,
-    /// obs#94 (camera-box#1527): the smallest lead of a stamped chunk at the hand-off to OBS (its
-    /// last sample's play time less the time now), since the status loop last took it.
+    /// obs#94 (camera-box#1527): the smallest lead of a stamped chunk at the hand-off to OBS (the
+    /// end of its audio, stamp + length, less the time now), since the status loop last took it.
     pub min_lead: MinLead,
-    /// obs#94: stamped chunks handed to OBS at or after their last sample's play time (lead <= 0):
+    /// obs#94: stamped chunks handed to OBS at or after the end of their audio (lead <= 0):
     /// a FIXED 0 ms mix tick ending between the two can have left the chunk out (obs-audio.c
     /// audio_buffer_insufficient, no log).
     pub late_to_mix: AtomicU64,
@@ -665,10 +665,11 @@ impl Feeder {
             }
             let ts = self.stamp(frames);
             if ts != 0 {
-                // obs#94: how long before its LAST sample's play time this chunk reaches OBS. A
-                // mix tick needs a chunk only by its end, so a chunk handed after its first
-                // sample's time still makes the tick that ends after it (0 = no stamp: plugin.c
-                // stamps it with the time now, so it has no lead to measure).
+                // obs#94: how long before its audio ENDS (its stamp + its length, where the next
+                // chunk starts) this chunk reaches OBS, taken as the feeder passes it on, before
+                // the callback. A mix tick needs a chunk only by its end, so a chunk handed after
+                // its first sample's time still makes the tick that ends after it (0 = no stamp:
+                // plugin.c stamps it with the time now, so it has no lead to measure).
                 let end = ts.saturating_add(self.frames_ns(frames as u64));
                 let lead = i64::try_from(end)
                     .unwrap_or(i64::MAX)
