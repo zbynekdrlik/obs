@@ -37,9 +37,16 @@ fn function<'a>(src: &'a str, signature: &str) -> &'a str {
 #[test]
 fn the_pinned_receiver_abi_carries_decoder_opens() {
     let header = vstack::read(HEADER);
+    // ABI 5 brought decoder_opens; later ABIs keep it (6: cbjxs_set_decoder_cores, obs#100).
+    let abi: u32 = header
+        .split("#define CBJXS_ABI_VERSION ")
+        .nth(1)
+        .and_then(|rest| rest.split('u').next())
+        .and_then(|n| n.trim().parse().ok())
+        .expect("obs#86: the pinned header has no CBJXS_ABI_VERSION");
     assert!(
-        header.contains("#define CBJXS_ABI_VERSION 5u"),
-        "obs#86: the pinned vstack's receiver ABI is not 5 (vstack.pin moved without obs#86?)"
+        abi >= 5,
+        "obs#86: the pinned vstack's receiver ABI is {abi}, below 5 (vstack.pin moved back?)"
     );
     assert!(
         header.contains("uint32_t decoder_opens;"),
