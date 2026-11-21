@@ -102,6 +102,12 @@ static inline size_t h_da_find(struct h_darray *v, obs_source_t *s, size_t idx)
 #define da_push_back(v, pitem) h_da_push(&(v), *(pitem))
 #define da_find(v, pitem, idx) h_da_find(&(v), *(pitem), (idx))
 
+/* obs#94: libobs's atomic increment (util/threading.h); the harness runs one thread */
+static inline long os_atomic_inc_long(volatile long *val)
+{
+	return ++*val;
+}
+
 struct obs_source_info {
 	void *audio_render;
 };
@@ -127,6 +133,9 @@ struct obs_source {
 	/* issue 1425 */
 	uint64_t genlock_mixed_late_events;
 	uint64_t genlock_mixed_late_dropped_ns;
+	/* obs#94: the mixing ticks a mix member sat out (marked at the skip, counted once a mixing tick) */
+	volatile long audio_short_ticks;
+	uint64_t audio_short_tick_mark;
 	/* the harness's source model (obs-source.c ingest), never read by the lift */
 	const char *h_name;
 	bool h_keeps_stamp;
