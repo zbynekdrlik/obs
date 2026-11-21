@@ -67,7 +67,32 @@ struct cb_jxs_config {
 	uint8_t camera;
 	uint8_t max_bpp;
 	uint32_t latency_ms; /* the input's genlock latency: sets the late bound, never reopens */
+	/* obs#100 (vstack#30, ABI 6): the cpulist the decoder's library threads (jxd-*) open on; "" =
+	 * they stay on the source thread's cores (no cbjxs_set_decoder_cores call). It takes effect at
+	 * a decoder open, so a changed list reopens the receiver. */
+	char decoder_cores[64];
 };
+
+/* obs#100: store a cpulist (NULL = none). A list longer than the field holds is refused, never cut
+ * (a cut prefix can still read as a valid, wrong cpulist): the field is left empty, so no pinning,
+ * and false tells the caller to say so. Always terminated. */
+static inline bool cb_jxs_set_decoder_cores(struct cb_jxs_config *c, const char *cores)
+{
+	c->decoder_cores[0] = '\0';
+	if (!cores)
+		return true;
+	const size_t len = strlen(cores);
+	if (len >= sizeof c->decoder_cores)
+		return false;
+	memcpy(c->decoder_cores, cores, len + 1);
+	return true;
+}
+
+/* obs#100: whether the source asks for its decoder threads on given cores. */
+static inline bool cb_jxs_decoder_cores_wanted(const struct cb_jxs_config *c)
+{
+	return c->decoder_cores[0] != '\0';
+}
 
 /* A frame is late only past what this input's genlock FIFO holds, never under 100 ms (live
  * 31.10.2026: a 1087 ms strih program input read 100 ms as late and stepped its sender down). */
@@ -78,7 +103,7 @@ static inline uint32_t cb_jxs_late_ms(uint32_t latency_ms)
 
 static inline bool cb_jxs_reopen_needed(struct cb_jxs_config a, struct cb_jxs_config b)
 {
-	return a.port != b.port || a.camera != b.camera;
+	return a.port != b.port || a.camera != b.camera || strcmp(a.decoder_cores, b.decoder_cores) != 0;
 }
 
 /* The average coded bits per pixel over a status window: payload bytes x 8 / (frames x pixels),
