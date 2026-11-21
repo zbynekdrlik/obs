@@ -45,6 +45,8 @@
 #define PROP_JXS_PORT "jxs_port"
 #define PROP_JXS_CAMERA "jxs_camera"
 #define PROP_JXS_MAX_BPP "jxs_max_bpp"
+/* obs#100: the decoder threads' cpulist ("" = the source thread's cores) */
+#define PROP_JXS_DECODER_CORES "jxs_decoder_cores"
 /* issue 1387 (owner 1.11.2026): the "Kamera" list, which camera this input shows (a view of the
  * jxs_port + jxs_camera pair, which is all the receiver reads) */
 #define PROP_JXS_PICK "jxs_pick"
@@ -105,7 +107,7 @@ struct jxs_source {
 	std::thread thread;
 	std::atomic<bool> running{false};
 	std::mutex config_mutex;
-	cb_jxs_config config = {CB_JXS_PORT_DEFAULT, 0, 0, CB_JXS_LATENCY_MS_MIN};
+	cb_jxs_config config = {CB_JXS_PORT_DEFAULT, 0, 0, CB_JXS_LATENCY_MS_MIN, {0}};
 	std::atomic<uint64_t> config_gen{0};
 };
 
@@ -166,6 +168,26 @@ static void jxs_output_frame(jxs_source *s, const cbjxs_frame &f)
 /* This source's row in the JPEG XS state table (the frontend indicator, issue 1387): its name
  * (refreshed: a rename) and what it listens on; `why` names why it cannot listen (a UDP port binds
  * one input, so a second input picked onto the same camera stays black and says so here). */
+/* obs#100 (vstack#30, ABI 6): right after cbjxs_open, put this source's decoder threads (jxd-*) on its
+ * cpulist; "" leaves them on the source thread's cores (no call). A list the library refuses (-2) is
+ * named once and the source runs on as before: never a failed open. */
+static void jxs_apply_decoder_cores(jxs_source *s, cbjxs_receiver *rx, const cb_jxs_config &cfg)
+{
+	if (!cb_jxs_decoder_cores_wanted(&cfg))
+		return;
+	const int r = cbjxs_set_decoder_cores(rx, cfg.decoder_cores);
+	if (r == 0) {
+		obs_log(LOG_INFO, "jxs-source '%s': decoder threads on cores %s (vstack#30, obs#100)",
+			obs_source_get_name(s->source), cfg.decoder_cores);
+		return;
+	}
+	char e[256] = "";
+	cbjxs_take_error(rx, e, sizeof e);
+	obs_log(LOG_WARNING,
+		"jxs-source '%s': decoder cores \"%s\" refused (%d): %s -- the decoder runs on the source thread's cores (obs#100)",
+		obs_source_get_name(s->source), cfg.decoder_cores, r, e);
+}
+
 static void jxs_state_entry(jxs_source *s, const cb_jxs_config &cfg, const char *why = nullptr)
 {
 	char detail[192];
@@ -289,6 +311,7 @@ static void jxs_thread(jxs_source *s)
 			}
 			open_failure_logged = false;
 			open_cfg = cfg;
+			jxs_apply_decoder_cores(s, rx, cfg);
 			cbjxs_set_late_ms(rx, cb_jxs_late_ms(cfg.latency_ms));
 			jxs_state_entry(s, cfg);
 			if (opens++ > 0)
@@ -437,6 +460,7 @@ static void jxs_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, PROP_JXS_PORT, CB_JXS_PORT_DEFAULT);
 	obs_data_set_default_int(settings, PROP_JXS_CAMERA, 0);
 	obs_data_set_default_int(settings, PROP_JXS_MAX_BPP, 0);
+	obs_data_set_default_string(settings, PROP_JXS_DECODER_CORES, "");
 	obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true);
 	obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, CB_JXS_LATENCY_MS_MIN);
 	obs_data_set_default_bool(settings, PROP_BURN, false);
@@ -457,6 +481,8 @@ static obs_properties_t *jxs_source_getproperties(void *data)
 	obs_properties_add_bool(props, PROP_GENLOCK_FIFO, "Genlock");
 	obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC, "Genlock latency (ms)", CB_JXS_LATENCY_MS_MIN,
 			       CB_JXS_LATENCY_MS_MAX, 1);
+	obs_properties_add_text(props, PROP_JXS_DECODER_CORES, "Decoder cores (cpulist, e.g. 8-11; empty = the source thread's)",
+				OBS_TEXT_DEFAULT);
 	obs_properties_add_bool(props, PROP_BURN, "Measurement burn (test only)");
 	obs_properties_add_bool(props, PROP_GENLOCK_GRID, "Genlock fixed grid (camera)");
 	return props;
@@ -466,10 +492,12 @@ static obs_properties_t *jxs_source_getproperties(void *data)
 static void jxs_source_update(void *data, obs_data_t *settings)
 {
 	auto s = static_cast<jxs_source *>(data);
-	const cb_jxs_config cfg = {cb_jxs_port(obs_data_get_int(settings, PROP_JXS_PORT)),
-				   cb_jxs_camera(obs_data_get_int(settings, PROP_JXS_CAMERA)),
-				   cb_jxs_max_bpp(obs_data_get_int(settings, PROP_JXS_MAX_BPP)),
-				   cb_jxs_clamp_latency_ms(obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC))};
+	cb_jxs_config cfg = {cb_jxs_port(obs_data_get_int(settings, PROP_JXS_PORT)),
+			     cb_jxs_camera(obs_data_get_int(settings, PROP_JXS_CAMERA)),
+			     cb_jxs_max_bpp(obs_data_get_int(settings, PROP_JXS_MAX_BPP)),
+			     cb_jxs_clamp_latency_ms(obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC)),
+			     {0}};
+	cb_jxs_set_decoder_cores(&cfg, obs_data_get_string(settings, PROP_JXS_DECODER_CORES));
 	{
 		std::lock_guard<std::mutex> lock(s->config_mutex);
 		s->config = cfg;
