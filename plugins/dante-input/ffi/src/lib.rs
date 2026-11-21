@@ -1291,9 +1291,9 @@ pub unsafe extern "C" fn dante_input_tx_push(
     }));
 }
 
-/// obs#94 (camera-box#1527): hands the device the OBS mix's short-tick count for its status line's
-/// late_to_mix; a NULL `cb` clears it. The device's status thread calls `cb(opaque)` once a status
-/// line.
+/// obs#94 (camera-box#1527): hands the device the OBS mix's counts for its status line's
+/// late_to_mix and mixed_late; a NULL `cb` clears it. The device's status thread calls
+/// `cb(opaque, &short_ticks, &mixed_late)` once a status line, and `cb` writes both counts.
 ///
 /// # Safety
 /// `d` comes from dante_input_start and was not stopped; `cb` and `opaque` stay valid until

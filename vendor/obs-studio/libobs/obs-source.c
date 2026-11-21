@@ -9896,8 +9896,13 @@ uint64_t obs_source_get_audio_mixed_late_events(const obs_source_t *source)
 {
 	if (!obs_source_valid(source, "obs_source_get_audio_mixed_late_events"))
 		return 0;
-	/* written on the audio thread; a 64-bit aligned load (camera-box issue 1425's MIXED_LATE count) */
-	return *(const volatile uint64_t *)&source->genlock_mixed_late_events;
+	/* written on the audio thread (camera-box issue 1425's MIXED_LATE count): an atomic 64-bit load, so a
+	 * 32-bit build never reads it torn */
+#ifdef _MSC_VER
+	return (uint64_t)InterlockedCompareExchange64((volatile LONG64 *)&source->genlock_mixed_late_events, 0, 0);
+#else
+	return __atomic_load_n(&source->genlock_mixed_late_events, __ATOMIC_RELAXED);
+#endif
 }
 
 uint32_t obs_source_get_audio_mixers(const obs_source_t *source)
