@@ -227,7 +227,7 @@ void ndi_filter_raw_video(void *data, video_data *frame)
 	auto now = std::chrono::steady_clock::now();
 	if (now - f->last_video_conn_check >= std::chrono::seconds(1)) {
 		f->last_video_conn_check = now;
-		int nc = ndiLib->send_get_no_connections(f->ndi_sender, 10);
+		int nc = ndiLib->send_get_no_connections(f->ndi_sender, 0);
 		if (nc != f->no_video_connections) {
 			auto ndi_source = ndiLib->send_get_source_name(f->ndi_sender);
 			if (nc <= 0)
@@ -739,7 +739,7 @@ obs_audio_data *ndi_filter_asyncaudio(void *data, obs_audio_data *audio_data)
 	auto now = std::chrono::steady_clock::now();
 	if (now - f->last_audio_conn_check >= std::chrono::seconds(1)) {
 		f->last_audio_conn_check = now;
-		int nc = ndiLib->send_get_no_connections(f->ndi_sender, 10);
+		int nc = ndiLib->send_get_no_connections(f->ndi_sender, 0);
 		if (nc != f->no_audio_connections) {
 			auto ndi_source = ndiLib->send_get_source_name(f->ndi_sender);
 			if (nc <= 0)

@@ -701,7 +701,7 @@ void ndi_output_rawvideo(void *data, video_data *frame)
 	// Throttle calls to send_get_no_connections to at most once per second
 	auto now = std::chrono::steady_clock::now();
 	if (now - o->last_conn_check >= std::chrono::seconds(1)) {
-		int nc = ndiLib->send_get_no_connections(o->ndi_sender, 10);
+		int nc = ndiLib->send_get_no_connections(o->ndi_sender, 0);
 		o->last_conn_check = now;
 
 		if (nc != o->no_connections) {
@@ -794,7 +794,7 @@ void ndi_output_rawaudio(void *data, audio_data *frame)
 	if (now - o->last_conn_check >= std::chrono::seconds(1)) {
 		o->last_conn_check = now;
 
-		int nc = ndiLib->send_get_no_connections(o->ndi_sender, 10);
+		int nc = ndiLib->send_get_no_connections(o->ndi_sender, 0);
 
 		if (nc != o->no_connections) {
 			auto ndi_source = ndiLib->send_get_source_name(o->ndi_sender);
