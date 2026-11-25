@@ -753,6 +753,19 @@ static uint64_t audio_stall_gap_max_ns = 0;
 static uint64_t audio_stall_busy_max_ns = 0;
 static uint64_t audio_stall_ticks = 0;
 static uint64_t audio_stall_ticks_over = 0;
+/* obs#103: the audio thread's wait for obs->video.mixes_mutex at the start of each tick's render
+ * order (held by the graphics thread's output_frames and by the encoder-only mix setup/free), and
+ * the whole render-order build. Window maxima, logged and reset with the 1367 fields. */
+static uint64_t audio_stall_mixes_wait_max_ns = 0;
+static uint64_t audio_stall_order_max_ns = 0;
+
+static void audio_stall_note_order(uint64_t start_ns, uint64_t locked_ns, uint64_t end_ns)
+{
+	if (locked_ns > start_ns && locked_ns - start_ns > audio_stall_mixes_wait_max_ns)
+		audio_stall_mixes_wait_max_ns = locked_ns - start_ns;
+	if (end_ns > start_ns && end_ns - start_ns > audio_stall_order_max_ns)
+		audio_stall_order_max_ns = end_ns - start_ns;
+}
 
 static void audio_stall_probe_entry(uint64_t entry_ns, uint64_t tick_ns)
 {
@@ -854,7 +867,7 @@ static void audio_stall_dump(audio_t *audio_io, size_t sample_rate)
 	     "out_pass_max_ms=%.1f tail_max_ms=%.1f late_slept=%u late_prev_busy_ms=%.1f "
 	     "late_prev_mix_ms=%.1f late_prev_pass_ms=%.1f late_prev_lock_ms=%.1f late_prev_tail_ms=%.1f "
 	     "out_cb_max_ms=%.1f out_cb_mix=%u out_cb_kind=%s out_cb_fn=0x%llx out_cb_param=0x%llx "
-	     "out_cb_name='%s'",
+	     "mixes_wait_max_ms=%.1f order_max_ms=%.1f out_cb_name='%s'",
 	     (double)audio_stall_gap_max_ns / 1e6, (double)audio_stall_busy_max_ns / 1e6,
 	     (unsigned long long)audio_stall_ticks, (unsigned long long)audio_stall_ticks_over,
 	     (double)audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES) / 1e6,
@@ -865,8 +878,11 @@ static void audio_stall_dump(audio_t *audio_io, size_t sample_rate)
 	     (double)out_stall.late_prev_pass_ns / 1e6, (double)out_stall.late_prev_lock_ns / 1e6,
 	     (double)out_stall.late_prev_tail_ns / 1e6, (double)out_stall.cb_max_ns / 1e6,
 	     (unsigned)out_stall.cb_max_mix, out_cb_kind, (unsigned long long)(uintptr_t)out_stall.cb_max_callback,
-	     (unsigned long long)(uintptr_t)out_stall.cb_max_param, out_cb_name);
+	     (unsigned long long)(uintptr_t)out_stall.cb_max_param, (double)audio_stall_mixes_wait_max_ns / 1e6,
+	     (double)audio_stall_order_max_ns / 1e6, out_cb_name);
 	audio_stall_gap_max_ns = 0;
+	audio_stall_mixes_wait_max_ns = 0;
+	audio_stall_order_max_ns = 0;
 	audio_stall_busy_max_ns = 0;
 	audio_stall_ticks = 0;
 	audio_stall_ticks_over = 0;
@@ -903,7 +919,9 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	/* ------------------------------------------------ */
 	/* build audio render order */
 
+	const uint64_t order_start_ns = os_gettime_ns();
 	pthread_mutex_lock(&obs->video.mixes_mutex);
+	const uint64_t order_locked_ns = os_gettime_ns();
 	for (size_t j = 0; j < obs->video.mixes.num; j++) {
 		struct obs_view *view = obs->video.mixes.array[j]->view;
 		if (!view)
@@ -933,6 +951,7 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 		}
 		pthread_mutex_unlock(&view->channels_mutex);
 	}
+	audio_stall_note_order(order_start_ns, order_locked_ns, os_gettime_ns());
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
 
 	/* camera-box issue 1381: the render order so far is the MIX -- every source an output mix's active
