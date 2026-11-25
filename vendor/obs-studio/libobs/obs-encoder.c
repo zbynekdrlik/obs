@@ -314,6 +314,7 @@ static void maybe_set_up_gpu_rescale(struct obs_encoder *encoder)
 	mix->view = current_mix->view;
 
 	pthread_mutex_lock(&obs->video.mixes_mutex);
+	const uint64_t mixes_locked_ns = os_gettime_ns();
 
 	// double check that nobody else added a matching mix while we've created our mix
 	for (size_t i = 0; i < obs->video.mixes.num; i++) {
@@ -343,6 +344,7 @@ static void maybe_set_up_gpu_rescale(struct obs_encoder *encoder)
 		obs_encoder_set_video(encoder, mix->video);
 	}
 
+	obs_mixes_mutex_note_hold("maybe_set_up_gpu_rescale", mixes_locked_ns);
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
 }
 
@@ -745,6 +747,7 @@ bool obs_encoder_initialize(obs_encoder_t *encoder)
 static void maybe_clear_encoder_core_video_mix(obs_encoder_t *encoder)
 {
 	pthread_mutex_lock(&obs->video.mixes_mutex);
+	const uint64_t mixes_locked_ns = os_gettime_ns();
 	for (size_t i = 0; i < obs->video.mixes.num; i++) {
 		struct obs_core_video_mix *mix = obs->video.mixes.array[i];
 		if (mix->video != encoder->media)
@@ -760,6 +763,7 @@ static void maybe_clear_encoder_core_video_mix(obs_encoder_t *encoder)
 			obs_free_video_mix(mix);
 		}
 	}
+	obs_mixes_mutex_note_hold("maybe_clear_encoder_core_video_mix", mixes_locked_ns);
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
 }
 

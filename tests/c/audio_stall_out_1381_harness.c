@@ -494,6 +494,8 @@ static uint64_t audio_stall_gap_max_ns = 101400000;
 static uint64_t audio_stall_busy_max_ns = 1700000;
 static uint64_t audio_stall_ticks = 2816;
 static uint64_t audio_stall_ticks_over = 441;
+static uint64_t audio_stall_mixes_wait_max_ns = 29650000;
+static uint64_t audio_stall_order_max_ns = 29720000;
 
 static void run_log_line(void)
 {

@@ -264,7 +264,7 @@ fn the_audio_stall_line_appends_the_attribution_fields_1381() {
          out_pass_max_ms=88.9 tail_max_ms=5.6 late_slept=1 late_prev_busy_ms=98.1 \
          late_prev_mix_ms=1.0 late_prev_pass_ms=93.1 late_prev_lock_ms=12.4 late_prev_tail_ms=4.0 \
          out_cb_max_ms=80.1 out_cb_mix=1 out_cb_kind=output out_cb_fn=0x7ff612345678 \
-         out_cb_param=0xdeadbeef00 out_cb_name='NDI PGM'"
+         out_cb_param=0xdeadbeef00 mixes_wait_max_ms=29.6 order_max_ms=29.7 out_cb_name='NDI PGM'"
     );
 }
 
