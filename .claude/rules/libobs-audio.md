@@ -6,6 +6,8 @@ paths:
   - "vendor/obs-studio/libobs/obs-internal.h"
   - "tests/c/genlock_audio_mix_guard_1381_harness.c"
   - "tests/audio-short-ticks/**"
+  - "vendor/obs-studio/libobs/obs-video.c"
+  - "vendor/obs-studio/libobs/obs-encoder.c"
 ---
 
 # libobs audio mixer (the fork)
@@ -15,3 +17,4 @@ paths:
 - obs#94: `obs_source_get_audio_short_ticks()` counts the mixing ticks a mix member sat out. The skip points mark the tick (`obs_source_audio_mix_skipped`), and `audio_callback` counts each mark once inside the mixing block. Under OBS's default dynamic buffering a starved source grows the mix's buffering instead of sitting out. Without a video (`obs_reset_video`) no view mixes audio, so no source is a member. A libobs audio test that needs a mix exclusion therefore runs the box FIXED plan (HOME `.camera-box/genlock-audio-buffering-ms`) and a 64x64 video (`tests/audio-short-ticks`).
 - Build and run a libobs C test locally against `vendor/obs-studio/build_ubuntu`. Run `ninja libobs libobs-opengl`, then gcc with `-I libobs -I build_ubuntu/config -I build_ubuntu/libobs -L build_ubuntu/libobs -lobs`. Then `LD_LIBRARY_PATH=build_ubuntu/libobs:build_ubuntu/libobs-opengl xvfb-run -a <test> libobs/data/`. The build tree's `libobsConfig.cmake` does not load for find_package.
 - obs#96: the STAMP-basis ASRC books a placement jump only after its 60 s lock (`ASRC_REGRESSION_LOCK_SPAN_S` captures the setpoint), and only a CHANGE beyond the band held for >= 1 s and 8 packets (a steady offset is absorbed by the 10 s EMA). A test of a booking waits past the lock: `tests/audio-short-ticks` steps a source's stamps +30 ms at 75 s. Each booking logs `asrc-booking: source '<name>' jumps= booked_ms= owed_ms= ... err_ms= target_ms= ema_ms= appended= frames= audio_ts_age_ms= buffered_ms= actual_minus_intended_ms= intended_minus_raw_ms= raw_age_ms= basis=` (at most 600 a source).
+- obs#103: `audio_callback` builds every tick's render order under `obs->video.mixes_mutex`, the lock the graphics thread holds across `output_frames` and the encoder-only (GPU rescale) mix setup/free holds around `obs_free_video_mix`. A wait there counts in `late_prev_mix_ms`, not in `lock_wait_max_ms` (that is audio-io's input mutex). The audio-stall line's `mixes_wait_max_ms` / `order_max_ms` and the `mixes-mutex: <site> held` line show it. The stall line is pinned by tests/audio_stall_out_1381.rs and its harness's statics: a new field needs both.
