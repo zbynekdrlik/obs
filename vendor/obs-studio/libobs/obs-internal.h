@@ -766,10 +766,11 @@ extern bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in
 			   struct audio_output_data *mixes);
 
 extern struct obs_core_video_mix *get_mix_for_video(video_t *video);
-/* obs#103: logs a `mixes-mutex:` line when `site` held obs->video.mixes_mutex 10 ms or more since
- * `locked_ns` (the audio thread waits for that lock at every tick's render order). Call it just
- * before the unlock. At most 600 lines a process. */
-extern void obs_mixes_mutex_note_hold(const char *site, uint64_t locked_ns);
+/* obs#103: logs a `mixes-mutex:` line when `site` held obs->video.mixes_mutex 10 ms or more, from
+ * `locked_ns` (read right after the lock) to `unlock_ns` (read right before the unlock); the audio
+ * thread waits for that lock at every tick's render order. Call it AFTER the unlock, so the log
+ * write never lengthens the hold. At most 600 lines a process. */
+extern void obs_mixes_mutex_note_hold(const char *site, uint64_t locked_ns, uint64_t unlock_ns);
 
 extern void start_raw_video(video_t *video, const struct video_scale_info *conversion, uint32_t frame_rate_divisor,
 			    void (*callback)(void *param, struct video_data *frame), void *param);

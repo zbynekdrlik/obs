@@ -326,8 +326,9 @@ void obs_canvas_clear_mix(obs_canvas_t *canvas)
 			break;
 		}
 	}
-	obs_mixes_mutex_note_hold("obs_canvas_clear_mix", mixes_locked_ns);
+	const uint64_t mixes_unlock_ns = os_gettime_ns();
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
+	obs_mixes_mutex_note_hold("obs_canvas_clear_mix", mixes_locked_ns, mixes_unlock_ns);
 }
 
 /* Clear mixes attached to canvases */

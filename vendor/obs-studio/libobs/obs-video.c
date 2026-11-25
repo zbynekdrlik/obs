@@ -1276,16 +1276,15 @@ static inline void output_frame(struct obs_core_video_mix *video)
 		video->cur_texture = 0;
 }
 
-void obs_mixes_mutex_note_hold(const char *site, uint64_t locked_ns)
+void obs_mixes_mutex_note_hold(const char *site, uint64_t locked_ns, uint64_t unlock_ns)
 {
 	static volatile long lines = 0;
-	const uint64_t now = os_gettime_ns();
-	if (now <= locked_ns || now - locked_ns < 10000000ULL)
+	if (unlock_ns <= locked_ns || unlock_ns - locked_ns < 10000000ULL)
 		return;
 	if (os_atomic_inc_long(&lines) > 600)
 		return;
 	blog(LOG_INFO, "mixes-mutex: %s held obs->video.mixes_mutex %.1f ms (the audio thread waits for it; obs#103)",
-	     site, (double)(now - locked_ns) / 1e6);
+	     site, (double)(unlock_ns - locked_ns) / 1e6);
 }
 
 static inline void output_frames(void)
@@ -1304,8 +1303,9 @@ static inline void output_frames(void)
 			num--;
 		}
 	}
-	obs_mixes_mutex_note_hold("output_frames", mixes_locked_ns);
+	const uint64_t mixes_unlock_ns = os_gettime_ns();
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
+	obs_mixes_mutex_note_hold("output_frames", mixes_locked_ns, mixes_unlock_ns);
 }
 
 #define NBSP "\xC2\xA0"

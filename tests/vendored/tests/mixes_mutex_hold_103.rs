@@ -48,8 +48,6 @@ const HARNESS: &str = r#"
 #include <stdint.h>
 #include <stdio.h>
 #define LOG_INFO 300
-static uint64_t now_ns;
-static uint64_t os_gettime_ns(void) { return now_ns; }
 static long os_atomic_inc_long(volatile long *v) { return ++*v; }
 static int lines;
 static char last[512];
@@ -62,7 +60,7 @@ static void blog(int level, const char *fmt, ...)
 	va_end(ap);
 	lines++;
 }
-void obs_mixes_mutex_note_hold(const char *site, uint64_t locked_ns);
+void obs_mixes_mutex_note_hold(const char *site, uint64_t locked_ns, uint64_t unlock_ns);
 static uint64_t audio_stall_mixes_wait_max_ns = 0;
 static uint64_t audio_stall_order_max_ns = 0;
 @NOTE_ORDER@
@@ -77,18 +75,14 @@ int main(void)
 	printf("ORDER2 wait=%llu order=%llu\n", (unsigned long long)audio_stall_mixes_wait_max_ns,
 	       (unsigned long long)audio_stall_order_max_ns);
 
-	now_ns = 109999999;
-	obs_mixes_mutex_note_hold("short", 100000000);
+	obs_mixes_mutex_note_hold("short", 100000000, 109999999);
 	printf("HOLD_SHORT lines=%d\n", lines);
-	now_ns = 130000000;
-	obs_mixes_mutex_note_hold("maybe_clear_encoder_core_video_mix", 100000000);
+	obs_mixes_mutex_note_hold("maybe_clear_encoder_core_video_mix", 100000000, 130000000);
 	printf("HOLD_LONG lines=%d %s\n", lines, last);
-	now_ns = 90000000;
-	obs_mixes_mutex_note_hold("clock_back", 100000000);
+	obs_mixes_mutex_note_hold("clock_back", 100000000, 90000000);
 	printf("HOLD_BACK lines=%d\n", lines);
-	now_ns = 200000000;
 	for (int i = 0; i < 1000; i++)
-		obs_mixes_mutex_note_hold("output_frames", 100000000);
+		obs_mixes_mutex_note_hold("output_frames", 100000000, 200000000);
 	printf("HOLD_CAP lines=%d\n", lines);
 	return 0;
 }
@@ -159,23 +153,36 @@ fn a_hold_of_10_ms_or_more_names_its_site_at_most_600_times_103() {
     assert_eq!(t[5], "HOLD_CAP lines=600");
 }
 
+/// `text` with every run of whitespace collapsed to one space, so a reflow or a re-indent of the C
+/// source does not break the structural checks below.
+fn squash(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The audio thread measures the wait right around its one mixes_mutex lock, and every site that
-/// frees a mix or renders under that lock reports its hold before unlocking.
+/// frees a mix or renders under that lock reads the clock before its unlock and reports the hold
+/// AFTER it (the log write never lengthens the hold the audio thread waits on).
 #[test]
 fn the_lock_and_its_slow_holders_are_measured_103() {
-    let audio = read(OBS_AUDIO);
-    let order = "\tconst uint64_t order_start_ns = os_gettime_ns();\n\
-                 \tpthread_mutex_lock(&obs->video.mixes_mutex);\n\
-                 \tconst uint64_t order_locked_ns = os_gettime_ns();\n";
-    assert_eq!(audio.matches(order).count(), 1);
+    let audio = squash(&read(OBS_AUDIO));
+    let order = squash(
+        "const uint64_t order_start_ns = os_gettime_ns();
+         pthread_mutex_lock(&obs->video.mixes_mutex);
+         const uint64_t order_locked_ns = os_gettime_ns();",
+    );
     assert_eq!(
-        audio
-            .matches(
-                "\taudio_stall_note_order(order_start_ns, order_locked_ns, os_gettime_ns());\n\
-                 \tpthread_mutex_unlock(&obs->video.mixes_mutex);\n"
-            )
-            .count(),
-        1
+        audio.matches(&order).count(),
+        1,
+        "obs#103: the order probe around the lock"
+    );
+    let note = squash(
+        "audio_stall_note_order(order_start_ns, order_locked_ns, os_gettime_ns());
+         pthread_mutex_unlock(&obs->video.mixes_mutex);",
+    );
+    assert_eq!(
+        audio.matches(&note).count(),
+        1,
+        "obs#103: the order note before the unlock"
     );
     for (file, site) in [
         ("vendor/obs-studio/libobs/obs-video.c", "output_frames"),
@@ -192,14 +199,15 @@ fn the_lock_and_its_slow_holders_are_measured_103() {
             "obs_canvas_clear_mix",
         ),
     ] {
-        let call = format!(
-            "\tobs_mixes_mutex_note_hold(\"{site}\", mixes_locked_ns);\n\
-             \tpthread_mutex_unlock(&obs->video.mixes_mutex);\n"
-        );
+        let call = squash(&format!(
+            "const uint64_t mixes_unlock_ns = os_gettime_ns();
+             pthread_mutex_unlock(&obs->video.mixes_mutex);
+             obs_mixes_mutex_note_hold(\"{site}\", mixes_locked_ns, mixes_unlock_ns);"
+        ));
         assert_eq!(
-            read(file).matches(&call).count(),
+            squash(&read(file)).matches(&call).count(),
             1,
-            "obs#103: {site} in {file} must report its mixes_mutex hold just before the unlock"
+            "obs#103: {site} in {file} must read the clock before its mixes_mutex unlock and report after it"
         );
     }
 }

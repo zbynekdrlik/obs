@@ -344,8 +344,9 @@ static void maybe_set_up_gpu_rescale(struct obs_encoder *encoder)
 		obs_encoder_set_video(encoder, mix->video);
 	}
 
-	obs_mixes_mutex_note_hold("maybe_set_up_gpu_rescale", mixes_locked_ns);
+	const uint64_t mixes_unlock_ns = os_gettime_ns();
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
+	obs_mixes_mutex_note_hold("maybe_set_up_gpu_rescale", mixes_locked_ns, mixes_unlock_ns);
 }
 
 static int gcd(int a, int b)
@@ -763,8 +764,9 @@ static void maybe_clear_encoder_core_video_mix(obs_encoder_t *encoder)
 			obs_free_video_mix(mix);
 		}
 	}
-	obs_mixes_mutex_note_hold("maybe_clear_encoder_core_video_mix", mixes_locked_ns);
+	const uint64_t mixes_unlock_ns = os_gettime_ns();
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
+	obs_mixes_mutex_note_hold("maybe_clear_encoder_core_video_mix", mixes_locked_ns, mixes_unlock_ns);
 }
 
 void obs_encoder_shutdown(obs_encoder_t *encoder)
