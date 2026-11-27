@@ -137,11 +137,36 @@ fn the_glue_reads_and_applies_the_picked_source_and_names_it() {
         src.contains("camerabox::cb_dock_lock_pick_source("),
         "obs#108: the glue must choose the lock source through cb_dock_lock_pick_source"
     );
-    let resolver_calls = src.matches("cb_lock_source_get(").count();
+    let read_path = src
+        .split("static bool cb_read_lock_latency_ms(int32_t *out_ms, int *idx_out) {")
+        .nth(1)
+        .and_then(|rest| rest.split("static ").next())
+        .expect("obs#108: cb_read_lock_latency_ms(out_ms, idx_out) must exist");
     assert!(
-        resolver_calls >= 3,
-        "obs#108: the resolver must be defined once and used by BOTH the read and the apply path \
-         ({resolver_calls} occurrences)"
+        read_path.contains("obs_source_t *src = cb_lock_source_get(idx_out);"),
+        "obs#108: the read path must take the lock source from cb_lock_source_get"
+    );
+    let apply_path = src
+        .split("static void cb_apply_lock_latency_task(void *param) {")
+        .nth(1)
+        .and_then(|rest| rest.split("static ").next())
+        .expect("obs#108: cb_apply_lock_latency_task must exist");
+    assert!(
+        apply_path.contains("obs_source_t *src = cb_lock_source_get(&idx);")
+            && apply_path.contains("if (!src || idx != read_idx) {"),
+        "obs#108: the apply path must resolve the lock source again and skip when it is no longer \
+         the source the value was read from"
+    );
+    assert!(
+        src.contains("auto *task = new CbApplyLockLatencyTask{new_ms, lock_idx};")
+            && src.contains("cb_apply_lock_latency_ms(act.new_delay_ms, lock_idx);"),
+        "obs#108: the queued write must carry the index of the source its value was read from"
+    );
+    assert!(
+        src.contains(
+            "if (st->cb_lock_source_idx >= 0) st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();"
+        ),
+        "obs#108: a switch from one lock source to another must drop the previous feed's offsets"
     );
     let suggested = src
         .split("av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src %d -> %dms (measured offset=%.1fms)")

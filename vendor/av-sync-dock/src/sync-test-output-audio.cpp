@@ -353,19 +353,26 @@ static bool cb_read_lock_latency_ms(int32_t *out_ms, int *idx_out)
  * block on the UI thread's own scheduling. */
 struct CbApplyLockLatencyTask {
 	int32_t new_delay_ms;
+	int lock_idx; // obs#108: the lock source new_delay_ms was computed from (its read on the audio worker)
 };
 
 static void cb_apply_lock_latency_task(void *param)
 {
 	auto *task = (CbApplyLockLatencyTask *)param;
 	const int32_t new_ms = task->new_delay_ms;
+	const int read_idx = task->lock_idx;
 	delete task;
 
+	/* obs#108: write only the source the value was computed from. If the program switched feed
+	 * between the read and this task, skip: new_ms is based on the other source's pin. */
 	int idx = -1;
 	obs_source_t *src = cb_lock_source_get(&idx);
-	if (!src) {
+	if (!src || idx != read_idx) {
 		blog(LOG_WARNING,
-		     "av-sync-dock: LOCK-CORRECT apply skipped (UI thread) -- no lock source shown in the program");
+		     "av-sync-dock: LOCK-CORRECT apply skipped (UI thread) -- the lock source shown in the program "
+		     "is no longer '%s'",
+		     camerabox::CB_DOCK_LOCK_SOURCE_NAMES[read_idx]);
+		obs_source_release(src);
 		return;
 	}
 
@@ -386,9 +393,9 @@ static void cb_apply_lock_latency_task(void *param)
 	}
 }
 
-static void cb_apply_lock_latency_ms(int32_t new_ms)
+static void cb_apply_lock_latency_ms(int32_t new_ms, int lock_idx)
 {
-	auto *task = new CbApplyLockLatencyTask{new_ms};
+	auto *task = new CbApplyLockLatencyTask{new_ms, lock_idx};
 	obs_queue_task(OBS_TASK_UI, cb_apply_lock_latency_task, task, false);
 }
 
@@ -712,6 +719,9 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 					if (lock_idx != st->cb_lock_source_idx) {
 						blog(LOG_INFO, "av-sync-dock: LOCK-CORRECT source '%s' (pin %d ms)", lock_name,
 						     (int)current_ms);
+						/* the offsets measured on the previous feed say nothing about this one */
+						if (st->cb_lock_source_idx >= 0)
+							st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
 						st->cb_lock_source_idx = lock_idx;
 						st->cb_last_seen_pin_ms = -1;
 					}
@@ -742,7 +752,7 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 					switch (outcome) {
 					case camerabox::CbDockLockOutcome::Write: {
 						const double delta_ms = (double)(act.new_delay_ms - current_ms);
-						cb_apply_lock_latency_ms(act.new_delay_ms);
+						cb_apply_lock_latency_ms(act.new_delay_ms, lock_idx);
 						/* #926 fix-up (review finding 1/7): shift every retained cluster
 						 * sample by the applied delta so the window reflects the
 						 * POST-correction state immediately -- see
@@ -819,6 +829,8 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 					 * camerabox::CB_DOCK_LOCK_SOURCE_NAMES nor CAMERA_BOX_ASRC_SOURCE_NAME.
 					 * obs#108: a candidate that exists but is hidden in the program is no
 					 * lock source either. */
+					static_assert(camerabox::CB_DOCK_LOCK_SOURCE_COUNT == 2,
+						      "obs#108: the unavailable line below names every lock source candidate");
 					st->cb_lock_source_missing_logged = true;
 					st->cb_lock_source_idx = -1;
 					blog(LOG_WARNING,
