@@ -25,6 +25,7 @@
  * without libobs/quirc/Qt. Keep in sync with `src/av_sync_dock.rs` and `src/qpsk_marker.rs`.
  */
 
+#include <cstddef>
 #include <cstdint>
 #include <cmath>
 #include <complex>
@@ -345,6 +346,30 @@ inline double cb_clamp_f64(double v, double lo, double hi)
  * timeout. */
 static const int32_t CB_DOCK_LOCK_MAX_STEP_MS = 5;
 static const double CB_DOCK_LOCK_MIN_REAPPLY_S = 30.0;
+/* obs#108: the program sources whose genlock_latency_ms_src the lock corrector reads (and would
+ * write, #942 keeps that off). The lock source is the FIRST that exists AND is active (shown in the
+ * program output, obs_source_active), so the SUGGESTED value is based on the pin of the source the
+ * measured program comes from. stream-snv 27.11.2026: the dock read 'NDI 2ME PGM' (1120 ms, hidden
+ * in the PRO scene) while the program showed 'JXS PGM src' (1019 ms). */
+static const char *const CB_DOCK_LOCK_SOURCE_NAMES[] = {"JXS PGM src", "NDI 2ME PGM"};
+static const size_t CB_DOCK_LOCK_SOURCE_COUNT = sizeof(CB_DOCK_LOCK_SOURCE_NAMES) / sizeof(CB_DOCK_LOCK_SOURCE_NAMES[0]);
+
+struct CbDockLockCandidate {
+	bool exists = false; // a source of that name exists now
+	bool active = false; // it is shown in the program output
+};
+
+/* The index of the lock source in CB_DOCK_LOCK_SOURCE_NAMES, or -1 when no candidate is shown in
+ * the program (no lock source: no suggestion, no write). Pure, tests/av_sync_dock_lock_source_108.rs. */
+inline int cb_dock_lock_pick_source(const CbDockLockCandidate *candidates, size_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		if (candidates[i].exists && candidates[i].active)
+			return (int)i;
+	}
+	return -1;
+}
+
 static const int32_t CB_DOCK_LOCK_LATENCY_MIN_MS = 3;
 static const int32_t CB_DOCK_LOCK_LATENCY_MAX_MS = 2000;
 /* #926 fix-up review finding 3 -- mirror of av_sync_dock::DOCK_LOCK_MIN_MARGIN_MS.

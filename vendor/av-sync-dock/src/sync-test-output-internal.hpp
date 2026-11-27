@@ -83,12 +83,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define CAMERA_BOX_DIAG_LOG_INTERVAL_NS 10000000000ULL
 
 /* #926: the video-delay actuator `CbDockLockCorrector` drives -- the SAME per-source
- * `genlock_latency_ms_src` knob `scripts/av_sync_calibrate.py` already nudges OFFLINE, on the
- * SAME 'NDI 2ME PGM' program NDI source (`av_sync_calibrate.py`'s own DEFAULT_SOURCE). Hardcoded,
- * no env var, per this repo's hard-lock philosophy (issue #257: no forgettable/mysterious knobs) --
- * matching how every other rig constant in this file is a compile-time literal, not a runtime
- * override. */
-#define CAMERA_BOX_LOCK_SOURCE_NAME "NDI 2ME PGM"
+ * `genlock_latency_ms_src` knob `scripts/av_sync_calibrate.py` already nudges OFFLINE. obs#108: the
+ * source is the program source the program shows, picked from camerabox::CB_DOCK_LOCK_SOURCE_NAMES
+ * (camera-box-audio.hpp) by cb_lock_source_get() in sync-test-output-audio.cpp, never one fixed
+ * name. Hardcoded candidates, no env var (issue #257: no forgettable/mysterious knobs). */
 
 /* #926 fix-up (review finding 6): how long (ns) a video-QR-decode signal is trusted as "the test
  * signal is genuinely still here" before the corrector refuses to actuate on it. Generously above
@@ -293,7 +291,7 @@ struct sync_test_output
 	 * camera-box-audio.hpp (tests/av_sync_dock_audit_log.rs) — touched only on the audio decode worker. */
 	camerabox::CbLockAuditTracker cb_lock_audit;
 
-	/* #926: holds CAMERA_BOX_LOCK_SOURCE_NAME's genlock_latency_ms_src so the dock's own displayed
+	/* #926: holds the lock source's (obs#108: the shown program source) genlock_latency_ms_src so the dock's own displayed
 	 * offset (audio_ts - video_ts) never rests negative ("audio early", a forbidden steady state).
 	 * Only ever acts on a Locked/Updated lock-audit transition above; an Unlocked transition (real
 	 * event, no test signal) freezes it -- see camera-box-audio.hpp's own doc comment. Touched only
@@ -336,7 +334,12 @@ struct sync_test_output
 	/* #926 fix-up (review finding 9/16): latches so each condition logs ONCE (and again after it
 	 * clears and re-occurs) instead of spamming a blog() line per trusted marker while the
 	 * condition persists. Touched only on the audio decode worker. */
-	bool cb_lock_source_missing_logged = false; // CAMERA_BOX_LOCK_SOURCE_NAME not found
+	bool cb_lock_source_missing_logged = false; // obs#108: no lock source shown in the program
+	/* obs#108: index in camerabox::CB_DOCK_LOCK_SOURCE_NAMES of the last lock source read; -1 = none
+	 * yet. A pass with no lock source shown keeps it, so a switch through such a scene still drops the
+	 * previous feed's offsets. A change is logged once (`LOCK-CORRECT source '<name>' (pin N ms)`).
+	 * Audio decode worker only. */
+	int cb_lock_source_idx = -1;
 	bool cb_rail_pinned_logged = false;         // pinned at a hardware rail with audio still early
 	/* #1319 Part 2: last genlock_latency_ms_src pin observed on a trusted push; -1 = none seen yet.
 	 * A CHANGE is logged once (`pin-change observed <old> -> <new>`) so a wrong-cluster pick after a
