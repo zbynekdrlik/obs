@@ -191,7 +191,9 @@ fn the_glue_reads_and_applies_the_picked_source_and_names_it() {
         "obs#108: a change of lock source must be logged with its name and pin"
     );
     assert!(
-        src.contains("av-sync-dock: LOCK-CORRECT unavailable -- no lock source shown in the program"),
+        src.contains(
+            "av-sync-dock: LOCK-CORRECT unavailable -- no lock source shown in the program"
+        ),
         "obs#108: no shown candidate must be logged once"
     );
 }
