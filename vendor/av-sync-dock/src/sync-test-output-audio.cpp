@@ -296,14 +296,38 @@ static inline void st_raw_audio_test_preamble(struct sync_test_output *st, uint6
 	}
 }
 
-/* #926: read CAMERA_BOX_LOCK_SOURCE_NAME's CURRENT genlock_latency_ms_src -- always read fresh
- * (never cached) so a concurrent manual/scripted change (an operator, or av_sync_calibrate.py) is
- * respected rather than clobbered. Returns false if the source does not exist right now (e.g. the
- * scene collection hasn't loaded it yet) -- the caller must not apply a correction without a real
- * current value to correct FROM. */
-static bool cb_read_lock_latency_ms(int32_t *out_ms)
+/* obs#108: the lock source -- the first of camerabox::CB_DOCK_LOCK_SOURCE_NAMES that exists and is
+ * shown in the program output (obs_source_active), picked by the pure cb_dock_lock_pick_source().
+ * Returns a held reference (the caller releases it) and its index in *idx_out, or NULL and -1 when
+ * no candidate is shown in the program. Resolved fresh on every call, so the dock follows a program
+ * that switches between the JXS and the NDI feed. */
+static obs_source_t *cb_lock_source_get(int *idx_out)
 {
-	obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_LOCK_SOURCE_NAME);
+	camerabox::CbDockLockCandidate candidates[camerabox::CB_DOCK_LOCK_SOURCE_COUNT];
+	obs_source_t *sources[camerabox::CB_DOCK_LOCK_SOURCE_COUNT] = {};
+	for (size_t i = 0; i < camerabox::CB_DOCK_LOCK_SOURCE_COUNT; i++) {
+		sources[i] = obs_get_source_by_name(camerabox::CB_DOCK_LOCK_SOURCE_NAMES[i]);
+		candidates[i].exists = sources[i] != nullptr;
+		candidates[i].active = sources[i] != nullptr && obs_source_active(sources[i]);
+	}
+	const int pick = camerabox::cb_dock_lock_pick_source(candidates, camerabox::CB_DOCK_LOCK_SOURCE_COUNT);
+	for (size_t i = 0; i < camerabox::CB_DOCK_LOCK_SOURCE_COUNT; i++) {
+		if ((int)i != pick)
+			obs_source_release(sources[i]);
+	}
+	*idx_out = pick;
+	return pick >= 0 ? sources[pick] : nullptr;
+}
+
+/* #926: read the lock source's CURRENT genlock_latency_ms_src -- always read fresh
+ * (never cached) so a concurrent manual/scripted change (an operator, or av_sync_calibrate.py) is
+ * respected rather than clobbered. Returns false if no lock source is shown in the program right now
+ * (obs#108; e.g. the scene collection hasn't loaded it yet) -- the caller must not apply a correction
+ * without a real current value to correct FROM. *idx_out = the source's index in
+ * camerabox::CB_DOCK_LOCK_SOURCE_NAMES. */
+static bool cb_read_lock_latency_ms(int32_t *out_ms, int *idx_out)
+{
+	obs_source_t *src = cb_lock_source_get(idx_out);
 	if (!src)
 		return false;
 	obs_data_t *settings = obs_source_get_settings(src);
@@ -314,7 +338,7 @@ static bool cb_read_lock_latency_ms(int32_t *out_ms)
 }
 
 /* #926 fix-up (review finding 4, covers 8/12): apply a NEW absolute genlock_latency_ms_src to
- * CAMERA_BOX_LOCK_SOURCE_NAME, mirroring the SAME settings-update mechanism
+ * the lock source (obs#108: resolved again on the UI thread, cb_lock_source_get), mirroring the SAME settings-update mechanism
  * `scripts/av_sync_calibrate.py`'s `apply_latency()` performs over the OBS WebSocket
  * (GetInputSettings/SetInputSettings), done here in-process instead -- but marshaled onto the OBS
  * UI thread via `obs_queue_task`, never mutated directly from the camera-box audio decode (the core
@@ -337,10 +361,11 @@ static void cb_apply_lock_latency_task(void *param)
 	const int32_t new_ms = task->new_delay_ms;
 	delete task;
 
-	obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_LOCK_SOURCE_NAME);
+	int idx = -1;
+	obs_source_t *src = cb_lock_source_get(&idx);
 	if (!src) {
-		blog(LOG_WARNING, "av-sync-dock: LOCK-CORRECT apply skipped (UI thread) -- source '%s' not found",
-		     CAMERA_BOX_LOCK_SOURCE_NAME);
+		blog(LOG_WARNING,
+		     "av-sync-dock: LOCK-CORRECT apply skipped (UI thread) -- no lock source shown in the program");
 		return;
 	}
 
@@ -357,7 +382,7 @@ static void cb_apply_lock_latency_task(void *param)
 	if (got != new_ms) {
 		blog(LOG_WARNING,
 		     "av-sync-dock: LOCK-CORRECT read-back mismatch on '%s' -- wrote %d, read back %d",
-		     CAMERA_BOX_LOCK_SOURCE_NAME, (int)new_ms, (int)got);
+		     camerabox::CB_DOCK_LOCK_SOURCE_NAMES[idx], (int)new_ms, (int)got);
 	}
 }
 
@@ -678,8 +703,18 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			const bool signal_fresh = age_signal <= CAMERA_BOX_TEST_SIGNAL_FRESH_NS;
 			if (signal_fresh) {
 				int32_t current_ms = 0;
-				if (cb_read_lock_latency_ms(&current_ms)) {
+				int lock_idx = -1;
+				if (cb_read_lock_latency_ms(&current_ms, &lock_idx)) {
 					st->cb_lock_source_missing_logged = false;
+					const char *lock_name = camerabox::CB_DOCK_LOCK_SOURCE_NAMES[lock_idx];
+					/* obs#108: a new lock source (the program switched feed) is named once, and
+					 * its pin is not a pin change of the previous source. */
+					if (lock_idx != st->cb_lock_source_idx) {
+						blog(LOG_INFO, "av-sync-dock: LOCK-CORRECT source '%s' (pin %d ms)", lock_name,
+						     (int)current_ms);
+						st->cb_lock_source_idx = lock_idx;
+						st->cb_last_seen_pin_ms = -1;
+					}
 					/* #1319 Part 2: a source-pin CHANGE (the E2E gate / operator moved
 					 * genlock_latency_ms_src) is exactly when the cluster can re-pick a wrong
 					 * QPSK marker lag -- log it once so a wrong pick afterwards is visible.
@@ -752,9 +787,9 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 						if (suggestion.has_value)
 							blog(LOG_INFO,
 							     "av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src %d "
-							     "-> %dms (measured offset=%.1fms) [monitor-only -- the E2E gate "
-							     "is the only continuous writer]",
-							     (int)current_ms, (int)suggestion.target_ms, gate_offset_ms);
+							     "-> %dms (measured offset=%.1fms) source='%s' [monitor-only -- the "
+							     "E2E gate is the only continuous writer]",
+							     (int)current_ms, (int)suggestion.target_ms, gate_offset_ms, lock_name);
 						break;
 					}
 					case camerabox::CbDockLockOutcome::RailWarn:
@@ -780,13 +815,16 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 					}
 				} else if (!st->cb_lock_source_missing_logged) {
 					/* #926 fix-up (review finding 16): log the missing lock source ONCE
-					 * (not per trusted marker) -- STRIH runs the same DLL but has neither
-					 * CAMERA_BOX_LOCK_SOURCE_NAME nor CAMERA_BOX_ASRC_SOURCE_NAME. */
+					 * (not per trusted marker) -- STRIH runs the same DLL but has none of
+					 * camerabox::CB_DOCK_LOCK_SOURCE_NAMES nor CAMERA_BOX_ASRC_SOURCE_NAME.
+					 * obs#108: a candidate that exists but is hidden in the program is no
+					 * lock source either. */
 					st->cb_lock_source_missing_logged = true;
+					st->cb_lock_source_idx = -1;
 					blog(LOG_WARNING,
-					     "av-sync-dock: LOCK-CORRECT unavailable -- source '%s' not found on "
-					     "this box (further occurrences suppressed until it appears)",
-					     CAMERA_BOX_LOCK_SOURCE_NAME);
+					     "av-sync-dock: LOCK-CORRECT unavailable -- no lock source shown in the program "
+					     "(candidates '%s', '%s'; further occurrences suppressed until one is shown)",
+					     camerabox::CB_DOCK_LOCK_SOURCE_NAMES[0], camerabox::CB_DOCK_LOCK_SOURCE_NAMES[1]);
 				}
 			}
 		} else {
