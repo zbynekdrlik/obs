@@ -122,7 +122,9 @@ fn the_lock_source_is_the_candidate_the_program_shows() {
 
 #[test]
 fn the_glue_reads_and_applies_the_picked_source_and_names_it() {
-    let src = squish(&av_sync_dock_output::source());
+    // Adjacent C string literals ("a " "b") are one string to the compiler: join them so a format
+    // string split over lines reads as the line it prints.
+    let src = squish(&av_sync_dock_output::source()).replace("\" \"", "");
     assert!(
         !src.contains("CAMERA_BOX_LOCK_SOURCE_NAME"),
         "obs#108: the single hard-coded lock source name must be gone"
