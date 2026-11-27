@@ -164,9 +164,19 @@ fn the_glue_reads_and_applies_the_picked_source_and_names_it() {
     );
     assert!(
         src.contains(
-            "if (st->cb_lock_source_idx >= 0) st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();"
+            "if (switched) { st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock(); continue; }"
         ),
-        "obs#108: a switch from one lock source to another must drop the previous feed's offsets"
+        "obs#108: a switch from one lock source to another must drop the previous feed's offsets and \
+         skip this pass (its est was measured on the previous feed)"
+    );
+    assert!(
+        src.contains("const bool switched = st->cb_lock_source_idx >= 0;"),
+        "obs#108: a switch is a change from a real lock source"
+    );
+    assert!(
+        !src.contains("st->cb_lock_source_idx = -1;"),
+        "obs#108: a pass with no lock source shown must keep the last real lock source, so a switch \
+         through a scene without one still drops the old offsets"
     );
     let suggested = src
         .split("av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src %d -> %dms (measured offset=%.1fms)")

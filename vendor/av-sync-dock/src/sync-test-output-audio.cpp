@@ -719,11 +719,16 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 					if (lock_idx != st->cb_lock_source_idx) {
 						blog(LOG_INFO, "av-sync-dock: LOCK-CORRECT source '%s' (pin %d ms)", lock_name,
 						     (int)current_ms);
-						/* the offsets measured on the previous feed say nothing about this one */
-						if (st->cb_lock_source_idx >= 0)
-							st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
+						const bool switched = st->cb_lock_source_idx >= 0;
 						st->cb_lock_source_idx = lock_idx;
 						st->cb_last_seen_pin_ms = -1;
+						/* the offsets measured on the previous feed -- this pass's est included --
+						 * say nothing about this one: drop them and measure afresh, with no
+						 * suggestion and no display from this marker */
+						if (switched) {
+							st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
+							continue;
+						}
 					}
 					/* #1319 Part 2: a source-pin CHANGE (the E2E gate / operator moved
 					 * genlock_latency_ms_src) is exactly when the cluster can re-pick a wrong
@@ -832,7 +837,6 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 					static_assert(camerabox::CB_DOCK_LOCK_SOURCE_COUNT == 2,
 						      "obs#108: the unavailable line below names every lock source candidate");
 					st->cb_lock_source_missing_logged = true;
-					st->cb_lock_source_idx = -1;
 					blog(LOG_WARNING,
 					     "av-sync-dock: LOCK-CORRECT unavailable -- no lock source shown in the program "
 					     "(candidates '%s', '%s'; further occurrences suppressed until one is shown)",

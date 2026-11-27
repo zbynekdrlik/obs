@@ -336,7 +336,9 @@ struct sync_test_output
 	 * condition persists. Touched only on the audio decode worker. */
 	bool cb_lock_source_missing_logged = false; // obs#108: no lock source shown in the program
 	/* obs#108: index in camerabox::CB_DOCK_LOCK_SOURCE_NAMES of the last lock source read; -1 = none
-	 * yet. A change is logged once (`LOCK-CORRECT source '<name>' (pin N ms)`). Audio decode worker only. */
+	 * yet. A pass with no lock source shown keeps it, so a switch through such a scene still drops the
+	 * previous feed's offsets. A change is logged once (`LOCK-CORRECT source '<name>' (pin N ms)`).
+	 * Audio decode worker only. */
 	int cb_lock_source_idx = -1;
 	bool cb_rail_pinned_logged = false;         // pinned at a hardware rail with audio still early
 	/* #1319 Part 2: last genlock_latency_ms_src pin observed on a trusted push; -1 = none seen yet.
